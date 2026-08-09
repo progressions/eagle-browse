@@ -675,6 +675,51 @@ class EagleLibrary:
         self._invalidate_caches()
         return ok, errors
 
+    def import_inbox(
+        self,
+        inbox: Path | str | None = None,
+        *,
+        folder_ids: list[str] | None = None,
+        tags: list[str] | None = None,
+        move_source: bool = True,
+    ) -> list:
+        """Import all media from inbox into this library; reload new items into memory."""
+        from import_media import DEFAULT_INBOX, import_inbox as _import_inbox
+
+        inbox_path = Path(inbox or os.environ.get("EAGLE_INBOX", DEFAULT_INBOX)).expanduser()
+        results = _import_inbox(
+            self.root,
+            inbox_path,
+            folder_ids=folder_ids,
+            tags=tags,
+            move_source=move_source,
+        )
+        # Reload library so new items appear (simple + correct)
+        if any(r.ok for r in results):
+            self.load()
+        return results
+
+    def import_path(
+        self,
+        path: Path | str,
+        *,
+        folder_ids: list[str] | None = None,
+        tags: list[str] | None = None,
+        move_source: bool = True,
+    ):
+        from import_media import import_file
+
+        result = import_file(
+            self.root,
+            Path(path),
+            folder_ids=folder_ids,
+            tags=tags,
+            move_source=move_source,
+        )
+        if result.ok:
+            self.load()
+        return result
+
     def _update_item_unlocked(
         self,
         item_id: str,

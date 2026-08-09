@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -22,6 +23,7 @@ gi.require_version("GdkPixbuf", "2.0")
 
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk  # noqa: E402
 
+from import_media import DEFAULT_INBOX  # noqa: E402
 from library import DEFAULT_LIBRARY, EagleLibrary, Item, SmartFolder  # noqa: E402
 
 APP_ID = "cool.eagle.Browse"
@@ -119,6 +121,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._stage_dir = Path(
             os.environ.get("EAGLE_STAGE_DIR", str(DEFAULT_STAGE_DIR))
         ).expanduser()
+        self._inbox_dir = Path(
+            os.environ.get("EAGLE_INBOX", str(DEFAULT_INBOX))
+        ).expanduser()
         # Smart-folder ids that are expanded. Empty = all top levels collapsed.
         self._smart_expanded: set[str] = set()
         # Sidebar section headers (Smart folders / Folders)
@@ -129,6 +134,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._query_gen = 0  # bump to cancel stale background queries
         self._search_timeout_id = 0
         self._cols_sync_timeout_id = 0
+        self._inbox_poll_id = 0
+        self._inbox_importing = False
+        self._known_inbox_names: set[str] = set()
         self._scope_text = "all"
         self._thumb_size = THUMB_SIZE_DEFAULT
         self._toast_overlay = Adw.ToastOverlay()
@@ -138,6 +146,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._install_keybinds()
         self._populate_sidebar()
         self.refresh_items()
+        self._start_inbox_watcher()
 
     # ── UI ────────────────────────────────────────────────────────────
 
@@ -230,8 +239,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "1-5 rate · 0 clear · t tags · Space mark · Y copy · s stage · e Files · "
-                "+/- size · Enter open · y path · q quit"
+                "1-5 rate · t tags · i import inbox · Space mark · Y copy · s stage · "
+                "+/- size · Enter open · q quit"
             ),
             xalign=0,
         )
@@ -1207,6 +1216,146 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=work, name="eagle-stage", daemon=True).start()
 
+    # ── Inbox import / watcher ────────────────────────────────────────
+
+    def _start_inbox_watcher(self) -> None:
+        """Poll inbox every few seconds for new media (Dropbox-friendly)."""
+        if self._inbox_poll_id:
+            return
+        # name -> last seen size (stable size across polls ⇒ ready to import)
+        self._inbox_sizes: dict[str, int] = {}
+        self._inbox_stable: set[str] = set()
+
+        def tick() -> bool:
+            self._poll_inbox()
+            return True
+
+        self._inbox_poll_id = GLib.timeout_add_seconds(3, tick)
+        # First poll soon after open so files already in inbox get picked up
+        GLib.timeout_add_seconds(1, lambda: self._poll_inbox() or False)
+
+    def _poll_inbox(self) -> None:
+        if self._inbox_importing:
+            return
+        from import_media import list_inbox_files
+
+        try:
+            files = list_inbox_files(self._inbox_dir)
+        except OSError:
+            return
+
+        ready: set[str] = set()
+        current: dict[str, int] = {}
+        for p in files:
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                continue
+            if sz <= 0:
+                continue
+            current[p.name] = sz
+            prev = self._inbox_sizes.get(p.name)
+            if prev is not None and prev == sz:
+                # Seen twice with same size → settled
+                ready.add(p.name)
+            # else first sighting or still growing — wait another poll
+
+        self._inbox_sizes = current
+        # Forget stability for files that disappeared
+        self._inbox_stable &= set(current)
+
+        # Only import files not already processed this session
+        to_import = ready - self._known_inbox_names
+        if to_import:
+            # Mark as attempted so we don't re-queue every poll; cleared if still present after fail
+            self._known_inbox_names |= to_import
+            self.import_inbox(manual=False, only_names=set(to_import))
+
+    def import_inbox(
+        self,
+        *,
+        manual: bool = True,
+        only_names: set[str] | None = None,
+    ) -> None:
+        """Import media from the Dropbox Eunbi inbox into the Eagle library."""
+        if self._inbox_importing:
+            if manual:
+                self._toast("Import already running…")
+            return
+        inbox = self._inbox_dir
+        if not inbox.is_dir():
+            self._toast(f"Inbox not found: {inbox}")
+            return
+
+        self._inbox_importing = True
+        if manual:
+            self._toast(f"Importing from {inbox.name}…")
+
+        def work() -> None:
+            from import_media import import_file, list_inbox_files
+            from write import WriteError, write_session
+
+            files = list_inbox_files(inbox)
+            if only_names is not None:
+                files = [p for p in files if p.name in only_names]
+            results = []
+            try:
+                if files:
+                    with write_session(self.library.root):
+                        for f in files:
+                            try:
+                                if f.stat().st_size == 0:
+                                    continue
+                            except OSError:
+                                continue
+                            results.append(
+                                import_file(
+                                    self.library.root,
+                                    f,
+                                    move_source=True,
+                                    hold_lock=True,
+                                )
+                            )
+            except WriteError as exc:
+                err = str(exc)
+
+                def fail() -> bool:
+                    self._inbox_importing = False
+                    self._toast(f"Import locked: {err}")
+                    return False
+
+                GLib.idle_add(fail)
+                return
+
+            ok = sum(1 for r in results if r.ok)
+            fail_n = sum(1 for r in results if not r.ok and not r.skipped)
+            err_msgs = [r.error for r in results if r.error and not r.ok][:3]
+
+            def done() -> bool:
+                self._inbox_importing = False
+                if ok:
+                    try:
+                        self.library.load()
+                    except Exception as exc:  # noqa: BLE001
+                        self._toast(f"Imported {ok} but reload failed: {exc}")
+                        return False
+                    self._populate_sidebar(select_current=True)
+                    self.refresh_items()
+                msg = f"Imported {ok} into library"
+                if fail_n:
+                    msg += f" · {fail_n} failed"
+                    if err_msgs:
+                        msg += f" ({err_msgs[0]})"
+                if not results and manual:
+                    msg = f"Inbox empty · {inbox}"
+                if ok or manual or fail_n:
+                    self._toast(msg)
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=work, name="eagle-import", daemon=True).start()
+
     def open_selected(self) -> None:
         item = self.selected_item
         if not item:
@@ -1490,6 +1639,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return True
         if keyval in (Gdk.KEY_s, Gdk.KEY_S) and not ctrl:
             self.stage_marked()
+            return True
+        if keyval in (Gdk.KEY_i, Gdk.KEY_I) and not ctrl and not in_sidebar:
+            self.import_inbox(manual=True)
             return True
         if keyval in (Gdk.KEY_e, Gdk.KEY_E) and not ctrl and not in_sidebar:
             self.reveal_selected_in_files()

@@ -72,6 +72,27 @@ Eagle Browse can **write** item metadata into the library (tags, stars):
 - Prefer **one writer** (don’t run official Eagle edits at the same time)
 
 Smart folder **rules** are not edited in-app yet — see [docs/SMART_FOLDERS.md](docs/SMART_FOLDERS.md) for agent/JSON editing.
+
+### Inbox import (consume new media)
+
+Default inbox:
+
+`~/Dropbox/ISAAC/GENNIE/Eunbi/PICS/Eunbi`
+
+| Action | How |
+|--------|-----|
+| **Auto** | App polls every ~3s; when a file’s size is stable, it imports |
+| **Manual** | Press **`i`** to import everything currently in the inbox |
+| Override path | `EAGLE_INBOX=/path/to/folder eagle-browse` |
+
+Import:
+
+1. Copies into `Eunbi.library/images/<ID>.info/`
+2. Writes Eagle `metadata.json` + thumbnail (ffmpeg for video)
+3. Tags with `eunbi`, folder id for top-level **Eunbi**
+4. Moves original to `inbox/.imported/`
+
+Requires `ffmpeg` / `ffprobe` for video (and ImageMagick `convert` as thumb fallback).
 | `Y` | **Copy all marked paths** (newline-separated; if none marked, copies focused) |
 | `Ctrl+Y` | Copy marked as `file://` URIs |
 | `y` / `c` | Copy **one** focused path |
