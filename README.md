@@ -18,19 +18,36 @@ On Omarchy these are typically already present.
 ## Run
 
 ```bash
-cd ~/Work/tech/eagle-browse
-./eagle-browse
+# From source
+~/Work/tech/eagle-browse/eagle-browse
+
+# Or if installed on PATH (symlink in ~/.local/bin)
+eagle-browse
 ```
 
 Or point at another library:
 
 ```bash
-EAGLE_LIBRARY=/path/to/Something.library ./eagle-browse
+EAGLE_LIBRARY=/path/to/Something.library eagle-browse
 # or
-./eagle-browse /path/to/Something.library
+eagle-browse /path/to/Something.library
 ```
 
 Default library: `~/Dropbox/ISAAC/GENNIE/Eunbi.library`
+
+### Omarchy install
+
+```bash
+# Launcher on PATH
+ln -sfn ~/Work/tech/eagle-browse/eagle-browse ~/.local/bin/eagle-browse
+
+# Walker / app menu
+cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
+# (or use the installed copy under ~/.local/share/applications/eagle-browse.desktop)
+
+# Hotkey: Super+Shift+I  (set in ~/.config/hypr/bindings.conf)
+# bindd = SUPER SHIFT, I, Eagle Browse, exec, omarchy-launch-or-focus cool.eagle.Browse "uwsm-app -- $HOME/.local/bin/eagle-browse"
+```
 
 ## Hotkeys
 
