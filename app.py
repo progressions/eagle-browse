@@ -734,7 +734,34 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast("Nothing selected")
             return
         path = str(item.path)
-        # imv with explicit close/zoom binds — system config often omits Escape
+
+        # Video / audio → mpv (plays with keyboard controls)
+        if item.is_video or item.is_audio:
+            players = [
+                [
+                    "mpv",
+                    "--force-window=yes",
+                    "--keep-open=yes",  # don't quit at end; Esc/q to close
+                    "--osc=yes",
+                    path,
+                ],
+                ["xdg-open", path],
+            ]
+            for cmd in players:
+                try:
+                    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if cmd[0] == "mpv":
+                        kind = "Video" if item.is_video else "Audio"
+                        self._toast(
+                            f"{kind} · Space play/pause · ←→ seek · q/Esc close · f fullscreen"
+                        )
+                    return
+                except FileNotFoundError:
+                    continue
+            self._toast("Could not open media (install mpv?)")
+            return
+
+        # Images → imv with explicit close/zoom binds
         imv_cmd = [
             "imv",
             "-s",

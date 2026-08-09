@@ -39,21 +39,30 @@ Default library: `~/Dropbox/ISAAC/GENNIE/Eunbi.library`
 | `←` / `→` or `h` / `l` | Previous / next image |
 | `←` on leftmost column | Focus sidebar on the **current** smart folder / folder |
 | `↑` / `↓` or `k` / `j` | Image above / below (one row) |
-| `Enter` / `o` | Open image larger (`imv` / system viewer) |
+| `Enter` / `o` | Open larger: **images → imv**, **video/audio → mpv** |
 | `y` / `c` | **Copy absolute path** to clipboard |
 
 ### Image viewer (`imv`) keys
 
-When you press Enter on an image, **imv** opens. Useful keys:
-
 | Key | Action |
 |-----|--------|
-| **`q`** or **`Esc`** | Close the viewer |
-| `+` / `-` or `i` / `o` | Zoom in / out |
+| **`q`** or **`Esc`** | Close |
+| `+` / `-` | Zoom in / out |
 | `a` | Actual size (100%) |
 | `r` | Reset view |
 | `f` | Fullscreen |
-| arrows | Next/prev if multiple files (single file: pan depends on config) |
+
+### Video / audio player (`mpv`) keys
+
+| Key | Action |
+|-----|--------|
+| **`Space`** | Play / pause |
+| **`q`** or **`Esc`** | Close |
+| `←` / `→` | Seek ~5s |
+| `↑` / `↓` | Volume |
+| `f` | Fullscreen |
+| `m` | Mute |
+| `9` / `0` | Volume down / up |
 | `/` or `Ctrl+F` | Focus search |
 | `f` | Focus sidebar (smart folders + folders) |
 | `Enter` (in sidebar) | Toggle expand / collapse smart folder |
