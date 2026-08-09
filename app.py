@@ -230,8 +230,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "Space mark · Y copy marked · s stage · +/- thumb size · y copy one · "
-                "Enter open · ←→ move · Esc clear marks · f sidebar · q quit"
+                "Space mark · Y copy marked · s stage · e reveal in Files · y copy path · "
+                "+/- size · Enter open · file dialogs: Ctrl+L then paste · q quit"
             ),
             xalign=0,
         )
@@ -981,7 +981,30 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         path = str(item.path)
         if not self._clipboard_set_text(path):
             return
-        self._toast(f"Copied path · {item.display_name}")
+        # Hint for GTK/Omarchy file pickers (website uploads, etc.)
+        self._toast(f"Copied · Ctrl+L in file dialog, paste path, Enter")
+
+    def reveal_selected_in_files(self) -> None:
+        """Open Nautilus with the focused (or first marked) file selected."""
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        path = str(items[0].path.resolve())
+        # Prefer selecting the file; fall back to opening its folder
+        commands = [
+            ["nautilus", "--select", path],
+            ["xdg-open", str(Path(path).parent)],
+        ]
+        for cmd in commands:
+            try:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if cmd[0] == "nautilus":
+                    self._toast("Opened in Files · drag into the upload dialog if needed")
+                return
+            except FileNotFoundError:
+                continue
+        self._toast("Could not open file manager")
 
     def copy_marked_paths(self, *, as_file_uris: bool = False) -> None:
         items = self._effective_hand_off_items()

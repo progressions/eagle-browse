@@ -73,6 +73,17 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
    Override: `EAGLE_STAGE_DIR=/path/to/folder eagle-browse`  
 4. On another machine, import that Dropbox folder into Lightroom (or watch it)
 
+### Website upload / Omarchy file dialog
+
+Browsers open the system file picker (GTK portal). It does **not** auto-jump to a copied path — you paste into the location bar:
+
+1. In Eagle Browse: select image → **`y`** (copy absolute path)  
+2. In the file dialog: **`Ctrl+L`** (open location / path bar)  
+3. **`Ctrl+V`** paste the path → **Enter**  
+   - Paste the **full file path** (what `y` copies), not only the folder  
+
+**Alternative:** **`e`** in Eagle Browse opens **Files (Nautilus)** with that image selected — then drag it into the upload dialog if the site accepts drag-and-drop.
+
 ### Image viewer (`imv`) keys
 
 | Key | Action |
