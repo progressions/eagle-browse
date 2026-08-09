@@ -113,6 +113,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.library = library
         self.current_folder_id: str | None = None
         self.current_smart_folder_id: str | None = None
+        # Virtual views: None | "untagged" | "uncategorized"
+        self._special_view: str | None = None
         self.include_descendants = True
         self.selected_item: Item | None = None
         self._items: list[Item] = []
@@ -133,6 +135,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._smart_expanded: set[str] = set()
         # Sidebar section headers (Smart folders / Folders)
         self._folders_section_expanded = False  # collapsible; start closed
+        self._left_sidebar_open = True
+        self._right_sidebar_open = True
+        self._grid_has_focus = False
+        self._last_focus_idx = 0
         # Forced grid column count (min_columns == max_columns). Arrow-down
         # must step by exactly this many items or selection drifts diagonally.
         self._cols = 4
@@ -177,17 +183,34 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         body.set_vexpand(True)
         root.append(body)
 
-        # Sidebar: folders
-        side_scroll = Gtk.ScrolledWindow()
-        side_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        side_scroll.set_size_request(280, -1)
-        side_scroll.add_css_class("sidebar")
+        # Left sidebar: folders (collapsible pane)
+        LEFT_W = 280
+        self.left_sidebar = Gtk.ScrolledWindow()
+        self.left_sidebar.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.left_sidebar.set_size_request(LEFT_W, -1)
+        self.left_sidebar.set_hexpand(False)
+        self.left_sidebar.add_css_class("sidebar")
+        self.left_sidebar.add_css_class("left-sidebar")
+        css_left = Gtk.CssProvider()
+        css_left.load_from_data(
+            f"""
+            scrolledwindow.left-sidebar {{
+                min-width: {LEFT_W}px;
+                max-width: {LEFT_W}px;
+            }}
+            """.encode()
+        )
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            css_left,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
 
         self.folder_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.folder_list.add_css_class("navigation-sidebar")
         self.folder_list.connect("row-selected", self._on_sidebar_selected)
-        side_scroll.set_child(self.folder_list)
-        body.append(side_scroll)
+        self.left_sidebar.set_child(self.folder_list)
+        body.append(self.left_sidebar)
 
         # Main: filter bar + grid + status
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -204,6 +227,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         filter_bar.set_margin_bottom(2)
 
         filter_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.btn_toggle_left = Gtk.Button(label="◀ Nav")
+        self.btn_toggle_left.add_css_class("flat")
+        self.btn_toggle_left.set_tooltip_text("Collapse/expand left sidebar")
+        self.btn_toggle_left.connect("clicked", lambda *_: self.toggle_left_sidebar())
+        filter_btns.append(self.btn_toggle_left)
+
         for label, handler in (
             ("Tags", self.open_view_tag_filter),
             ("Folders", self.open_view_folder_filter),
@@ -220,6 +249,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         clear_btn.add_css_class("flat")
         clear_btn.connect("clicked", lambda *_: self.clear_view_filters())
         filter_btns.append(clear_btn)
+
+        self.btn_toggle_right = Gtk.Button(label="Inspector ▶")
+        self.btn_toggle_right.add_css_class("flat")
+        self.btn_toggle_right.set_tooltip_text("Collapse/expand right inspector")
+        self.btn_toggle_right.connect("clicked", lambda *_: self.toggle_right_sidebar())
+        filter_btns.append(self.btn_toggle_right)
         filter_bar.append(filter_btns)
 
         self.filter_chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -250,6 +285,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         self.store = Gio.ListStore(item_type=ItemObject)
         self.selection = Gtk.SingleSelection(model=self.store)
+        self.selection.set_can_unselect(True)
+        self.selection.set_autoselect(False)
         self.selection.connect("notify::selected-item", self._on_grid_selection)
 
         factory = Gtk.SignalListItemFactory()
@@ -272,6 +309,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.grid.connect("map", lambda *_: self._schedule_column_sync())
         self.connect("notify::default-width", lambda *_: self._schedule_column_sync())
         GLib.idle_add(self._sync_columns)
+
+        # Only show blue selection highlight when the grid actually has focus
+        grid_focus = Gtk.EventControllerFocus()
+        grid_focus.connect("enter", lambda *_: self._set_grid_focus(True))
+        grid_focus.connect("leave", lambda *_: self._set_grid_focus(False))
+        self.grid.add_controller(grid_focus)
+        # Also track clicks that focus the grid
+        self.grid.connect("notify::has-focus", self._on_grid_has_focus_notify)
 
         # Status bar
         status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -306,7 +351,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         grid_col.append(hints)
 
         # Right: inspector (thumbnail, rating, tags, folders)
-        mid.append(self._build_inspector())
+        self.inspector_sidebar = self._build_inspector()
+        mid.append(self.inspector_sidebar)
 
     def _build_inspector(self) -> Gtk.Widget:
         """Right sidebar: preview + rating + tags + folders for selection."""
@@ -612,6 +658,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         kind: str,
         folder_id: str | None = None,
         smart_folder_id: str | None = None,
+        special_view: str | None = None,
         dim: bool = False,
         has_children: bool = False,
         expanded: bool = False,
@@ -620,6 +667,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         row.row_kind = kind  # type: ignore[attr-defined]
         row.folder_id = folder_id  # type: ignore[attr-defined]
         row.smart_folder_id = smart_folder_id  # type: ignore[attr-defined]
+        row.special_view = special_view  # type: ignore[attr-defined]
         row.has_children = has_children  # type: ignore[attr-defined]
         row.expanded = expanded  # type: ignore[attr-defined]
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -727,6 +775,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         all_row = self._make_nav_row(label="All items", kind="all")
         self.folder_list.append(all_row)
+        self.folder_list.append(
+            self._make_nav_row(
+                label="Untagged", kind="special", special_view="untagged"
+            )
+        )
+        self.folder_list.append(
+            self._make_nav_row(
+                label="Uncategorized", kind="special", special_view="uncategorized"
+            )
+        )
 
         # Smart folders first — primary navigation; top levels collapsed by default
         if self.library.smart_folders:
@@ -765,12 +823,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if kind in ("header", "section"):
             # Section headers don't change the grid filter
             return
+        new_special: str | None = None
         if kind == "smart":
             new_smart = getattr(row, "smart_folder_id", None)
             new_folder = None
         elif kind == "folder":
             new_smart = None
             new_folder = getattr(row, "folder_id", None)
+        elif kind == "special":
+            new_smart = None
+            new_folder = None
+            new_special = getattr(row, "special_view", None)
         else:  # all
             new_smart = None
             new_folder = None
@@ -779,16 +842,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if (
             new_smart == self.current_smart_folder_id
             and new_folder == self.current_folder_id
+            and new_special == self._special_view
         ):
             return
 
         self.current_smart_folder_id = new_smart
         self.current_folder_id = new_folder
+        self._special_view = new_special
         self.refresh_items()
 
     def _restore_sidebar_selection(self) -> None:
         target_smart = self.current_smart_folder_id
         target_folder = self.current_folder_id
+        target_special = self._special_view
         # Expand ancestors / Folders section, rebuild if the tree shape must change
         before_smart = set(self._smart_expanded)
         before_folders = self._folders_section_expanded
@@ -820,7 +886,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 ):
                     match = row
                     break
-                if not target_smart and not target_folder and kind == "all":
+                if (
+                    target_special
+                    and kind == "special"
+                    and getattr(row, "special_view", None) == target_special
+                ):
+                    match = row
+                    break
+                if (
+                    not target_smart
+                    and not target_folder
+                    and not target_special
+                    and kind == "all"
+                ):
                     match = row
                     break
             row = row.get_next_sibling()
@@ -925,6 +1003,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     # ── Grid ──────────────────────────────────────────────────────────
 
     def _scope_label(self) -> str:
+        if self._special_view == "untagged":
+            return "Untagged"
+        if self._special_view == "uncategorized":
+            return "Uncategorized"
         if self.current_smart_folder_id:
             return "⚡ " + self.library.smart_folder_paths.get(
                 self.current_smart_folder_id, self.current_smart_folder_id
@@ -938,12 +1020,59 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return scope
         return "all"
 
+    def toggle_left_sidebar(self) -> None:
+        self._left_sidebar_open = not self._left_sidebar_open
+        self.left_sidebar.set_visible(self._left_sidebar_open)
+        self.btn_toggle_left.set_label(
+            "◀ Nav" if self._left_sidebar_open else "▶ Nav"
+        )
+        self._schedule_column_sync()
+
+    def toggle_right_sidebar(self) -> None:
+        self._right_sidebar_open = not self._right_sidebar_open
+        self.inspector_sidebar.set_visible(self._right_sidebar_open)
+        self.btn_toggle_right.set_label(
+            "Inspector ▶" if self._right_sidebar_open else "Inspector ◀"
+        )
+        self._schedule_column_sync()
+
+    def _set_grid_focus(self, focused: bool) -> None:
+        self._grid_has_focus = focused
+        if focused:
+            # Restore blue highlight on last focused asset
+            n = self.store.get_n_items()
+            if n == 0:
+                return
+            idx = self._last_focus_idx if 0 <= self._last_focus_idx < n else 0
+            cur = self.selection.get_selected()
+            if cur == Gtk.INVALID_LIST_POSITION:
+                self.selection.set_selected(idx)
+                obj = self.selection.get_selected_item()
+                self.selected_item = obj.item if obj else None
+                if self.selected_item and not self._marked:
+                    self._marked = {self.selected_item.id}
+                self._update_path_label()
+                self.update_inspector()
+        else:
+            # Hide blue selection when focus is in search / sidebars
+            idx = self.selection.get_selected()
+            if idx != Gtk.INVALID_LIST_POSITION:
+                self._last_focus_idx = int(idx)
+            try:
+                self.selection.set_selected(Gtk.INVALID_LIST_POSITION)
+            except Exception:
+                pass
+
+    def _on_grid_has_focus_notify(self, *_args) -> None:
+        self._set_grid_focus(self.grid.has_focus())
+
     def refresh_items(self) -> None:
         """Kick off a background query so the UI never freezes on smart folders."""
         self._query_gen += 1
         gen = self._query_gen
         folder_id = self.current_folder_id
         smart_id = self.current_smart_folder_id
+        special = self._special_view
         descendants = self.include_descendants
         search = self._filter_text
         # Snapshot filters for the worker thread
@@ -952,13 +1081,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.status_left.set_text(f"Loading… · {scope}")
 
         def work() -> None:
-            items = self.library.query(
-                folder_id=folder_id,
-                smart_folder_id=smart_id,
-                include_descendants=descendants,
-                search=search,
-                include_deleted=False,
-            )
+            if special in ("untagged", "uncategorized"):
+                items = self.library.query(
+                    search=search,
+                    include_deleted=False,
+                )
+                if special == "untagged":
+                    items = [it for it in items if not it.tags]
+                else:
+                    items = [it for it in items if not it.folders]
+            else:
+                items = self.library.query(
+                    folder_id=folder_id,
+                    smart_folder_id=smart_id,
+                    include_descendants=descendants,
+                    search=search,
+                    include_deleted=False,
+                )
             if vf.active():
                 items = [it for it in items if item_matches_view_filters(it, vf)]
             total = len(items)
@@ -973,14 +1112,26 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 for item in page:
                     self.store.append(ItemObject(item))
                 if page:
-                    self.selection.set_selected(0)
-                    # Fresh page: single-select first item as anchor
                     self._sel_anchor = 0
+                    self._last_focus_idx = 0
                     self._marked = {page[0].id}
+                    self.selected_item = page[0]
+                    # Only show blue highlight if grid currently has focus
+                    if self._grid_has_focus:
+                        self.selection.set_selected(0)
+                    else:
+                        try:
+                            self.selection.set_selected(Gtk.INVALID_LIST_POSITION)
+                        except Exception:
+                            self.selection.set_selected(0)
                 else:
                     self.selected_item = None
                     self._marked.clear()
                     self._sel_anchor = 0
+                    try:
+                        self.selection.set_selected(Gtk.INVALID_LIST_POSITION)
+                    except Exception:
+                        pass
                 note = f" · showing first {PAGE_SOFT_CAP} of {total}" if truncated else ""
                 self._scope_text = f"{total} items · {scope}{note}"
                 self._refresh_status()
@@ -1281,6 +1432,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if n == 0 or idx < 0 or idx >= n:
             return
         item = self._items[idx]
+        self._last_focus_idx = idx
         self.selection.set_selected(idx)
         self.grid.scroll_to(
             idx, Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None
@@ -2271,6 +2423,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         new = max(0, min(n - 1, int(idx) + delta))
         # Preserve multi-select when navigating without Shift after building one
         if not extend and (keep_selection or len(self._marked) > 1):
+            self._last_focus_idx = new
             self.selection.set_selected(new)
             self.grid.scroll_to(
                 new, Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None
@@ -2278,6 +2431,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             obj = self.selection.get_selected_item()
             self.selected_item = obj.item if obj else None
             self._update_path_label()
+            self.update_inspector()
             self.grid.grab_focus()
             return
         self._select_index(new, ctrl=False, shift=extend)

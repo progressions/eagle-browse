@@ -75,6 +75,13 @@ Shows the focused asset (or **common** values when multi-selected):
 | `Esc` | Clear marks → clear view filters → clear search |
 | `b` | Focus **sidebar** |
 
+Left nav includes **Untagged** and **Uncategorized** virtual views.
+
+### Collapsible sidebars
+
+- **◀ Nav** / **Inspector ▶** buttons on the filter bar collapse the left nav and right inspector.
+- Blue grid highlight only shows while the **grid has keyboard/mouse focus** (not when typing in search or using the sidebars). Multi-select checkmarks still show.
+
 ### View filter bar (top of grid)
 
 Buttons: **Tags · Folders · Type · Size · Duration · Clear filters**
