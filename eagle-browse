@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Launch Eagle Browse against your Dropbox library (override with EAGLE_LIBRARY).
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export EAGLE_LIBRARY="${EAGLE_LIBRARY:-$HOME/Dropbox/ISAAC/GENNIE/Eunbi.library}"
+exec python3 "$DIR/app.py" "$@"

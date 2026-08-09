@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Eagle Browse
+Comment=Browse Eagle.cool library and copy image paths
+Exec=/home/isaac/Work/tech/eagle-browse/eagle-browse
+Icon=folder-pictures
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;
+Keywords=eagle;images;library;picker;
