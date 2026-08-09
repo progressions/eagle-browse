@@ -282,8 +282,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "Shift+arrows / Shift+click range · Ctrl+click add · Space toggle · "
-                "Y/y copy selection · t tags · f folders · 1-5 rate · q quit"
+                "Shift+arrows range · Ctrl+arrows move · Space add/remove · "
+                "Ctrl+click add · Y copy selection · t tags · f folders · q quit"
             ),
             xalign=0,
         )
@@ -2015,7 +2015,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         Move focus by delta indices.
         extend=True (Shift): select range from anchor to new focus.
         keep_selection=True (Ctrl): move focus only; multi-selection unchanged.
-        neither: select only the new focus (and set anchor).
+        If multi-select is already active (>1), plain arrows also keep selection
+        (only move focus) so checkboxes don't vanish when releasing Shift.
         """
         n = self.store.get_n_items()
         if n == 0:
@@ -2024,8 +2025,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if idx == Gtk.INVALID_LIST_POSITION:
             idx = 0
         new = max(0, min(n - 1, int(idx) + delta))
-        if keep_selection and not extend:
-            # Move cursor only — selection set stays put (then Space / Ctrl+Space to add)
+        # Preserve multi-select when navigating without Shift after building one
+        if not extend and (keep_selection or len(self._marked) > 1):
             self.selection.set_selected(new)
             self.grid.scroll_to(
                 new, Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None
@@ -2247,29 +2248,44 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         #   Left/Right / h/l  → previous / next image
         #   Up/Down / k/j     → image above / below (exactly one row)
         #   Shift+arrows      → extend multi-selection range
+        #   Ctrl+arrows       → move focus only (keep multi-selection); then Space to add
         #   Left on first column → focus sidebar
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
-        if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right, Gdk.KEY_l, Gdk.KEY_L):
-            self.move_selection(1, extend=shift)
+        # Note: ctrl already computed above for other bindings
+        if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right) or (
+            keyval in (Gdk.KEY_l, Gdk.KEY_L) and not ctrl
+        ):
+            self.move_selection(1, extend=shift, keep_selection=ctrl and not shift)
             return True
-        if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left, Gdk.KEY_h, Gdk.KEY_H):
+        if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left) or (
+            keyval in (Gdk.KEY_h, Gdk.KEY_H) and not ctrl
+        ):
             idx = self.selection.get_selected()
             n = self.store.get_n_items()
             cols = max(1, self._cols)
             if (
                 not shift
+                and not ctrl
                 and (n == 0 or idx == Gtk.INVALID_LIST_POSITION or int(idx) % cols == 0)
             ):
                 # Leftmost cell in the row (or empty grid) → jump to sidebar
                 self.focus_folders()
                 return True
-            self.move_selection(-1, extend=shift)
+            self.move_selection(-1, extend=shift, keep_selection=ctrl and not shift)
             return True
-        if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down, Gdk.KEY_j, Gdk.KEY_J):
-            self.move_selection(self._cols, extend=shift)
+        if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down) or (
+            keyval in (Gdk.KEY_j, Gdk.KEY_J) and not ctrl
+        ):
+            self.move_selection(
+                self._cols, extend=shift, keep_selection=ctrl and not shift
+            )
             return True
-        if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up, Gdk.KEY_k, Gdk.KEY_K):
-            self.move_selection(-self._cols, extend=shift)
+        if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up) or (
+            keyval in (Gdk.KEY_k, Gdk.KEY_K) and not ctrl
+        ):
+            self.move_selection(
+                -self._cols, extend=shift, keep_selection=ctrl and not shift
+            )
             return True
 
         return False
