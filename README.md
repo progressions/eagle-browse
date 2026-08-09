@@ -57,7 +57,20 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `←` on leftmost column | Focus sidebar on the **current** smart folder / folder |
 | `↑` / `↓` or `k` / `j` | Image above / below (one row) |
 | `Enter` / `o` | Open larger: **images → imv**, **video/audio → mpv** |
-| `y` / `c` | **Copy absolute path** to clipboard |
+| `Space` | **Mark / unmark** current item (multi-select) |
+| `Y` | **Copy all marked paths** (newline-separated; if none marked, copies focused) |
+| `Ctrl+Y` | Copy marked as `file://` URIs |
+| `y` / `c` | Copy **one** focused path |
+| `s` | **Stage** marked files → outbox folder (copy; library stays read-only) |
+| `Esc` | Clear marks (then clear search) |
+
+### Multi-file handoff (Lightroom / other apps)
+
+1. Browse smart folder, **`Space`** to mark several images  
+2. **`Y`** — paste paths into a tool, **or** **`s`** — copy files to staging  
+3. Default stage dir: `~/Dropbox/ISAAC/GENNIE/Eunbi/outbox`  
+   Override: `EAGLE_STAGE_DIR=/path/to/folder eagle-browse`  
+4. On another machine, import that Dropbox folder into Lightroom (or watch it)
 
 ### Image viewer (`imv`) keys
 

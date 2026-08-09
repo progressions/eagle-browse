@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import threading
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -28,6 +30,8 @@ CELL_W = THUMB_SIZE + 12
 CELL_H = THUMB_SIZE + 36  # square + caption
 PAGE_SOFT_CAP = 500  # smaller page = snappier folder switches
 SEARCH_DEBOUNCE_MS = 150
+# Staging handoff (copy out of library — never writes into .library)
+DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
 
 # Decode thumbs off the UI thread; textures are applied on the main loop.
 _thumb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="eagle-thumb")
@@ -97,6 +101,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.selected_item: Item | None = None
         self._items: list[Item] = []
         self._filter_text = ""
+        # Multi-select marks (item ids) — hand off via Y (paths) / s (stage)
+        self._marked: set[str] = set()
+        self._stage_dir = Path(
+            os.environ.get("EAGLE_STAGE_DIR", str(DEFAULT_STAGE_DIR))
+        ).expanduser()
         # Smart-folder ids that are expanded. Empty = all top levels collapsed.
         self._smart_expanded: set[str] = set()
         # Forced grid column count (min_columns == max_columns). Arrow-down
@@ -105,6 +114,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._query_gen = 0  # bump to cancel stale background queries
         self._search_timeout_id = 0
         self._cols_sync_timeout_id = 0
+        self._scope_text = "all"
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
 
@@ -204,8 +214,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "←→ move · ← from first col → sidebar · Enter open · y copy path · "
-                "f sidebar · o open · / search · r reload · q quit"
+                "Space mark · Y copy marked · s stage marked · y copy one · Enter open · "
+                "←→ move · Esc clear marks · f sidebar · r reload · q quit"
             ),
             xalign=0,
         )
@@ -546,7 +556,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 else:
                     self.selected_item = None
                 note = f" · showing first {PAGE_SOFT_CAP} of {total}" if truncated else ""
-                self.status_left.set_text(f"{total} items · {scope}{note}")
+                self._scope_text = f"{total} items · {scope}{note}"
+                self._refresh_status()
                 self._update_path_label()
                 return False
 
@@ -584,6 +595,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         picture.set_valign(Gtk.Align.FILL)
         tile.set_child(picture)
 
+        # Multi-select mark (top-left)
+        mark = Gtk.Label(label="✓")
+        mark.add_css_class("osd")
+        mark.add_css_class("heading")
+        mark.set_halign(Gtk.Align.START)
+        mark.set_valign(Gtk.Align.START)
+        mark.set_margin_start(6)
+        mark.set_margin_top(4)
+        mark.set_visible(False)
+        tile.add_overlay(mark)
+
         # Type badge (video / audio / other)
         badge = Gtk.Label(xalign=1.0)
         badge.add_css_class("osd")
@@ -614,6 +636,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         list_item.label = label  # type: ignore[attr-defined]
         list_item.badge = badge  # type: ignore[attr-defined]
         list_item.icon = icon  # type: ignore[attr-defined]
+        list_item.mark = mark  # type: ignore[attr-defined]
+        list_item.card = card  # type: ignore[attr-defined]
 
     def _on_factory_bind(self, _factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem) -> None:
         obj = list_item.get_item()
@@ -624,6 +648,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         picture: Gtk.Picture = list_item.picture  # type: ignore[attr-defined]
         badge: Gtk.Label = list_item.badge  # type: ignore[attr-defined]
         icon: Gtk.Image = list_item.icon  # type: ignore[attr-defined]
+        mark: Gtk.Label = list_item.mark  # type: ignore[attr-defined]
+        card: Gtk.Box = list_item.card  # type: ignore[attr-defined]
+
+        marked = item.id in self._marked
+        mark.set_visible(marked)
+        if marked:
+            card.add_css_class("accent")
+        else:
+            card.remove_css_class("accent")
 
         badge_text = _type_badge(item)
         badge.set_text(badge_text)
@@ -705,7 +738,90 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         else:
             self.status_path.set_text("")
 
+    def _refresh_status(self) -> None:
+        marks = len(self._marked)
+        mark_bit = f" · ✓ {marks} marked" if marks else ""
+        base = getattr(self, "_scope_text", "") or ""
+        self.status_left.set_text(f"{base}{mark_bit}")
+
+    def _marked_items(self) -> list[Item]:
+        """Marked items in current grid order, then any marks not on this page."""
+        seen: set[str] = set()
+        out: list[Item] = []
+        for it in self._items:
+            if it.id in self._marked:
+                out.append(it)
+                seen.add(it.id)
+        for mid in self._marked:
+            if mid in seen:
+                continue
+            it = self.library.items_by_id.get(mid)
+            if it is not None:
+                out.append(it)
+        return out
+
+    def _effective_hand_off_items(self) -> list[Item]:
+        """Marked set if any; otherwise the focused item alone."""
+        marked = self._marked_items()
+        if marked:
+            return marked
+        if self.selected_item is not None:
+            return [self.selected_item]
+        return []
+
+    def _clipboard_set_text(self, text: str) -> bool:
+        display = Gdk.Display.get_default()
+        if display is None:
+            self._toast("No display for clipboard")
+            return False
+        display.get_clipboard().set(text)
+        try:
+            subprocess.run(["wl-copy", text], check=False, timeout=3)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return True
+
+    def _rebind_grid_keep_selection(self) -> None:
+        """Rebuild ListStore so mark overlays rebind; keep cursor position."""
+        idx = self.selection.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION:
+            idx = 0
+        items = list(self._items)
+        self.store.remove_all()
+        for item in items:
+            self.store.append(ItemObject(item))
+        n = self.store.get_n_items()
+        if n and int(idx) < n:
+            self.selection.set_selected(int(idx))
+            self.grid.scroll_to(
+                int(idx), Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None
+            )
+
     # ── Actions ───────────────────────────────────────────────────────
+
+    def toggle_mark_selected(self) -> None:
+        item = self.selected_item
+        if not item:
+            self._toast("Nothing selected")
+            return
+        if item.id in self._marked:
+            self._marked.discard(item.id)
+            self._toast(f"Unmarked · {item.display_name}")
+        else:
+            self._marked.add(item.id)
+            self._toast(f"Marked · {item.display_name} · {len(self._marked)} total")
+        self._rebind_grid_keep_selection()
+        self._refresh_status()
+
+    def clear_marks(self) -> bool:
+        if not self._marked:
+            return False
+        n = len(self._marked)
+        self._marked.clear()
+        self._rebind_grid_keep_selection()
+        self._refresh_status()
+        self._toast(f"Cleared {n} marks")
+        return True
 
     def copy_selected_path(self) -> None:
         item = self.selected_item
@@ -713,20 +829,76 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast("Nothing selected")
             return
         path = str(item.path)
-        display = Gdk.Display.get_default()
-        if display is None:
-            self._toast("No display for clipboard")
+        if not self._clipboard_set_text(path):
             return
-        clipboard = display.get_clipboard()
-        clipboard.set(path)
-
-        # Also push to wl-copy for tools that only read the primary Wayland clipboard path
-        try:
-            subprocess.run(["wl-copy", path], check=False, timeout=2)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-
         self._toast(f"Copied path · {item.display_name}")
+
+    def copy_marked_paths(self, *, as_file_uris: bool = False) -> None:
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing to copy — mark with Space, or select one")
+            return
+        if as_file_uris:
+            lines = [
+                "file://" + urllib.parse.quote(str(it.path.resolve()), safe="/:")
+                for it in items
+            ]
+        else:
+            lines = [str(it.path.resolve()) for it in items]
+        text = "\n".join(lines)
+        if not self._clipboard_set_text(text):
+            return
+        kind = "file URIs" if as_file_uris else "paths"
+        if len(items) == 1 and not self._marked:
+            self._toast(f"Copied {kind} · {items[0].display_name}")
+        else:
+            self._toast(f"Copied {len(items)} {kind}")
+
+    def stage_marked(self) -> None:
+        """Copy marked (or focused) files into the stage/outbox directory."""
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing to stage — mark with Space, or select one")
+            return
+        stage = self._stage_dir
+        self._toast(f"Staging {len(items)} → {stage.name}…")
+
+        def work() -> None:
+            try:
+                stage.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                GLib.idle_add(lambda: self._toast(f"Stage dir failed: {exc}") or False)
+                return
+            ok = 0
+            errors = 0
+            for it in items:
+                src = it.path
+                if not src.is_file():
+                    errors += 1
+                    continue
+                dest = stage / src.name
+                if dest.exists():
+                    stem, suf = dest.stem, dest.suffix
+                    n = 2
+                    while dest.exists():
+                        dest = stage / f"{stem}_{n}{suf}"
+                        n += 1
+                try:
+                    shutil.copy2(src, dest)
+                    ok += 1
+                except OSError:
+                    errors += 1
+
+            def done() -> bool:
+                msg = f"Staged {ok} → {stage}"
+                if errors:
+                    msg += f" · {errors} failed"
+                self._toast(msg)
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=work, name="eagle-stage", daemon=True).start()
 
     def open_selected(self) -> None:
         item = self.selected_item
@@ -928,6 +1100,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.search.set_text("")
                 self.focus_grid()
                 return True
+            if self.clear_marks():
+                return True
             if self._filter_text:
                 self.search.set_text("")
                 return True
@@ -969,8 +1143,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ):
                 return False  # ListBox handles vertical movement
 
-        if keyval in (Gdk.KEY_y, Gdk.KEY_Y, Gdk.KEY_c, Gdk.KEY_C):
+        # Multi-select handoff (grid)
+        if not in_sidebar and keyval == Gdk.KEY_space:
+            self.toggle_mark_selected()
+            return True
+        # Y = all marked paths (or focused if none marked)
+        # Ctrl+Y = file:// URI list
+        # y / c = single focused path
+        if keyval in (Gdk.KEY_y, Gdk.KEY_Y) and ctrl:
+            self.copy_marked_paths(as_file_uris=True)
+            return True
+        if keyval == Gdk.KEY_Y:
+            self.copy_marked_paths(as_file_uris=False)
+            return True
+        if keyval in (Gdk.KEY_y, Gdk.KEY_c, Gdk.KEY_C):
             self.copy_selected_path()
+            return True
+        if keyval in (Gdk.KEY_s, Gdk.KEY_S) and not ctrl:
+            self.stage_marked()
             return True
         # Enter on image grid: open larger (sidebar Enter is handled above)
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
