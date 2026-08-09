@@ -219,6 +219,29 @@ def apply_tags(
     return data
 
 
+def apply_folders(
+    data: dict[str, Any],
+    *,
+    set_folders: list[str] | None = None,
+    add_folders: list[str] | None = None,
+    remove_folders: list[str] | None = None,
+) -> dict[str, Any]:
+    """Folder membership is a list of Eagle folder ids."""
+    if set_folders is not None:
+        folders = list(dict.fromkeys(f for f in set_folders if f))
+    else:
+        folders = list(data.get("folders") or [])
+        if add_folders:
+            for f in add_folders:
+                if f and f not in folders:
+                    folders.append(f)
+        if remove_folders:
+            remove = set(remove_folders)
+            folders = [f for f in folders if f not in remove]
+    data["folders"] = folders
+    return data
+
+
 @contextmanager
 def write_session(library_root: Path) -> Iterator[LibraryLock]:
     lock = LibraryLock(library_root)

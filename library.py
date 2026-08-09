@@ -588,6 +588,12 @@ class EagleLibrary:
         item.name_lower = item.name.lower()
         item.ext_lower = item.ext.lower()
 
+    def all_tags(self) -> list[str]:
+        tags: set[str] = set()
+        for it in self.items:
+            tags.update(it.tags)
+        return sorted(tags, key=str.lower)
+
     def update_item(
         self,
         item_id: str,
@@ -596,14 +602,18 @@ class EagleLibrary:
         set_tags: list[str] | None = None,
         add_tags: list[str] | None = None,
         remove_tags: list[str] | None = None,
+        set_folders: list[str] | None = None,
+        add_folders: list[str] | None = None,
+        remove_folders: list[str] | None = None,
     ) -> Item:
         """
-        Persist rating and/or tag changes for one item.
+        Persist rating, tag, and/or folder changes for one item.
 
         star: 1–5 to set, 0 or None to clear, omit (Ellipsis) to leave unchanged.
         """
         from write import (  # local import avoids cycles
             WriteError,
+            apply_folders,
             apply_star,
             apply_tags,
             load_item_metadata,
@@ -628,6 +638,17 @@ class EagleLibrary:
                     add_tags=add_tags,
                     remove_tags=remove_tags,
                 )
+            if (
+                set_folders is not None
+                or add_folders is not None
+                or remove_folders is not None
+            ):
+                apply_folders(
+                    data,
+                    set_folders=set_folders,
+                    add_folders=add_folders,
+                    remove_folders=remove_folders,
+                )
             save_item_metadata(self.root, item.item_dir, data)
 
         # Update in-memory model
@@ -635,6 +656,12 @@ class EagleLibrary:
             item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
         if set_tags is not None or add_tags is not None or remove_tags is not None:
             item.tags = list(data.get("tags") or [])
+        if (
+            set_folders is not None
+            or add_folders is not None
+            or remove_folders is not None
+        ):
+            item.folders = list(data.get("folders") or [])
         item.modification_time = int(data.get("modificationTime") or item.modification_time)
         self._refresh_item_derived(item)
         self._invalidate_caches()
@@ -647,8 +674,10 @@ class EagleLibrary:
         star: int | None | object = ...,  # type: ignore[assignment]
         add_tags: list[str] | None = None,
         remove_tags: list[str] | None = None,
+        add_folders: list[str] | None = None,
+        remove_folders: list[str] | None = None,
     ) -> tuple[int, list[str]]:
-        """Apply the same star/tag delta to many items. Returns (ok_count, errors)."""
+        """Apply the same star/tag/folder delta to many items. Returns (ok_count, errors)."""
         from write import WriteError, write_session
 
         ok = 0
@@ -664,6 +693,8 @@ class EagleLibrary:
                             star=star,
                             add_tags=add_tags,
                             remove_tags=remove_tags,
+                            add_folders=add_folders,
+                            remove_folders=remove_folders,
                         )
                         ok += 1
                     except WriteError as exc:
@@ -728,9 +759,13 @@ class EagleLibrary:
         set_tags: list[str] | None = None,
         add_tags: list[str] | None = None,
         remove_tags: list[str] | None = None,
+        set_folders: list[str] | None = None,
+        add_folders: list[str] | None = None,
+        remove_folders: list[str] | None = None,
     ) -> Item:
         from write import (
             WriteError,
+            apply_folders,
             apply_star,
             apply_tags,
             load_item_metadata,
@@ -753,12 +788,29 @@ class EagleLibrary:
                 add_tags=add_tags,
                 remove_tags=remove_tags,
             )
+        if (
+            set_folders is not None
+            or add_folders is not None
+            or remove_folders is not None
+        ):
+            apply_folders(
+                data,
+                set_folders=set_folders,
+                add_folders=add_folders,
+                remove_folders=remove_folders,
+            )
         save_item_metadata(self.root, item.item_dir, data)
 
         if star is not ...:
             item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
         if set_tags is not None or add_tags is not None or remove_tags is not None:
             item.tags = list(data.get("tags") or [])
+        if (
+            set_folders is not None
+            or add_folders is not None
+            or remove_folders is not None
+        ):
+            item.folders = list(data.get("folders") or [])
         item.modification_time = int(data.get("modificationTime") or item.modification_time)
         self._refresh_item_derived(item)
         return item

@@ -239,8 +239,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "1-5 rate · t tags · i import inbox · Space mark · Y copy · s stage · "
-                "+/- size · Enter open · q quit"
+                "1-5 rate · t tags · f folders · b sidebar · i import · Space mark · "
+                "Y copy · s stage · +/- size · Enter open · q quit"
             ),
             xalign=0,
         )
@@ -1090,7 +1090,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._toast(msg)
 
     def edit_tags_dialog(self) -> None:
-        """Prompt to add/remove tags for marked or focused items."""
+        """Keyboard tag picker: recent + autocomplete, Enter toggles, Esc closes."""
+        from picker import TogglePicker, load_recent
         from write import WriteError
 
         items = self._effective_hand_off_items()
@@ -1098,77 +1099,135 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast("Nothing selected")
             return
 
-        sample = items[0]
-        dialog = Adw.MessageDialog(
-            transient_for=self,
-            heading="Edit tags",
-            body=(
-                f"{len(items)} item(s). Comma-separated tags to add; "
-                f"prefix with - to remove.\nCurrent: {', '.join(sample.tags) or '(none)'}"
-            ),
-        )
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("apply", "Apply")
-        dialog.set_default_response("apply")
-        dialog.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        # Tag present on all items → active; on some → partial
+        tag_sets = [set(it.tags) for it in items]
+        active = set.intersection(*tag_sets) if tag_sets else set()
+        union = set.union(*tag_sets) if tag_sets else set()
+        partial = union - active
+        all_tags = self.library.all_tags()
+        # Ensure current tags appear even if rare
+        for t in union:
+            if t not in all_tags:
+                all_tags.append(t)
+        all_tags = sorted(set(all_tags), key=str.lower)
+        recent = load_recent("tags")
+        ids = [it.id for it in items]
+        n = len(items)
 
-        entry = Gtk.Entry()
-        entry.set_placeholder_text("eunbi, ready-to-post, -nsfw")
-        entry.set_margin_top(8)
-        dialog.set_extra_child(entry)
-
-        def on_response(dlg: Adw.MessageDialog, response: str) -> None:
-            if response != "apply":
-                dlg.destroy()
-                return
-            text = entry.get_text() or ""
-            add: list[str] = []
-            remove: list[str] = []
-            for part in text.split(","):
-                part = part.strip()
-                if not part:
-                    continue
-                if part.startswith("-") and len(part) > 1:
-                    remove.append(part[1:].strip())
-                else:
-                    add.append(part.lstrip("+").strip())
-            if not add and not remove:
-                dlg.destroy()
-                self._toast("No tag changes")
-                return
-            ids = [it.id for it in items]
+        def on_toggle(tag: str, turn_on: bool) -> None:
             try:
-                if len(ids) == 1:
-                    self.library.update_item(
-                        ids[0],
-                        add_tags=add or None,
-                        remove_tags=remove or None,
-                    )
-                    ok, errors = 1, []
+                if n == 1:
+                    if turn_on:
+                        self.library.update_item(ids[0], add_tags=[tag])
+                    else:
+                        self.library.update_item(ids[0], remove_tags=[tag])
                 else:
-                    ok, errors = self.library.update_items_batch(
-                        ids, add_tags=add or None, remove_tags=remove or None
-                    )
+                    if turn_on:
+                        self.library.update_items_batch(ids, add_tags=[tag])
+                    else:
+                        self.library.update_items_batch(ids, remove_tags=[tag])
             except WriteError as exc:
                 self._toast(str(exc))
-                dlg.destroy()
-                return
+                raise
             self._rebind_grid_keep_selection()
             self._update_path_label()
-            bits = []
-            if add:
-                bits.append("+" + ",".join(add))
-            if remove:
-                bits.append("-" + ",".join(remove))
-            msg = f"Tags {' '.join(bits)} · {ok} item(s)"
-            if errors:
-                msg += f" · {len(errors)} failed"
-            self._toast(msg)
-            dlg.destroy()
+            self._toast(("+ " if turn_on else "− ") + tag)
 
-        dialog.connect("response", on_response)
-        dialog.present()
-        entry.grab_focus()
+        def on_close() -> None:
+            self.grid.grab_focus()
+
+        picker = TogglePicker(
+            self,
+            title="Tags",
+            subtitle=f"{n} item(s) · Enter toggles · Esc closes",
+            all_values=all_tags,
+            active=active,
+            partial=partial,
+            recent=recent,
+            allow_create=True,
+            recent_kind="tags",
+            on_toggle=on_toggle,
+            on_close=on_close,
+        )
+        picker.present()
+
+    def edit_folders_dialog(self) -> None:
+        """Keyboard folder/category picker (same UX as tags)."""
+        from picker import TogglePicker, load_recent
+        from write import WriteError
+
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+
+        # Map display path ↔ folder id
+        id_to_path = dict(self.library.folder_paths)
+        path_to_id = {v: k for k, v in id_to_path.items()}
+        # Also bare names for short folders
+        for fid, path in id_to_path.items():
+            name = path.split(" / ")[-1]
+            path_to_id.setdefault(name, fid)
+
+        folder_sets = [set(it.folders) for it in items]
+        active_ids = set.intersection(*folder_sets) if folder_sets else set()
+        union_ids = set.union(*folder_sets) if folder_sets else set()
+        partial_ids = union_ids - active_ids
+
+        all_paths = sorted(id_to_path.values(), key=str.lower)
+        active_paths = {id_to_path[i] for i in active_ids if i in id_to_path}
+        partial_paths = {id_to_path[i] for i in partial_ids if i in id_to_path}
+        # Recent stored as paths
+        recent = [r for r in load_recent("folders") if r in path_to_id or r in id_to_path.values()]
+        ids = [it.id for it in items]
+        n = len(items)
+
+        def on_toggle(path_label: str, turn_on: bool) -> None:
+            fid = path_to_id.get(path_label)
+            if not fid:
+                # Try exact path match
+                for k, v in id_to_path.items():
+                    if v == path_label:
+                        fid = k
+                        break
+            if not fid:
+                self._toast(f"Unknown folder: {path_label}")
+                raise WriteError(f"Unknown folder: {path_label}")
+            try:
+                if n == 1:
+                    if turn_on:
+                        self.library.update_item(ids[0], add_folders=[fid])
+                    else:
+                        self.library.update_item(ids[0], remove_folders=[fid])
+                else:
+                    if turn_on:
+                        self.library.update_items_batch(ids, add_folders=[fid])
+                    else:
+                        self.library.update_items_batch(ids, remove_folders=[fid])
+            except WriteError as exc:
+                self._toast(str(exc))
+                raise
+            self._rebind_grid_keep_selection()
+            self._update_path_label()
+            self._toast(("+ " if turn_on else "− ") + path_label)
+
+        def on_close() -> None:
+            self.grid.grab_focus()
+
+        picker = TogglePicker(
+            self,
+            title="Folders / categories",
+            subtitle=f"{n} item(s) · Enter toggles · Esc closes · no new folders here",
+            all_values=all_paths,
+            active=active_paths,
+            partial=partial_paths,
+            recent=recent,
+            allow_create=False,
+            recent_kind="folders",
+            on_toggle=on_toggle,
+            on_close=on_close,
+        )
+        picker.present()
 
     def stage_marked(self) -> None:
         """Copy marked (or focused) files into the stage/outbox directory."""
@@ -1625,6 +1684,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if keyval in (Gdk.KEY_t, Gdk.KEY_T):
                 self.edit_tags_dialog()
                 return True
+            if keyval in (Gdk.KEY_f, Gdk.KEY_F):
+                self.edit_folders_dialog()
+                return True
         # Y = all marked paths (or focused if none marked)
         # Ctrl+Y = file:// URI list
         # y / c = single focused path
@@ -1667,7 +1729,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_r, Gdk.KEY_R):
             self.reload_library()
             return True
-        if keyval in (Gdk.KEY_f,):
+        # Sidebar focus was f (Eagle-style); now b — f is folders/categories
+        if keyval in (Gdk.KEY_b, Gdk.KEY_B) and not ctrl:
             self.focus_folders()
             return True
         if keyval in (Gdk.KEY_a, Gdk.KEY_A):
