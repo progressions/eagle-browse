@@ -119,8 +119,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._filter_text = ""
         # View filters: tags/folders/types include+exclude, dimensions, duration
         self._view_filters = ViewFilters()
-        # Multi-select marks (item ids) — hand off via Y (paths) / s (stage)
+        # Multi-selection (item ids) — Shift range / Ctrl add / Space toggle
+        # Used for path copy, tags, folders, rate, stage
         self._marked: set[str] = set()
+        self._sel_anchor: int = 0  # index for Shift-range selection
         self._stage_dir = Path(
             os.environ.get("EAGLE_STAGE_DIR", str(DEFAULT_STAGE_DIR))
         ).expanduser()
@@ -733,8 +735,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self.store.append(ItemObject(item))
                 if page:
                     self.selection.set_selected(0)
+                    # Fresh page: single-select first item as anchor
+                    self._sel_anchor = 0
+                    self._marked = {page[0].id}
                 else:
                     self.selected_item = None
+                    self._marked.clear()
+                    self._sel_anchor = 0
                 note = f" · showing first {PAGE_SOFT_CAP} of {total}" if truncated else ""
                 self._scope_text = f"{total} items · {scope}{note}"
                 self._refresh_status()
@@ -828,6 +835,28 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         list_item.stars = stars  # type: ignore[attr-defined]
         list_item.card = card  # type: ignore[attr-defined]
         list_item.tile = tile  # type: ignore[attr-defined]
+
+        # Click multi-select: plain / Shift-range / Ctrl-toggle
+        click = Gtk.GestureClick()
+        click.set_button(1)
+
+        def on_click(
+            gesture: Gtk.GestureClick,
+            _n: int,
+            _x: float,
+            _y: float,
+            li: Gtk.ListItem = list_item,
+        ) -> None:
+            pos = li.get_position()
+            if pos == Gtk.INVALID_LIST_POSITION:
+                return
+            state = gesture.get_current_event_state()
+            ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+            shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+            self._select_index(int(pos), ctrl=ctrl, shift=shift, from_click=True)
+
+        click.connect("pressed", on_click)
+        card.add_controller(click)
 
     def _apply_thumb_geometry(self, list_item: Gtk.ListItem) -> int:
         """Size card/tile/picture for current zoom level. Returns edge length."""
@@ -956,12 +985,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _refresh_status(self) -> None:
         marks = len(self._marked)
-        mark_bit = f" · ✓ {marks} marked" if marks else ""
+        mark_bit = f" · ✓ {marks} selected" if marks > 1 else (
+            f" · ✓ 1 selected" if marks == 1 else ""
+        )
         base = getattr(self, "_scope_text", "") or ""
         self.status_left.set_text(f"{base}{mark_bit}")
 
     def _marked_items(self) -> list[Item]:
-        """Marked items in current grid order, then any marks not on this page."""
+        """Selected items in current grid order, then any ids not on this page."""
         seen: set[str] = set()
         out: list[Item] = []
         for it in self._items:
@@ -977,13 +1008,64 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return out
 
     def _effective_hand_off_items(self) -> list[Item]:
-        """Marked set if any; otherwise the focused item alone."""
+        """Multi-selection if any; otherwise the focused item alone."""
         marked = self._marked_items()
         if marked:
             return marked
         if self.selected_item is not None:
             return [self.selected_item]
         return []
+
+    def _id_at_index(self, idx: int) -> str | None:
+        if idx < 0 or idx >= len(self._items):
+            return None
+        return self._items[idx].id
+
+    def _apply_range_selection(self, a: int, b: int) -> None:
+        lo, hi = (a, b) if a <= b else (b, a)
+        lo = max(0, lo)
+        hi = min(len(self._items) - 1, hi)
+        self._marked = {self._items[i].id for i in range(lo, hi + 1)} if hi >= lo else set()
+
+    def _select_index(
+        self,
+        idx: int,
+        *,
+        ctrl: bool = False,
+        shift: bool = False,
+        from_click: bool = False,
+    ) -> None:
+        """Update focus + multi-selection (replace / Ctrl-toggle / Shift-range)."""
+        n = len(self._items)
+        if n == 0 or idx < 0 or idx >= n:
+            return
+        item = self._items[idx]
+        self.selection.set_selected(idx)
+        self.grid.scroll_to(
+            idx, Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None
+        )
+
+        if shift:
+            self._apply_range_selection(self._sel_anchor, idx)
+        elif ctrl:
+            if item.id in self._marked:
+                self._marked.discard(item.id)
+                # Keep at least the focused item selected if emptied
+                if not self._marked:
+                    self._marked.add(item.id)
+            else:
+                self._marked.add(item.id)
+            # Anchor stays put for further Shift ranges (Explorer-style)
+        else:
+            self._marked = {item.id}
+            self._sel_anchor = idx
+
+        self.selected_item = item
+        self._rebind_grid_keep_selection()
+        self._refresh_status()
+        self._update_path_label()
+        if from_click:
+            self.grid.grab_focus()
 
     def _clipboard_set_text(self, text: str) -> bool:
         display = Gdk.Display.get_default()
@@ -1028,39 +1110,49 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     # ── Actions ───────────────────────────────────────────────────────
 
     def toggle_mark_selected(self) -> None:
-        item = self.selected_item
-        if not item:
-            self._toast("Nothing selected")
+        """Space: toggle focused item in multi-selection (like Ctrl+click)."""
+        idx = self.selection.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION:
             return
-        if item.id in self._marked:
-            self._marked.discard(item.id)
-            self._toast(f"Unmarked · {item.display_name}")
-        else:
-            self._marked.add(item.id)
-            self._toast(f"Marked · {item.display_name} · {len(self._marked)} total")
-        self._rebind_grid_keep_selection()
-        self._refresh_status()
+        self._select_index(int(idx), ctrl=True, shift=False)
 
     def clear_marks(self) -> bool:
-        if not self._marked:
-            return False
+        if len(self._marked) <= 1:
+            # Collapse multi-select to focused only
+            if self.selected_item and len(self._marked) == 1:
+                return False
+            if not self._marked:
+                return False
         n = len(self._marked)
-        self._marked.clear()
+        if self.selected_item:
+            self._marked = {self.selected_item.id}
+            idx = self.selection.get_selected()
+            if idx != Gtk.INVALID_LIST_POSITION:
+                self._sel_anchor = int(idx)
+        else:
+            self._marked.clear()
         self._rebind_grid_keep_selection()
         self._refresh_status()
-        self._toast(f"Cleared {n} marks")
+        self._toast(f"Selection cleared · was {n}")
         return True
 
     def copy_selected_path(self) -> None:
-        item = self.selected_item
-        if not item:
+        """Copy focused path, or all selected paths if multi-selected."""
+        items = self._effective_hand_off_items()
+        if not items:
             self._toast("Nothing selected")
             return
-        path = str(item.path)
+        if len(items) > 1:
+            text = "\n".join(str(it.path.resolve()) for it in items)
+            if not self._clipboard_set_text(text):
+                return
+            self._toast(f"Copied {len(items)} paths")
+            return
+        path = str(items[0].path)
         if not self._clipboard_set_text(path):
             return
         # Hint for GTK/Omarchy file pickers (website uploads, etc.)
-        self._toast(f"Copied · Ctrl+L in file dialog, paste path, Enter")
+        self._toast("Copied · Ctrl+L in file dialog, paste path, Enter")
 
     def reveal_selected_in_files(self) -> None:
         """Open Nautilus with the focused (or first marked) file selected."""
