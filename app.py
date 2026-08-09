@@ -23,6 +23,7 @@ gi.require_version("GdkPixbuf", "2.0")
 
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk  # noqa: E402
 
+from filters import ViewFilters, item_matches_view_filters  # noqa: E402
 from import_media import DEFAULT_INBOX  # noqa: E402
 from library import DEFAULT_LIBRARY, EagleLibrary, Item, SmartFolder  # noqa: E402
 
@@ -106,24 +107,6 @@ def _thumb_path_for(item: Item) -> str | None:
     return None
 
 
-def _item_matches_type_filters(item: Item, filters: set[str]) -> bool:
-    """True if item matches any selected type filter (ext or image/video/audio)."""
-    if not filters:
-        return True
-    ext = item.ext_lower.lstrip(".")
-    for f in filters:
-        key = f.lower().lstrip(".")
-        if key == "image" and item.is_image:
-            return True
-        if key == "video" and item.is_video:
-            return True
-        if key == "audio" and item.is_audio:
-            return True
-        if key == ext:
-            return True
-    return False
-
-
 class EagleBrowseWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application, library: EagleLibrary):
         super().__init__(application=app, title="Eagle Browse", default_width=1280, default_height=800)
@@ -134,8 +117,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.selected_item: Item | None = None
         self._items: list[Item] = []
         self._filter_text = ""
-        # Media type filter: ext ("png") and/or kind ("image","video","audio"). Empty = all.
-        self._type_filters: set[str] = set()
+        # View filters: tags/folders/types include+exclude, dimensions, duration
+        self._view_filters = ViewFilters()
         # Multi-select marks (item ids) — hand off via Y (paths) / s (stage)
         self._marked: set[str] = set()
         self._stage_dir = Path(
@@ -204,11 +187,47 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         side_scroll.set_child(self.folder_list)
         body.append(side_scroll)
 
-        # Main: grid + status
+        # Main: filter bar + grid + status
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         main.set_hexpand(True)
         main.set_vexpand(True)
         body.append(main)
+
+        # ── View filter bar ───────────────────────────────────────────
+        filter_bar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        filter_bar.add_css_class("toolbar")
+        filter_bar.set_margin_start(8)
+        filter_bar.set_margin_end(8)
+        filter_bar.set_margin_top(6)
+        filter_bar.set_margin_bottom(2)
+
+        filter_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for label, handler in (
+            ("Tags", self.open_view_tag_filter),
+            ("Folders", self.open_view_folder_filter),
+            ("Type", self.open_view_type_filter),
+            ("Size", self.open_dimension_filter),
+            ("Duration", self.open_duration_filter),
+        ):
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            btn.connect("clicked", lambda _b, h=handler: h())
+            filter_btns.append(btn)
+
+        clear_btn = Gtk.Button(label="Clear filters")
+        clear_btn.add_css_class("flat")
+        clear_btn.connect("clicked", lambda *_: self.clear_view_filters())
+        filter_btns.append(clear_btn)
+        filter_bar.append(filter_btns)
+
+        self.filter_chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.filter_chips.set_hexpand(True)
+        chip_scroll = Gtk.ScrolledWindow()
+        chip_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        chip_scroll.set_child(self.filter_chips)
+        chip_scroll.set_size_request(-1, 28)
+        filter_bar.append(chip_scroll)
+        main.append(filter_bar)
 
         self.grid_scroll = Gtk.ScrolledWindow()
         self.grid_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
@@ -261,8 +280,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "1-5 rate · t tags · f folders · m type filter · b sidebar · i import · "
-                "Space mark · Y copy · s stage · +/- size · Enter open · q quit"
+                "Filter bar: tags/folders/type/size/duration · Shift+Enter exclude · "
+                "t edit tags · f edit folders · b sidebar · 1-5 rate · q quit"
             ),
             xalign=0,
         )
@@ -686,7 +705,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         smart_id = self.current_smart_folder_id
         descendants = self.include_descendants
         search = self._filter_text
-        type_filters = set(self._type_filters)
+        # Snapshot filters for the worker thread
+        vf = self._view_filters
         scope = self._scope_label()
         self.status_left.set_text(f"Loading… · {scope}")
 
@@ -698,10 +718,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 search=search,
                 include_deleted=False,
             )
-            if type_filters:
-                items = [
-                    it for it in items if _item_matches_type_filters(it, type_filters)
-                ]
+            if vf.active():
+                items = [it for it in items if item_matches_view_filters(it, vf)]
             total = len(items)
             truncated = total > PAGE_SOFT_CAP
             page = items[:PAGE_SOFT_CAP] if truncated else items
@@ -718,12 +736,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 else:
                     self.selected_item = None
                 note = f" · showing first {PAGE_SOFT_CAP} of {total}" if truncated else ""
-                type_bit = ""
-                if type_filters:
-                    type_bit = " · type:" + ",".join(sorted(type_filters))
-                self._scope_text = f"{total} items · {scope}{type_bit}{note}"
+                self._scope_text = f"{total} items · {scope}{note}"
                 self._refresh_status()
                 self._update_path_label()
+                self._rebuild_filter_chips()
                 return False
 
             GLib.idle_add(apply)
@@ -1259,7 +1275,150 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         picker.present()
 
-    def edit_type_filter_dialog(self) -> None:
+    def _rebuild_filter_chips(self) -> None:
+        """Show active view filters as removable chips."""
+        while (c := self.filter_chips.get_first_child()) is not None:
+            self.filter_chips.remove(c)
+        vf = self._view_filters
+        if not vf.active():
+            empty = Gtk.Label(label="No view filters", xalign=0)
+            empty.add_css_class("dim-label")
+            empty.add_css_class("caption")
+            self.filter_chips.append(empty)
+            return
+
+        def chip(label: str, clear_fn) -> None:
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            btn.add_css_class("circular")
+            btn.set_tooltip_text("Click to remove this filter")
+            btn.connect("clicked", lambda *_: clear_fn() or self.refresh_items())
+            self.filter_chips.append(btn)
+
+        for t in sorted(vf.tags_include):
+            chip(f"+tag:{t}", lambda t=t: vf.tags_include.discard(t))
+        for t in sorted(vf.tags_exclude):
+            chip(f"-tag:{t}", lambda t=t: vf.tags_exclude.discard(t))
+        for fid in sorted(vf.folders_include):
+            name = self.library.folder_paths.get(fid, fid)[:40]
+            chip(f"+folder:{name}", lambda f=fid: vf.folders_include.discard(f))
+        for fid in sorted(vf.folders_exclude):
+            name = self.library.folder_paths.get(fid, fid)[:40]
+            chip(f"-folder:{name}", lambda f=fid: vf.folders_exclude.discard(f))
+        for t in sorted(vf.types_include):
+            chip(f"+type:{t}", lambda t=t: vf.types_include.discard(t))
+        for t in sorted(vf.types_exclude):
+            chip(f"-type:{t}", lambda t=t: vf.types_exclude.discard(t))
+        if vf.width_min is not None:
+            chip(f"w≥{vf.width_min}", lambda: setattr(vf, "width_min", None))
+        if vf.width_max is not None:
+            chip(f"w≤{vf.width_max}", lambda: setattr(vf, "width_max", None))
+        if vf.height_min is not None:
+            chip(f"h≥{vf.height_min}", lambda: setattr(vf, "height_min", None))
+        if vf.height_max is not None:
+            chip(f"h≤{vf.height_max}", lambda: setattr(vf, "height_max", None))
+        if vf.duration_min is not None:
+            chip(f"dur≥{vf.duration_min:g}s", lambda: setattr(vf, "duration_min", None))
+        if vf.duration_max is not None:
+            chip(f"dur≤{vf.duration_max:g}s", lambda: setattr(vf, "duration_max", None))
+
+    def clear_view_filters(self) -> None:
+        self._view_filters.clear()
+        self.refresh_items()
+        self._toast("View filters cleared")
+
+    def open_view_tag_filter(self) -> None:
+        from picker import TogglePicker, load_recent
+
+        vf = self._view_filters
+        all_tags = self.library.all_tags()
+        recent = load_recent("filter_tags")
+
+        def on_include(tag: str, turn_on: bool) -> None:
+            if turn_on:
+                vf.tags_include.add(tag)
+                vf.tags_exclude.discard(tag)
+            else:
+                vf.tags_include.discard(tag)
+            self.refresh_items()
+
+        def on_exclude(tag: str, turn_on: bool) -> None:
+            if turn_on:
+                vf.tags_exclude.add(tag)
+                vf.tags_include.discard(tag)
+            else:
+                vf.tags_exclude.discard(tag)
+            self.refresh_items()
+
+        TogglePicker(
+            self,
+            title="Filter · tags",
+            subtitle="Enter = include · Shift+Enter / right-click = exclude · Esc close",
+            all_values=all_tags,
+            active=set(vf.tags_include),
+            excluded=set(vf.tags_exclude),
+            recent=recent,
+            allow_create=False,
+            allow_exclude=True,
+            recent_kind="filter_tags",
+            on_toggle=on_include,
+            on_exclude=on_exclude,
+            on_close=lambda: self.grid.grab_focus(),
+        ).present()
+
+    def open_view_folder_filter(self) -> None:
+        from picker import TogglePicker, load_recent
+
+        vf = self._view_filters
+        id_to_path = dict(self.library.folder_paths)
+        path_to_id = {v: k for k, v in id_to_path.items()}
+        all_paths = sorted(id_to_path.values(), key=str.lower)
+        active_paths = {id_to_path[i] for i in vf.folders_include if i in id_to_path}
+        excl_paths = {id_to_path[i] for i in vf.folders_exclude if i in id_to_path}
+        recent = [r for r in load_recent("filter_folders") if r in path_to_id]
+
+        def resolve(path_label: str) -> str | None:
+            return path_to_id.get(path_label)
+
+        def on_include(path_label: str, turn_on: bool) -> None:
+            fid = resolve(path_label)
+            if not fid:
+                return
+            if turn_on:
+                vf.folders_include.add(fid)
+                vf.folders_exclude.discard(fid)
+            else:
+                vf.folders_include.discard(fid)
+            self.refresh_items()
+
+        def on_exclude(path_label: str, turn_on: bool) -> None:
+            fid = resolve(path_label)
+            if not fid:
+                return
+            if turn_on:
+                vf.folders_exclude.add(fid)
+                vf.folders_include.discard(fid)
+            else:
+                vf.folders_exclude.discard(fid)
+            self.refresh_items()
+
+        TogglePicker(
+            self,
+            title="Filter · folders",
+            subtitle="Enter = include · Shift+Enter / right-click = exclude",
+            all_values=all_paths,
+            active=active_paths,
+            excluded=excl_paths,
+            recent=recent,
+            allow_create=False,
+            allow_exclude=True,
+            recent_kind="filter_folders",
+            on_toggle=on_include,
+            on_exclude=on_exclude,
+            on_close=lambda: self.grid.grab_focus(),
+        ).present()
+
+    def open_view_type_filter(self) -> None:
         """Filter grid by media kind (image/video/audio) and/or extension."""
         from collections import Counter
 
@@ -1278,50 +1437,156 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if it.is_audio:
                 counts["audio"] += 1
 
-        # Categories first, then extensions by frequency
         categories = ["image", "video", "audio"]
-        exts = [
-            ext
-            for ext, _n in counts.most_common()
-            if ext not in categories
-        ]
+        exts = [ext for ext, _n in counts.most_common() if ext not in categories]
         all_values = categories + exts
         recent = [r for r in load_recent("types") if r in counts or r in categories]
-        active = set(self._type_filters)
+        vf = self._view_filters
 
-        def on_toggle(value: str, turn_on: bool) -> None:
+        def on_include(value: str, turn_on: bool) -> None:
             key = value.lower().lstrip(".")
             if turn_on:
-                self._type_filters.add(key)
+                vf.types_include.add(key)
+                vf.types_exclude.discard(key)
             else:
-                self._type_filters.discard(key)
-            # refresh list from library with new filter
+                vf.types_include.discard(key)
             self.refresh_items()
-            if self._type_filters:
-                self._toast("Filter · " + ", ".join(sorted(self._type_filters)))
+
+        def on_exclude(value: str, turn_on: bool) -> None:
+            key = value.lower().lstrip(".")
+            if turn_on:
+                vf.types_exclude.add(key)
+                vf.types_include.discard(key)
             else:
-                self._toast("Filter · all types")
+                vf.types_exclude.discard(key)
+            self.refresh_items()
 
-        def on_close() -> None:
-            self.grid.grab_focus()
-
-        picker = TogglePicker(
+        TogglePicker(
             self,
-            title="Filter by type",
+            title="Filter · type",
             subtitle=(
-                "Enter toggles · Esc closes · empty = show all · "
-                "image / video / audio or png, mp4, mp3…"
+                "Enter = include · Shift+Enter / right-click = exclude · "
+                "image / video / audio or png, mp4…"
             ),
             all_values=all_values,
-            active=active,
-            partial=set(),
+            active=set(vf.types_include),
+            excluded=set(vf.types_exclude),
             recent=recent,
             allow_create=False,
+            allow_exclude=True,
             recent_kind="types",
-            on_toggle=on_toggle,
-            on_close=on_close,
+            on_toggle=on_include,
+            on_exclude=on_exclude,
+            on_close=lambda: self.grid.grab_focus(),
+        ).present()
+
+    def open_dimension_filter(self) -> None:
+        self._open_range_dialog(
+            title="Filter · dimensions (pixels)",
+            fields=(
+                ("Width min", "width_min"),
+                ("Width max", "width_max"),
+                ("Height min", "height_min"),
+                ("Height max", "height_max"),
+            ),
+            as_int=True,
         )
-        picker.present()
+
+    def open_duration_filter(self) -> None:
+        self._open_range_dialog(
+            title="Filter · duration (seconds)",
+            fields=(
+                ("Duration min (s)", "duration_min"),
+                ("Duration max (s)", "duration_max"),
+            ),
+            as_int=False,
+        )
+
+    def _open_range_dialog(
+        self,
+        *,
+        title: str,
+        fields: tuple[tuple[str, str], ...],
+        as_int: bool,
+    ) -> None:
+        vf = self._view_filters
+        win = Gtk.Window(
+            title=title,
+            transient_for=self,
+            modal=True,
+            default_width=360,
+        )
+        self._picker_blocking = True
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        win.set_child(box)
+        title_lbl = Gtk.Label(label=title, xalign=0)
+        title_lbl.add_css_class("title-3")
+        box.append(title_lbl)
+        entries: dict[str, Gtk.Entry] = {}
+        for label, attr in fields:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.append(Gtk.Label(label=label, xalign=0, hexpand=True))
+            ent = Gtk.Entry()
+            ent.set_input_purpose(Gtk.InputPurpose.NUMBER)
+            cur = getattr(vf, attr)
+            if cur is not None:
+                ent.set_text(str(int(cur) if as_int else cur))
+            ent.set_placeholder_text("any")
+            ent.set_width_chars(8)
+            entries[attr] = ent
+            row.append(ent)
+            box.append(row)
+
+        def close_win(*_a) -> None:
+            self._picker_blocking = False
+            win.destroy()
+            self.grid.grab_focus()
+
+        def apply(*_a) -> None:
+            for attr, ent in entries.items():
+                text = (ent.get_text() or "").strip()
+                if not text:
+                    setattr(vf, attr, None)
+                    continue
+                try:
+                    val = int(float(text)) if as_int else float(text)
+                    setattr(vf, attr, val)
+                except ValueError:
+                    self._toast(f"Invalid number: {text}")
+                    return
+            self.refresh_items()
+            close_win()
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btns.set_halign(Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", close_win)
+        ok = Gtk.Button(label="Apply")
+        ok.add_css_class("suggested-action")
+        ok.connect("clicked", apply)
+        btns.append(cancel)
+        btns.append(ok)
+        box.append(btns)
+
+        key = Gtk.EventControllerKey()
+
+        def on_key(_c, keyval, _kc, state):
+            if keyval == Gdk.KEY_Escape:
+                close_win()
+                return True
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                apply()
+                return True
+            return False
+
+        key.connect("key-pressed", on_key)
+        win.add_controller(key)
+        win.connect("close-request", lambda *_: close_win() or True)
+        win.present()
 
     def stage_marked(self) -> None:
         """Copy marked (or focused) files into the stage/outbox directory."""
@@ -1716,10 +1981,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 return True
             if self.clear_marks():
                 return True
-            if self._type_filters:
-                self._type_filters.clear()
-                self.refresh_items()
-                self._toast("Filter · all types")
+            if self._view_filters.active():
+                self.clear_view_filters()
                 return True
             if self._filter_text:
                 self.search.set_text("")
@@ -1792,7 +2055,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.edit_folders_dialog()
                 return True
             if keyval in (Gdk.KEY_m, Gdk.KEY_M):
-                self.edit_type_filter_dialog()
+                self.open_view_type_filter()
                 return True
         # Y = all marked paths (or focused if none marked)
         # Ctrl+Y = file:// URI list

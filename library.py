@@ -67,6 +67,7 @@ class Item:
     annotation: str
     modification_time: int
     star: int | None = None  # Eagle UI "rating"; absent = unrated
+    duration: float | None = None  # seconds (video/audio)
     item_dir: Path | None = None  # images/<id>.info for metadata writes
     # Precomputed for fast smart-folder evaluation
     tag_set: frozenset[str] = field(default_factory=frozenset)
@@ -393,6 +394,14 @@ class EagleLibrary:
                 except (TypeError, ValueError):
                     star = None
 
+                duration: float | None
+                try:
+                    duration = (
+                        float(raw["duration"]) if raw.get("duration") is not None else None
+                    )
+                except (TypeError, ValueError):
+                    duration = None
+
                 tags = list(raw.get("tags") or [])
                 folders = list(raw.get("folders") or [])
                 item = Item(
@@ -410,6 +419,7 @@ class EagleLibrary:
                     annotation=str(raw.get("annotation") or ""),
                     modification_time=int(raw.get("modificationTime") or 0),
                     star=star,
+                    duration=duration,
                     item_dir=item_dir.resolve(),
                     tag_set=frozenset(tags),
                     folder_set=frozenset(folders),

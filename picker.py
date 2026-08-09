@@ -53,10 +53,12 @@ class TogglePicker(Gtk.Window):
     Filterable list where Enter toggles membership without closing.
 
     Keys:
-      type     — filter list (entry keeps full string)
-      Up/Down  — move highlight
-      Enter    — toggle highlighted row
-      Esc      — close
+      type           — filter list (entry keeps full string)
+      Up/Down        — move highlight
+      Enter          — toggle include (✓)
+      Shift+Enter    — toggle exclude (✗) when exclude mode enabled
+      Right-click    — toggle exclude
+      Esc            — close
     """
 
     def __init__(
@@ -68,10 +70,13 @@ class TogglePicker(Gtk.Window):
         all_values: list[str],
         active: set[str],
         partial: set[str] | None = None,
+        excluded: set[str] | None = None,
         recent: list[str] | None = None,
         allow_create: bool = True,
+        allow_exclude: bool = False,
         recent_kind: str = "tags",
         on_toggle: Callable[[str, bool], None],
+        on_exclude: Callable[[str, bool], None] | None = None,
         on_close: Callable[[], None] | None = None,
     ):
         super().__init__(
@@ -86,10 +91,13 @@ class TogglePicker(Gtk.Window):
         self._all = list(all_values)
         self._active = set(active)
         self._partial = set(partial or [])
+        self._excluded = set(excluded or [])
         self._recent = list(recent or [])
         self._allow_create = allow_create
+        self._allow_exclude = allow_exclude and on_exclude is not None
         self._recent_kind = recent_kind
         self._on_toggle = on_toggle
+        self._on_exclude = on_exclude
         self._on_close_cb = on_close
         self._rows: list[tuple[str, str]] = []  # (value, kind)
         self._rebuilding = False
@@ -123,10 +131,10 @@ class TogglePicker(Gtk.Window):
         self.entry.add_controller(entry_keys)
         root.append(self.entry)
 
-        hint = Gtk.Label(
-            label="↑↓ navigate · Enter toggle · Esc close",
-            xalign=0,
-        )
+        hint_bits = ["↑↓ navigate", "Enter include", "Esc close"]
+        if self._allow_exclude:
+            hint_bits.insert(2, "Shift+Enter / right-click exclude")
+        hint = Gtk.Label(label=" · ".join(hint_bits), xalign=0)
         hint.add_css_class("caption")
         hint.add_css_class("dim-label")
         root.append(hint)
@@ -172,6 +180,8 @@ class TogglePicker(Gtk.Window):
         self._rebuild_list(preserve_entry_focus=True)
 
     def _status_prefix(self, value: str) -> str:
+        if value in self._excluded:
+            return "✗ "
         if value in self._active:
             return "✓ "
         if value in self._partial:
@@ -228,6 +238,15 @@ class TogglePicker(Gtk.Window):
                     box.append(badge)
                 row.set_child(box)
                 row._value = value  # type: ignore[attr-defined]
+                if self._allow_exclude:
+                    click = Gtk.GestureClick()
+                    click.set_button(3)  # right-click
+
+                    def on_right(_g, _n, _x, _y, val: str = value) -> None:
+                        self._toggle_value(val, exclude=True)
+
+                    click.connect("pressed", on_right)
+                    row.add_controller(click)
                 self.list.append(row)
 
             if not q:
@@ -292,7 +311,7 @@ class TogglePicker(Gtk.Window):
         self.entry.grab_focus()
         self.entry.set_position(len(text))
 
-    def _toggle_selected(self) -> None:
+    def _toggle_selected(self, *, exclude: bool = False) -> None:
         value = self._selected_value()
         if not value:
             q = (self.entry.get_text() or "").strip()
@@ -300,22 +319,41 @@ class TogglePicker(Gtk.Window):
                 value = q
             else:
                 return
-        currently_on = value in self._active and value not in self._partial
-        turn_on = not currently_on
-        try:
-            self._on_toggle(value, turn_on)
-        except Exception:
-            return
-        if turn_on:
-            self._active.add(value)
-            self._partial.discard(value)
-            push_recent(self._recent_kind, value)
-            self._recent = [value] + [x for x in self._recent if x != value]
-        else:
-            self._active.discard(value)
-            self._partial.discard(value)
+        self._toggle_value(value, exclude=exclude)
 
-        # Keep filter text; only refresh checkmarks
+    def _toggle_value(self, value: str, *, exclude: bool = False) -> None:
+        if exclude and self._allow_exclude and self._on_exclude:
+            currently_ex = value in self._excluded
+            turn_on = not currently_ex
+            try:
+                self._on_exclude(value, turn_on)
+            except Exception:
+                return
+            if turn_on:
+                self._excluded.add(value)
+                self._active.discard(value)
+                self._partial.discard(value)
+                push_recent(self._recent_kind, value)
+                self._recent = [value] + [x for x in self._recent if x != value]
+            else:
+                self._excluded.discard(value)
+        else:
+            currently_on = value in self._active and value not in self._partial
+            turn_on = not currently_on
+            try:
+                self._on_toggle(value, turn_on)
+            except Exception:
+                return
+            if turn_on:
+                self._active.add(value)
+                self._partial.discard(value)
+                self._excluded.discard(value)
+                push_recent(self._recent_kind, value)
+                self._recent = [value] + [x for x in self._recent if x != value]
+            else:
+                self._active.discard(value)
+                self._partial.discard(value)
+
         keep = self.entry.get_text() or ""
         self._rebuild_list(preserve_entry_focus=True)
         if (self.entry.get_text() or "") != keep:
@@ -330,7 +368,7 @@ class TogglePicker(Gtk.Window):
         self.entry.set_position(len(self.entry.get_text() or ""))
 
     def _on_row_activated(self, _list: Gtk.ListBox, _row: Gtk.ListBoxRow) -> None:
-        self._toggle_selected()
+        self._toggle_selected(exclude=False)
 
     def _on_key(
         self, _c: Gtk.EventControllerKey, keyval: int, _keycode: int, state: Gdk.ModifierType
@@ -339,16 +377,11 @@ class TogglePicker(Gtk.Window):
             self.close()
             return True
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            self._toggle_selected()
+            exclude = bool(state & Gdk.ModifierType.SHIFT_MASK) and self._allow_exclude
+            self._toggle_selected(exclude=exclude)
             return True
-        if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down, Gdk.KEY_j) and not (
-            state & Gdk.ModifierType.CONTROL_MASK
-        ):
-            # Only j as nav if we want — actually j would block typing "project"
-            # Only arrow keys for nav, not hjkl
-            if keyval in (Gdk.KEY_j, Gdk.KEY_k):
-                return False
-            self._move_selection(1 if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down) else -1)
+        if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down):
+            self._move_selection(1)
             return True
         if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up):
             self._move_selection(-1)
