@@ -96,9 +96,11 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `9` / `0` | Volume down / up |
 | `/` or `Ctrl+F` | Focus search |
 | `f` | Focus sidebar (smart folders + folders) |
-| `Enter` (in sidebar) | Toggle expand / collapse smart folder |
-| `→` / `←` (in sidebar) | Expand / collapse smart folder |
-| click ▶ / ▼ | Expand / collapse smart folder |
+| `Enter` (in sidebar) | Toggle expand / collapse smart folder or **Folders** section |
+| `→` / `←` (in sidebar) | Expand / collapse smart folder or **Folders** section |
+| click ▶ / ▼ | Expand / collapse |
+
+The **Folders** heading starts **collapsed** (same idea as top-level smart folders).
 | `a` | All items |
 | `d` | Toggle “include subfolders” (regular folders only) |
 

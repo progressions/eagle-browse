@@ -121,6 +121,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         ).expanduser()
         # Smart-folder ids that are expanded. Empty = all top levels collapsed.
         self._smart_expanded: set[str] = set()
+        # Sidebar section headers (Smart folders / Folders)
+        self._folders_section_expanded = False  # collapsible; start closed
         # Forced grid column count (min_columns == max_columns). Arrow-down
         # must step by exactly this many items or selection drifts diagonally.
         self._cols = 4
@@ -248,19 +250,68 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     # ── Sidebar ───────────────────────────────────────────────────────
 
-    def _make_header_row(self, title: str) -> Gtk.ListBoxRow:
+    def _make_header_row(
+        self,
+        title: str,
+        *,
+        collapsible: bool = False,
+        section_id: str | None = None,
+        expanded: bool = True,
+    ) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow()
-        row.set_selectable(False)
-        row.set_activatable(False)
-        row.row_kind = "header"  # type: ignore[attr-defined]
-        label = Gtk.Label(label=title, xalign=0)
+        row.row_kind = "section" if collapsible else "header"  # type: ignore[attr-defined]
+        row.section_id = section_id  # type: ignore[attr-defined]
+        row.has_children = collapsible  # type: ignore[attr-defined]
+        row.expanded = expanded  # type: ignore[attr-defined]
+        if collapsible:
+            # Selectable so Enter / ←→ work like other sidebar rows
+            row.set_selectable(True)
+            row.set_activatable(True)
+        else:
+            row.set_selectable(False)
+            row.set_activatable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.set_margin_start(4)
+        box.set_margin_end(8)
+        box.set_margin_top(8)
+        box.set_margin_bottom(2)
+
+        if collapsible:
+            twisty = Gtk.Button()
+            twisty.add_css_class("flat")
+            twisty.add_css_class("circular")
+            twisty.set_valign(Gtk.Align.CENTER)
+            twisty.set_focus_on_click(False)
+            twisty.set_icon_name("pan-down-symbolic" if expanded else "pan-end-symbolic")
+            twisty.set_tooltip_text("Collapse" if expanded else "Expand")
+            sid = section_id or ""
+
+            def on_twisty(_btn: Gtk.Button, sec: str = sid) -> None:
+                self._toggle_section(sec)
+
+            twisty.connect("clicked", on_twisty)
+            box.append(twisty)
+        else:
+            spacer = Gtk.Box()
+            spacer.set_size_request(28, 1)
+            box.append(spacer)
+
+        label = Gtk.Label(label=title, xalign=0, hexpand=True)
         label.add_css_class("heading")
-        label.set_margin_start(10)
-        label.set_margin_end(8)
-        label.set_margin_top(10)
-        label.set_margin_bottom(4)
-        row.set_child(label)
+        box.append(label)
+        row.set_child(box)
         return row
+
+    def _toggle_section(self, section_id: str) -> None:
+        if section_id == "folders":
+            self._folders_section_expanded = not self._folders_section_expanded
+            # If collapsing while a regular folder is selected, keep selection
+            # but hide the tree; re-expand when focusing that folder again.
+            self._repopulate_sidebar_keep_selection()
+        elif section_id == "smart":
+            # Reserved if we make Smart folders a section later
+            pass
 
     def _make_nav_row(
         self,
@@ -358,6 +409,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _repopulate_sidebar_keep_selection(self) -> None:
         # Keep current selection visible if it's nested
         self._ensure_smart_expanded_path(self.current_smart_folder_id)
+        if self.current_folder_id:
+            self._folders_section_expanded = True
         self._populate_sidebar(select_current=True)
 
     def _append_smart_tree(self, nodes: list[SmartFolder], depth: int = 0) -> None:
@@ -390,16 +443,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._append_smart_tree(self.library.smart_folders, 0)
 
         if self.library.folders:
-            self.folder_list.append(self._make_header_row("Folders"))
-            for folder, depth in self.library.flatten_folders():
-                self.folder_list.append(
-                    self._make_nav_row(
-                        label=folder.name,
-                        depth=depth,
-                        kind="folder",
-                        folder_id=folder.id,
-                    )
+            self.folder_list.append(
+                self._make_header_row(
+                    "Folders",
+                    collapsible=True,
+                    section_id="folders",
+                    expanded=self._folders_section_expanded,
                 )
+            )
+            if self._folders_section_expanded:
+                for folder, depth in self.library.flatten_folders():
+                    self.folder_list.append(
+                        self._make_nav_row(
+                            label=folder.name,
+                            depth=depth,
+                            kind="folder",
+                            folder_id=folder.id,
+                        )
+                    )
 
         if select_current:
             self._restore_sidebar_selection()
@@ -410,7 +471,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if row is None:
             return
         kind = getattr(row, "row_kind", None)
-        if kind == "header":
+        if kind in ("header", "section"):
+            # Section headers don't change the grid filter
             return
         if kind == "smart":
             new_smart = getattr(row, "smart_folder_id", None)
@@ -436,10 +498,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _restore_sidebar_selection(self) -> None:
         target_smart = self.current_smart_folder_id
         target_folder = self.current_folder_id
-        # Expand ancestors, rebuild if the tree shape must change
-        before = set(self._smart_expanded)
+        # Expand ancestors / Folders section, rebuild if the tree shape must change
+        before_smart = set(self._smart_expanded)
+        before_folders = self._folders_section_expanded
         self._ensure_smart_expanded_path(target_smart)
-        if self._smart_expanded != before:
+        if target_folder:
+            self._folders_section_expanded = True
+        if self._smart_expanded != before_smart or self._folders_section_expanded != before_folders:
             self._populate_sidebar(select_current=False)
 
         row = self.folder_list.get_first_child()
@@ -471,9 +536,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.folder_list.select_row(match or first_selectable)
 
     def _sidebar_expand_selected(self) -> bool:
-        """Right-arrow in sidebar: expand smart folder with children."""
+        """Right-arrow in sidebar: expand section or smart folder with children."""
         row = self.folder_list.get_selected_row()
-        if row is None or getattr(row, "row_kind", None) != "smart":
+        if row is None:
+            return False
+        kind = getattr(row, "row_kind", None)
+        if kind == "section":
+            sid = getattr(row, "section_id", None)
+            if sid == "folders" and not self._folders_section_expanded:
+                self._folders_section_expanded = True
+                self._repopulate_sidebar_keep_selection()
+                return True
+            return False
+        if kind != "smart":
             return False
         if not getattr(row, "has_children", False):
             return False
@@ -485,9 +560,37 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return True
 
     def _sidebar_collapse_selected(self) -> bool:
-        """Left-arrow in sidebar: collapse expanded smart folder, or jump to parent."""
+        """Left-arrow in sidebar: collapse section/smart folder, or jump to parent."""
         row = self.folder_list.get_selected_row()
-        if row is None or getattr(row, "row_kind", None) != "smart":
+        if row is None:
+            return False
+        kind = getattr(row, "row_kind", None)
+        if kind == "section":
+            sid = getattr(row, "section_id", None)
+            if sid == "folders" and self._folders_section_expanded:
+                self._folders_section_expanded = False
+                self._repopulate_sidebar_keep_selection()
+                return True
+            return False
+        if kind == "folder":
+            # Collapse Folders section; keep current grid filter, select header
+            if self._folders_section_expanded:
+                self._folders_section_expanded = False
+                self._populate_sidebar(select_current=False)
+                r = self.folder_list.get_first_child()
+                while r is not None:
+                    if (
+                        isinstance(r, Gtk.ListBoxRow)
+                        and getattr(r, "row_kind", None) == "section"
+                        and getattr(r, "section_id", None) == "folders"
+                    ):
+                        self.folder_list.select_row(r)
+                        r.grab_focus()
+                        break
+                    r = r.get_next_sibling()
+                return True
+            return False
+        if kind != "smart":
             return False
         sid = getattr(row, "smart_folder_id", None)
         if not sid:
@@ -507,9 +610,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return False
 
     def _sidebar_toggle_selected(self) -> bool:
-        """Enter in sidebar: toggle expand/collapse on a collapsible smart folder."""
+        """Enter in sidebar: toggle expand/collapse on section or smart folder."""
         row = self.folder_list.get_selected_row()
-        if row is None or getattr(row, "row_kind", None) != "smart":
+        if row is None:
+            return False
+        kind = getattr(row, "row_kind", None)
+        if kind == "section":
+            sid = getattr(row, "section_id", None)
+            if sid:
+                self._toggle_section(sid)
+                return True
+            return False
+        if kind != "smart":
             return False
         if not getattr(row, "has_children", False):
             return False
