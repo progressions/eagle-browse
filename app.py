@@ -356,7 +356,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _build_inspector(self) -> Gtk.Widget:
         """Right sidebar: preview + rating + tags + folders for selection."""
-        INSPECTOR_WIDTH = 300
+        INSPECTOR_WIDTH = 240
         outer = Gtk.ScrolledWindow()
         outer.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         outer.set_size_request(INSPECTOR_WIDTH, -1)
@@ -382,8 +382,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
         box.set_hexpand(False)
         outer.set_child(box)
 
@@ -397,7 +397,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         box.append(self.insp_subtitle)
 
         self.insp_picture = Gtk.Picture()
-        self.insp_picture.set_size_request(260, 260)
+        self.insp_picture.set_size_request(200, 200)
         self.insp_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         self.insp_picture.set_can_shrink(True)
         frame = Gtk.Box()
