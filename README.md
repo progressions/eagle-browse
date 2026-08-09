@@ -57,8 +57,18 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `←` on leftmost column | Focus sidebar on the **current** smart folder / folder |
 | `↑` / `↓` or `k` / `j` | Image above / below (one row) |
 | `Enter` / `o` | Open larger: **images → imv**, **video/audio → mpv** |
-| `1`–`5` | Set **star rating** (marked items, or focused) |
+| `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
+
+### Inspector (right sidebar)
+
+Shows the focused asset (or **common** values when multi-selected):
+
+- Thumbnail preview  
+- **Rating** — click stars or use `1`–`5` / Clear  
+- **Tags** — `✓` shared by all; `±` only on some; **Edit** opens tag picker  
+- **Folders** — same commonality rules; **Edit** opens folder picker  
+- Path (single selection)
 | `t` | **Tags** picker (recent + autocomplete; Enter toggles; Esc closes) |
 | `f` | **Folders / categories** picker (same UX as tags) |
 | `m` | **Filter by type** (or use the **Type** button on the filter bar) |

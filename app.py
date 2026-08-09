@@ -231,11 +231,22 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         filter_bar.append(chip_scroll)
         main.append(filter_bar)
 
+        mid = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        mid.set_vexpand(True)
+        mid.set_hexpand(True)
+        main.append(mid)
+
+        # Left: grid + status
+        grid_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        grid_col.set_hexpand(True)
+        grid_col.set_vexpand(True)
+        mid.append(grid_col)
+
         self.grid_scroll = Gtk.ScrolledWindow()
         self.grid_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         self.grid_scroll.set_vexpand(True)
         self.grid_scroll.set_hexpand(True)
-        main.append(self.grid_scroll)
+        grid_col.append(self.grid_scroll)
 
         self.store = Gio.ListStore(item_type=ItemObject)
         self.selection = Gtk.SingleSelection(model=self.store)
@@ -278,12 +289,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.status_path.add_css_class("dim-label")
         self.status_path.set_selectable(True)
         status.append(self.status_path)
-        main.append(status)
+        grid_col.append(status)
 
         hints = Gtk.Label(
             label=(
-                "Shift+arrows range · Ctrl+arrows move · Space add/remove · "
-                "Ctrl+click add · Y copy selection · t tags · f folders · q quit"
+                "1-5 rate (or inspector) · Shift+arrows select · Space add · "
+                "t tags · f folders · Y copy · q quit"
             ),
             xalign=0,
         )
@@ -292,7 +303,216 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints.set_margin_end(10)
         hints.set_margin_bottom(8)
         hints.set_wrap(True)
-        main.append(hints)
+        grid_col.append(hints)
+
+        # Right: inspector (thumbnail, rating, tags, folders)
+        mid.append(self._build_inspector())
+
+    def _build_inspector(self) -> Gtk.Widget:
+        """Right sidebar: preview + rating + tags + folders for selection."""
+        outer = Gtk.ScrolledWindow()
+        outer.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        outer.set_size_request(300, -1)
+        outer.add_css_class("sidebar")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        outer.set_child(box)
+
+        self.insp_title = Gtk.Label(xalign=0, wrap=True)
+        self.insp_title.add_css_class("title-4")
+        box.append(self.insp_title)
+
+        self.insp_subtitle = Gtk.Label(xalign=0, wrap=True)
+        self.insp_subtitle.add_css_class("dim-label")
+        self.insp_subtitle.add_css_class("caption")
+        box.append(self.insp_subtitle)
+
+        self.insp_picture = Gtk.Picture()
+        self.insp_picture.set_size_request(260, 260)
+        self.insp_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.insp_picture.set_can_shrink(True)
+        frame = Gtk.Box()
+        frame.add_css_class("card")
+        frame.set_halign(Gtk.Align.CENTER)
+        frame.append(self.insp_picture)
+        box.append(frame)
+
+        # Rating
+        rate_lbl = Gtk.Label(label="Rating", xalign=0)
+        rate_lbl.add_css_class("heading")
+        box.append(rate_lbl)
+        self.insp_stars_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.insp_star_buttons: list[Gtk.Button] = []
+        for n in range(1, 6):
+            btn = Gtk.Button(label="☆")
+            btn.add_css_class("flat")
+            btn.set_tooltip_text(f"Set {n} star(s)")
+            btn.connect("clicked", lambda _b, s=n: self.set_rating(s))
+            self.insp_star_buttons.append(btn)
+            self.insp_stars_box.append(btn)
+        clear_r = Gtk.Button(label="Clear")
+        clear_r.add_css_class("flat")
+        clear_r.connect("clicked", lambda *_: self.set_rating(0))
+        self.insp_stars_box.append(clear_r)
+        box.append(self.insp_stars_box)
+        self.insp_rating_note = Gtk.Label(xalign=0, wrap=True)
+        self.insp_rating_note.add_css_class("dim-label")
+        self.insp_rating_note.add_css_class("caption")
+        box.append(self.insp_rating_note)
+
+        # Tags
+        tags_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        tags_lbl = Gtk.Label(label="Tags", xalign=0, hexpand=True)
+        tags_lbl.add_css_class("heading")
+        tags_head.append(tags_lbl)
+        edit_t = Gtk.Button(label="Edit")
+        edit_t.add_css_class("flat")
+        edit_t.connect("clicked", lambda *_: self.edit_tags_dialog())
+        tags_head.append(edit_t)
+        box.append(tags_head)
+        self.insp_tags = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.append(self.insp_tags)
+
+        # Folders
+        folders_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        folders_lbl = Gtk.Label(label="Folders", xalign=0, hexpand=True)
+        folders_lbl.add_css_class("heading")
+        folders_head.append(folders_lbl)
+        edit_f = Gtk.Button(label="Edit")
+        edit_f.add_css_class("flat")
+        edit_f.connect("clicked", lambda *_: self.edit_folders_dialog())
+        folders_head.append(edit_f)
+        box.append(folders_head)
+        self.insp_folders = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.append(self.insp_folders)
+
+        # Path
+        path_lbl = Gtk.Label(label="Path", xalign=0)
+        path_lbl.add_css_class("heading")
+        box.append(path_lbl)
+        self.insp_path = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        self.insp_path.add_css_class("caption")
+        self.insp_path.add_css_class("dim-label")
+        box.append(self.insp_path)
+
+        self._inspector_empty()
+        return outer
+
+    def _inspector_empty(self) -> None:
+        self.insp_title.set_text("No selection")
+        self.insp_subtitle.set_text("Select an asset in the grid")
+        self.insp_picture.set_paintable(None)
+        self.insp_rating_note.set_text("")
+        for b in self.insp_star_buttons:
+            b.set_label("☆")
+        self._clear_box(self.insp_tags)
+        self._clear_box(self.insp_folders)
+        self.insp_path.set_text("")
+
+    @staticmethod
+    def _clear_box(box: Gtk.Box) -> None:
+        while (c := box.get_first_child()) is not None:
+            box.remove(c)
+
+    def _add_chip_label(self, box: Gtk.Box, text: str, *, dim: bool = False) -> None:
+        lbl = Gtk.Label(label=text, xalign=0, wrap=True)
+        if dim:
+            lbl.add_css_class("dim-label")
+        lbl.add_css_class("caption")
+        box.append(lbl)
+
+    def update_inspector(self) -> None:
+        """Refresh right sidebar for current multi-selection / focus."""
+        items = self._effective_hand_off_items()
+        if not items:
+            self._inspector_empty()
+            return
+
+        n = len(items)
+        if n == 1:
+            it = items[0]
+            self.insp_title.set_text(it.display_name)
+            bits = [it.ext_lower or "?"]
+            if it.width and it.height:
+                bits.append(f"{it.width}×{it.height}")
+            if it.duration:
+                bits.append(f"{it.duration:.1f}s")
+            self.insp_subtitle.set_text(" · ".join(bits))
+            self.insp_path.set_text(str(it.path))
+            # Thumbnail
+            path = _thumb_path_for(it)
+            if path:
+                try:
+                    tex = Gdk.Texture.new_from_filename(path)
+                    self.insp_picture.set_paintable(tex)
+                except GLib.Error:
+                    self.insp_picture.set_paintable(None)
+            else:
+                self.insp_picture.set_paintable(None)
+        else:
+            self.insp_title.set_text(f"{n} assets selected")
+            self.insp_subtitle.set_text("Showing values shared by all")
+            self.insp_path.set_text("")
+            # Preview first selected
+            path = _thumb_path_for(items[0])
+            if path:
+                try:
+                    self.insp_picture.set_paintable(Gdk.Texture.new_from_filename(path))
+                except GLib.Error:
+                    self.insp_picture.set_paintable(None)
+            else:
+                self.insp_picture.set_paintable(None)
+
+        # Rating commonality
+        stars = {it.star for it in items}
+        if len(stars) == 1:
+            s = next(iter(stars))
+            rating = s if s else 0
+            self.insp_rating_note.set_text(
+                f"{'★' * rating}{'☆' * (5 - rating)}" if rating else "Unrated (all)"
+            )
+            for i, b in enumerate(self.insp_star_buttons, start=1):
+                b.set_label("★" if rating and i <= rating else "☆")
+        else:
+            self.insp_rating_note.set_text("Mixed ratings")
+            for b in self.insp_star_buttons:
+                b.set_label("☆")
+
+        # Tags: intersection (common) and partial
+        tag_sets = [set(it.tags) for it in items]
+        common_tags = set.intersection(*tag_sets) if tag_sets else set()
+        union_tags = set.union(*tag_sets) if tag_sets else set()
+        partial_tags = union_tags - common_tags
+        self._clear_box(self.insp_tags)
+        if common_tags:
+            for t in sorted(common_tags, key=str.lower):
+                self._add_chip_label(self.insp_tags, f"✓ {t}")
+        if partial_tags and n > 1:
+            for t in sorted(partial_tags, key=str.lower):
+                self._add_chip_label(self.insp_tags, f"± {t}", dim=True)
+        if not common_tags and not partial_tags:
+            self._add_chip_label(self.insp_tags, "(none)", dim=True)
+
+        # Folders commonality
+        folder_sets = [set(it.folders) for it in items]
+        common_f = set.intersection(*folder_sets) if folder_sets else set()
+        union_f = set.union(*folder_sets) if folder_sets else set()
+        partial_f = union_f - common_f
+        self._clear_box(self.insp_folders)
+        if common_f:
+            for fid in sorted(common_f):
+                name = self.library.folder_paths.get(fid, fid)
+                self._add_chip_label(self.insp_folders, f"✓ {name}")
+        if partial_f and n > 1:
+            for fid in sorted(partial_f):
+                name = self.library.folder_paths.get(fid, fid)
+                self._add_chip_label(self.insp_folders, f"± {name}", dim=True)
+        if not common_f and not partial_f:
+            self._add_chip_label(self.insp_folders, "(none)", dim=True)
 
     def _install_keybinds(self) -> None:
         controller = Gtk.EventControllerKey()
@@ -970,6 +1190,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         obj = selection.get_selected_item()
         self.selected_item = obj.item if obj else None
         self._update_path_label()
+        self.update_inspector()
 
     def _on_grid_activate(self, _grid: Gtk.GridView, _position: int) -> None:
         self.open_selected()
@@ -990,6 +1211,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         base = getattr(self, "_scope_text", "") or ""
         self.status_left.set_text(f"{base}{mark_bit}")
+        self.update_inspector()
 
     def _marked_items(self) -> list[Item]:
         """Selected items in current grid order, then any ids not on this page."""
@@ -1219,6 +1441,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         self._rebind_grid_keep_selection()
         self._update_path_label()
+        self.update_inspector()
         if star:
             msg = f"Rated {'★' * star} · {ok} item(s)"
         else:
@@ -1269,6 +1492,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 raise
             self._rebind_grid_keep_selection()
             self._update_path_label()
+            self.update_inspector()
             self._toast(("+ " if turn_on else "− ") + tag)
 
         def on_close() -> None:
@@ -1347,6 +1571,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 raise
             self._rebind_grid_keep_selection()
             self._update_path_label()
+            self.update_inspector()
             self._toast(("+ " if turn_on else "− ") + path_label)
 
         def on_close() -> None:
