@@ -14,11 +14,11 @@ from typing import Any
 
 from write import WriteError, atomic_write_json, backup_file, write_session
 
-# Default: user's Dropbox Eunbi inbox
+# Default: user's Dropbox Eunbi inbox (watch/import only — no auto folder/tags)
 DEFAULT_INBOX = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/PICS/Eunbi"
-# Eagle folder id for top-level "Eunbi" in this library (from metadata.json)
-DEFAULT_FOLDER_ID = "MNU0RX0OLG3IP"
-DEFAULT_TAGS = ["eunbi"]
+# Imports go in uncategorized / untagged unless the caller passes folders/tags.
+DEFAULT_FOLDER_ID: str | None = None
+DEFAULT_TAGS: list[str] = []
 
 ID_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -26,7 +26,6 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff",
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".m4v", ".avi"}
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".aiff", ".aif"}
 SKIP_NAMES = {".ds_store", "thumbs.db", "desktop.ini"}
-IMPORTED_DIRNAME = ".imported"
 
 
 @dataclass
@@ -257,13 +256,20 @@ def import_file(
     """
     Copy one media file into the Eagle library as a new item.
 
-    If hold_lock is False, acquires write_session. If True, caller holds the lock.
+    If move_source is True (default), deletes the inbox file after a successful
+    library copy so it is not re-imported. If hold_lock is False, acquires
+    write_session; if True, caller holds the lock.
     """
     source = source.expanduser().resolve()
     if not is_importable(source):
         return ImportResult(source=source, skipped=True, error="not importable")
 
-    folder_ids = list(folder_ids if folder_ids is not None else [DEFAULT_FOLDER_ID])
+    if folder_ids is not None:
+        folder_ids = list(folder_ids)
+    elif DEFAULT_FOLDER_ID:
+        folder_ids = [DEFAULT_FOLDER_ID]
+    else:
+        folder_ids = []
     tags = list(tags if tags is not None else list(DEFAULT_TAGS))
     images_dir = library_root / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -347,16 +353,16 @@ def import_file(
                     pass
 
             if move_source:
-                imported = source.parent / IMPORTED_DIRNAME
-                imported.mkdir(parents=True, exist_ok=True)
-                dest_src = imported / source.name
-                if dest_src.exists():
-                    stem, suf = source.stem, source.suffix
-                    n = 2
-                    while dest_src.exists():
-                        dest_src = imported / f"{stem}_{n}{suf}"
-                        n += 1
-                shutil.move(str(source), str(dest_src))
+                # Consume inbox file; library already has a full copy.
+                try:
+                    source.unlink(missing_ok=True)
+                except OSError as exc:
+                    return ImportResult(
+                        source=source,
+                        item_id=iid,
+                        ok=True,
+                        error=f"imported but could not remove source: {exc}",
+                    )
 
             return ImportResult(source=source, item_id=iid, ok=True)
         except Exception as exc:  # noqa: BLE001

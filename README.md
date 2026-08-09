@@ -140,8 +140,8 @@ Import:
 
 1. Copies into `Eunbi.library/images/<ID>.info/`
 2. Writes Eagle `metadata.json` + thumbnail (ffmpeg for video)
-3. Tags with `eunbi`, folder id for top-level **Eunbi**
-4. Moves original to `inbox/.imported/`
+3. Leaves items untagged / uncategorized (assign tags/folders yourself in the app)
+4. Deletes the inbox file (library already has the copy)
 
 Requires `ffmpeg` / `ffprobe` for video (and ImageMagick `convert` as thumb fallback).
 | `Y` | **Copy all marked paths** (newline-separated; if none marked, copies focused) |

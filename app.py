@@ -36,6 +36,8 @@ PAGE_SOFT_CAP = 500  # smaller page = snappier folder switches
 SEARCH_DEBOUNCE_MS = 150
 # Staging handoff (copy out of library — never writes into .library)
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
+# UI sounds extracted from Eagle.app (app/sounds/*.wav)
+_SOUNDS_DIR = Path(__file__).resolve().parent / "sounds"
 
 
 def _cell_w(thumb: int) -> int:
@@ -44,6 +46,60 @@ def _cell_w(thumb: int) -> int:
 
 def _cell_h(thumb: int) -> int:
     return thumb + 36
+
+
+def play_sound(name: str = "notification") -> None:
+    """Play an Eagle UI sound (notification / remove / duplicate / error).
+
+    Non-blocking. Prefers PipeWire/Pulse players; falls through if spawn fails.
+    Uses a louder stereo variant for notification when present (short mono
+    clicks are easy to miss on HDMI).
+    """
+    path = _SOUNDS_DIR / f"{name}.wav"
+    if name == "notification":
+        boosted = _SOUNDS_DIR / "notification_play.wav"
+        if boosted.is_file():
+            path = boosted
+    if not path.is_file():
+        return
+    path_s = str(path)
+    # Keep env (XDG_RUNTIME_DIR) so PipeWire/Pulse can find the session socket.
+    # Do not start_new_session — some setups then lose the audio context.
+    env = os.environ.copy()
+    players: list[list[str]] = []
+    if shutil.which("pw-play"):
+        players.append(["pw-play", path_s])
+    if shutil.which("paplay"):
+        players.append(["paplay", path_s])
+    if shutil.which("mpv"):
+        players.append(
+            [
+                "mpv",
+                "--no-video",
+                "--really-quiet",
+                "--volume=130",
+                "--audio-display=no",
+                path_s,
+            ]
+        )
+    if shutil.which("ffplay"):
+        players.append(
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path_s]
+        )
+    if shutil.which("aplay"):
+        players.append(["aplay", "-q", path_s])
+
+    for cmd in players:
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+            return
+        except OSError:
+            continue
 
 # Decode thumbs off the UI thread; textures are applied on the main loop.
 _thumb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="eagle-thumb")
@@ -292,6 +348,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self._on_factory_setup)
         factory.connect("bind", self._on_factory_bind)
+        factory.connect("unbind", self._on_factory_unbind)
+        # Bound list-item widgets (mark overlays without store rebuild)
+        self._live_list_items: set[Gtk.ListItem] = set()
 
         self.grid = Gtk.GridView(
             model=self.selection,
@@ -1227,12 +1286,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         list_item.tile = tile  # type: ignore[attr-defined]
 
         # Click multi-select: plain / Shift-range / Ctrl-toggle
+        # Do not rebuild the ListStore on click — that tears down widgets mid
+        # gesture and prevents GridView "activate" (double-click) from firing.
         click = Gtk.GestureClick()
         click.set_button(1)
 
         def on_click(
             gesture: Gtk.GestureClick,
-            _n: int,
+            n_press: int,
             _x: float,
             _y: float,
             li: Gtk.ListItem = list_item,
@@ -1244,9 +1305,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
             shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
             self._select_index(int(pos), ctrl=ctrl, shift=shift, from_click=True)
+            # Child GestureClick steals the sequence from GridView, so open
+            # on double-click here (Enter still uses activate / keybinds).
+            if n_press == 2 and not ctrl and not shift:
+                self.open_selected()
 
         click.connect("pressed", on_click)
         card.add_controller(click)
+
+    def _on_factory_unbind(
+        self, _factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem
+    ) -> None:
+        self._live_list_items.discard(list_item)
 
     def _apply_thumb_geometry(self, list_item: Gtk.ListItem) -> int:
         """Size card/tile/picture for current zoom level. Returns edge length."""
@@ -1265,6 +1335,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         obj = list_item.get_item()
         if obj is None:
             return
+        self._live_list_items.add(list_item)
         item: Item = obj.item
         size = self._apply_thumb_geometry(list_item)
         list_item.label.set_text(item.display_name)  # type: ignore[attr-defined]
@@ -1454,11 +1525,30 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._sel_anchor = idx
 
         self.selected_item = item
-        self._rebind_grid_keep_selection()
+        # In-place mark overlays — full rebind would break double-click open.
+        self._sync_mark_overlays()
         self._refresh_status()
         self._update_path_label()
         if from_click:
             self.grid.grab_focus()
+
+    def _sync_mark_overlays(self) -> None:
+        """Update ✓ / accent on currently bound tiles without rebuilding store."""
+        for li in list(self._live_list_items):
+            obj = li.get_item()
+            if obj is None:
+                continue
+            item: Item = obj.item
+            mark: Gtk.Label = getattr(li, "mark", None)  # type: ignore[assignment]
+            card: Gtk.Box = getattr(li, "card", None)  # type: ignore[assignment]
+            if mark is None or card is None:
+                continue
+            marked = item.id in self._marked
+            mark.set_visible(marked)
+            if marked:
+                card.add_css_class("accent")
+            else:
+                card.remove_css_class("accent")
 
     def _clipboard_set_text(self, text: str) -> bool:
         display = Gdk.Display.get_default()
@@ -2001,7 +2091,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         win = Gtk.Window(
             title=title,
             transient_for=self,
-            modal=False,  # click outside closes via is-active
+            # Modal: Hyprland focus-follows-mouse must not dismiss on hover.
+            modal=True,
             default_width=360,
         )
         self._picker_blocking = True
@@ -2052,12 +2143,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     return
             self.refresh_items()
             close_win()
-
-        def on_is_active(*_a) -> None:
-            if win.get_realized() and not win.is_active() and not closing["v"]:
-                GLib.idle_add(lambda: (close_win() or False))
-
-        win.connect("notify::is-active", on_is_active)
 
         btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         btns.set_halign(Gtk.Align.END)
@@ -2250,6 +2335,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             def done() -> bool:
                 self._inbox_importing = False
                 if ok:
+                    play_sound("notification")
                     try:
                         self.library.load()
                     except Exception as exc:  # noqa: BLE001
@@ -2257,6 +2343,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                         return False
                     self._populate_sidebar(select_current=True)
                     self.refresh_items()
+                elif fail_n:
+                    play_sound("error")
                 msg = f"Imported {ok} into library"
                 if fail_n:
                     msg += f" · {fail_n} failed"
