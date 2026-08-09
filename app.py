@@ -1719,12 +1719,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return None
         return self._items[idx].id
 
-    def _apply_range_selection(self, a: int, b: int) -> None:
-        lo, hi = (a, b) if a <= b else (b, a)
-        lo = max(0, lo)
-        hi = min(len(self._items) - 1, hi)
-        self._marked = {self._items[i].id for i in range(lo, hi + 1)} if hi >= lo else set()
-
     def _select_index(
         self,
         idx: int,
@@ -1733,7 +1727,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         shift: bool = False,
         from_click: bool = False,
     ) -> None:
-        """Update focus + multi-selection (replace / Ctrl-toggle / Shift-range)."""
+        """Update focus + multi-selection (replace / Ctrl-toggle / Shift-path)."""
         n = len(self._items)
         if n == 0 or idx < 0 or idx >= n:
             return
@@ -1745,7 +1739,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
 
         if shift:
-            self._apply_range_selection(self._sel_anchor, idx)
+            # Path-style multi-select: keep existing marks and add only the
+            # newly focused cell (and the shift-anchor). Does NOT fill a
+            # rectangle or linear range — Shift+Right then Shift+Down yields
+            # an L of 3, not a square of 4.
+            if 0 <= self._sel_anchor < n:
+                self._marked.add(self._items[self._sel_anchor].id)
+            self._marked.add(item.id)
+            # Anchor stays at the start of the shift gesture (set on non-shift)
         elif ctrl:
             if item.id in self._marked:
                 self._marked.discard(item.id)
@@ -1754,7 +1755,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._marked.add(item.id)
             else:
                 self._marked.add(item.id)
-            # Anchor stays put for further Shift ranges (Explorer-style)
+            # Anchor stays put for further Shift paths
         else:
             self._marked = {item.id}
             self._sel_anchor = idx
@@ -3258,7 +3259,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     ) -> None:
         """
         Move focus by delta indices.
-        extend=True (Shift): select range from anchor to new focus.
+        extend=True (Shift): path multi-select — add only the cell you move to
+        (keeps prior marks; L-shapes, no filled rectangles).
         keep_selection=True (Ctrl): move focus only; multi-selection unchanged.
         If multi-select is already active (>1), plain arrows also keep selection
         (only move focus) so checkboxes don't vanish when releasing Shift.

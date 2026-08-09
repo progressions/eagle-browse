@@ -315,6 +315,101 @@ def folder_auto_tags_from_metadata(
     return out
 
 
+def new_library_id() -> str:
+    """Eagle-style 13-char id: M + 12 uppercase alphanumeric."""
+    import secrets
+
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return "M" + "".join(secrets.choice(alphabet) for _ in range(12))
+
+
+def load_library_metadata(library_root: Path) -> dict[str, Any]:
+    meta_path = library_root / "metadata.json"
+    if not meta_path.is_file():
+        raise WriteError(f"Missing library metadata: {meta_path}")
+    try:
+        with meta_path.open("r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WriteError(f"Cannot read metadata.json: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise WriteError("metadata.json root must be an object")
+    return meta
+
+
+def save_library_metadata(library_root: Path, meta: dict[str, Any]) -> None:
+    meta_path = library_root / "metadata.json"
+    backup_file(library_root, meta_path)
+    atomic_write_json(meta_path, meta)
+
+
+def create_smart_folder_node(
+    library_root: Path,
+    *,
+    name: str,
+    conditions: list[dict[str, Any]],
+    parent_id: str | None = None,
+    description: str = "",
+    folder_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Insert a smart folder into metadata.json smartFolders tree.
+
+    Returns the created node (with id). Caller should hold write_session.
+    """
+    name = (name or "").strip()
+    if not name:
+        raise WriteError("Smart folder name is required")
+    meta = load_library_metadata(library_root)
+    roots = meta.get("smartFolders")
+    if roots is None:
+        roots = []
+        meta["smartFolders"] = roots
+    if not isinstance(roots, list):
+        raise WriteError("smartFolders must be a list")
+
+    node: dict[str, Any] = {
+        "id": folder_id or new_library_id(),
+        "icon": "grid",
+        "name": name,
+        "description": description or "",
+        "modificationTime": _now_ms(),
+        "conditions": conditions or [],
+        "children": [],
+        "orderBy": "IMPORT",
+        "sortIncrease": True,
+    }
+
+    if parent_id:
+        found = False
+
+        def walk(nodes: list[Any]) -> bool:
+            nonlocal found
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                if n.get("id") == parent_id:
+                    children = n.get("children")
+                    if not isinstance(children, list):
+                        children = []
+                        n["children"] = children
+                    children.append(node)
+                    found = True
+                    return True
+                ch = n.get("children")
+                if isinstance(ch, list) and walk(ch):
+                    return True
+            return False
+
+        if not walk(roots):
+            raise WriteError(f"Parent smart folder not found: {parent_id}")
+    else:
+        roots.append(node)
+
+    save_library_metadata(library_root, meta)
+    return node
+
+
 def set_folder_auto_tags(
     library_root: Path,
     folder_id: str,

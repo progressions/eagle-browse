@@ -169,6 +169,22 @@ When an inbox file is byte-identical to something already in the library:
 
 Requires `ffmpeg` / `ffprobe` for video (and ImageMagick `convert` as thumb fallback).
 
+### Agent API (`eagle-api`)
+
+JSON CLI + Python API for search and writes (tags, folders, ratings, smart folders). See [docs/API.md](docs/API.md).
+
+```bash
+ln -sfn ~/Work/tech/eagle-browse/eagle-api ~/.local/bin/eagle-api
+
+eagle-api search --smart-folder "Eunbi/images" --limit 10
+eagle-api search --tag eunbi --rating-min 3 --type video
+eagle-api tag add <id> sofie
+eagle-api folder add <id> Eunbi
+eagle-api rate <id> 4
+eagle-api smart-folder show "Eunbi/images"
+eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
+```
+
 ### Headless inbox watcher (no UI)
 
 Runs at login and imports inbox files without opening Eagle Browse:
