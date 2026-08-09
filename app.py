@@ -1335,6 +1335,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_s, Gdk.KEY_S) and not ctrl:
             self.stage_marked()
             return True
+        if keyval in (Gdk.KEY_e, Gdk.KEY_E) and not ctrl and not in_sidebar:
+            self.reveal_selected_in_files()
+            return True
         # Thumbnail zoom (+ larger / - smaller); skip when typing in search
         if keyval in (
             Gdk.KEY_plus,
