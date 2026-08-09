@@ -82,7 +82,7 @@ class TogglePicker(Gtk.Window):
         super().__init__(
             title=title,
             transient_for=parent,
-            modal=True,
+            modal=False,  # allow click-outside; we close on is-active loss
             default_width=420,
             default_height=480,
         )
@@ -101,10 +101,14 @@ class TogglePicker(Gtk.Window):
         self._on_close_cb = on_close
         self._rows: list[tuple[str, str]] = []  # (value, kind)
         self._rebuilding = False
+        self._closing = False
 
         # Tell parent to ignore global hotkeys while open
         if hasattr(parent, "_picker_blocking"):
             parent._picker_blocking = True  # type: ignore[attr-defined]
+
+        # Click outside / focus another window → close
+        self.connect("notify::is-active", self._on_is_active)
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         root.set_margin_top(12)
@@ -167,7 +171,18 @@ class TogglePicker(Gtk.Window):
         self.entry.set_position(len(text))
         return False
 
+    def _on_is_active(self, *_args) -> None:
+        # Defer so present()/focus transitions don't immediately dismiss
+        if self.get_realized() and not self.is_active() and not self._closing:
+            GLib.idle_add(self._close_from_outside)
+
+    def _close_from_outside(self) -> bool:
+        if not self._closing and self.get_realized() and not self.is_active():
+            self.close()
+        return False
+
     def _on_close_request(self, *_args) -> bool:
+        self._closing = True
         if hasattr(self._parent, "_picker_blocking"):
             self._parent._picker_blocking = False  # type: ignore[attr-defined]
         if self._on_close_cb:

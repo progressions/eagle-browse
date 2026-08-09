@@ -1513,10 +1513,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         win = Gtk.Window(
             title=title,
             transient_for=self,
-            modal=True,
+            modal=False,  # click outside closes via is-active
             default_width=360,
         )
         self._picker_blocking = True
+        closing = {"v": False}
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.set_margin_top(16)
         box.set_margin_bottom(16)
@@ -1542,6 +1543,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             box.append(row)
 
         def close_win(*_a) -> None:
+            if closing["v"]:
+                return
+            closing["v"] = True
             self._picker_blocking = False
             win.destroy()
             self.grid.grab_focus()
@@ -1560,6 +1564,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     return
             self.refresh_items()
             close_win()
+
+        def on_is_active(*_a) -> None:
+            if win.get_realized() and not win.is_active() and not closing["v"]:
+                GLib.idle_add(lambda: (close_win() or False))
+
+        win.connect("notify::is-active", on_is_active)
 
         btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         btns.set_halign(Gtk.Align.END)
@@ -1585,7 +1595,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         key.connect("key-pressed", on_key)
         win.add_controller(key)
-        win.connect("close-request", lambda *_: close_win() or True)
+        win.connect("close-request", lambda *_: (close_win() or True))
         win.present()
 
     def stage_marked(self) -> None:
