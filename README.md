@@ -57,8 +57,21 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `←` on leftmost column | Focus sidebar on the **current** smart folder / folder |
 | `↑` / `↓` or `k` / `j` | Image above / below (one row) |
 | `Enter` / `o` | Open larger: **images → imv**, **video/audio → mpv** |
+| `1`–`5` | Set **star rating** (marked items, or focused) |
+| `0` | Clear rating |
+| `t` | **Edit tags** (dialog; `-tag` removes) |
 | `+` / `-` | Larger / smaller thumbnails |
 | `Space` | **Mark / unmark** current item (multi-select) |
+
+### Library writes (tags & ratings)
+
+Eagle Browse can **write** item metadata into the library (tags, stars):
+
+- Uses a lock file `.eagle-browse.write.lock`
+- Atomic JSON writes + backups under `backup/eagle-browse-writes/`
+- Prefer **one writer** (don’t run official Eagle edits at the same time)
+
+Smart folder **rules** are not edited in-app yet — see [docs/SMART_FOLDERS.md](docs/SMART_FOLDERS.md) for agent/JSON editing.
 | `Y` | **Copy all marked paths** (newline-separated; if none marked, copies focused) |
 | `Ctrl+Y` | Copy marked as `file://` URIs |
 | `y` / `c` | Copy **one** focused path |

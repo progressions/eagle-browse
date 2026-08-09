@@ -230,8 +230,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "Space mark · Y copy marked · s stage · e reveal in Files · y copy path · "
-                "+/- size · Enter open · file dialogs: Ctrl+L then paste · q quit"
+                "1-5 rate · 0 clear · t tags · Space mark · Y copy · s stage · e Files · "
+                "+/- size · Enter open · y path · q quit"
             ),
             xalign=0,
         )
@@ -729,6 +729,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         mark.set_visible(False)
         tile.add_overlay(mark)
 
+        # Star rating (top-right)
+        stars = Gtk.Label(xalign=1.0)
+        stars.add_css_class("osd")
+        stars.add_css_class("caption")
+        stars.set_halign(Gtk.Align.END)
+        stars.set_valign(Gtk.Align.START)
+        stars.set_margin_end(4)
+        stars.set_margin_top(4)
+        stars.set_visible(False)
+        tile.add_overlay(stars)
+
         # Type badge (video / audio / other)
         badge = Gtk.Label(xalign=1.0)
         badge.add_css_class("osd")
@@ -759,6 +770,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         list_item.badge = badge  # type: ignore[attr-defined]
         list_item.icon = icon  # type: ignore[attr-defined]
         list_item.mark = mark  # type: ignore[attr-defined]
+        list_item.stars = stars  # type: ignore[attr-defined]
         list_item.card = card  # type: ignore[attr-defined]
         list_item.tile = tile  # type: ignore[attr-defined]
 
@@ -786,6 +798,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         badge: Gtk.Label = list_item.badge  # type: ignore[attr-defined]
         icon: Gtk.Image = list_item.icon  # type: ignore[attr-defined]
         mark: Gtk.Label = list_item.mark  # type: ignore[attr-defined]
+        stars_lbl: Gtk.Label = list_item.stars  # type: ignore[attr-defined]
         card: Gtk.Box = list_item.card  # type: ignore[attr-defined]
 
         marked = item.id in self._marked
@@ -794,6 +807,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             card.add_css_class("accent")
         else:
             card.remove_css_class("accent")
+
+        if item.star and 1 <= item.star <= 5:
+            stars_lbl.set_text("★" * item.star)
+            stars_lbl.set_visible(True)
+        else:
+            stars_lbl.set_text("")
+            stars_lbl.set_visible(False)
 
         badge_text = _type_badge(item)
         badge.set_text(badge_text)
@@ -872,7 +892,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _update_path_label(self) -> None:
         if self.selected_item:
-            self.status_path.set_text(str(self.selected_item.path))
+            item = self.selected_item
+            star = f" · {'★' * item.star}" if item.star else ""
+            tags = f" · [{', '.join(item.tags[:6])}]" if item.tags else ""
+            self.status_path.set_text(f"{item.display_name}{star}{tags}  ·  {item.path}")
         else:
             self.status_path.set_text("")
 
@@ -1026,6 +1049,117 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast(f"Copied {kind} · {items[0].display_name}")
         else:
             self._toast(f"Copied {len(items)} {kind}")
+
+    def set_rating(self, star: int) -> None:
+        """star 1–5, or 0 to clear. Applies to marked items, else focused."""
+        from write import WriteError
+
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        ids = [it.id for it in items]
+        try:
+            if len(ids) == 1:
+                self.library.update_item(ids[0], star=star if star else None)
+                ok, errors = 1, []
+            else:
+                ok, errors = self.library.update_items_batch(
+                    ids, star=star if star else None
+                )
+        except WriteError as exc:
+            self._toast(str(exc))
+            return
+        self._rebind_grid_keep_selection()
+        self._update_path_label()
+        if star:
+            msg = f"Rated {'★' * star} · {ok} item(s)"
+        else:
+            msg = f"Cleared rating · {ok} item(s)"
+        if errors:
+            msg += f" · {len(errors)} failed"
+        self._toast(msg)
+
+    def edit_tags_dialog(self) -> None:
+        """Prompt to add/remove tags for marked or focused items."""
+        from write import WriteError
+
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+
+        sample = items[0]
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Edit tags",
+            body=(
+                f"{len(items)} item(s). Comma-separated tags to add; "
+                f"prefix with - to remove.\nCurrent: {', '.join(sample.tags) or '(none)'}"
+            ),
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("apply", "Apply")
+        dialog.set_default_response("apply")
+        dialog.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("eunbi, ready-to-post, -nsfw")
+        entry.set_margin_top(8)
+        dialog.set_extra_child(entry)
+
+        def on_response(dlg: Adw.MessageDialog, response: str) -> None:
+            if response != "apply":
+                dlg.destroy()
+                return
+            text = entry.get_text() or ""
+            add: list[str] = []
+            remove: list[str] = []
+            for part in text.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if part.startswith("-") and len(part) > 1:
+                    remove.append(part[1:].strip())
+                else:
+                    add.append(part.lstrip("+").strip())
+            if not add and not remove:
+                dlg.destroy()
+                self._toast("No tag changes")
+                return
+            ids = [it.id for it in items]
+            try:
+                if len(ids) == 1:
+                    self.library.update_item(
+                        ids[0],
+                        add_tags=add or None,
+                        remove_tags=remove or None,
+                    )
+                    ok, errors = 1, []
+                else:
+                    ok, errors = self.library.update_items_batch(
+                        ids, add_tags=add or None, remove_tags=remove or None
+                    )
+            except WriteError as exc:
+                self._toast(str(exc))
+                dlg.destroy()
+                return
+            self._rebind_grid_keep_selection()
+            self._update_path_label()
+            bits = []
+            if add:
+                bits.append("+" + ",".join(add))
+            if remove:
+                bits.append("-" + ",".join(remove))
+            msg = f"Tags {' '.join(bits)} · {ok} item(s)"
+            if errors:
+                msg += f" · {len(errors)} failed"
+            self._toast(msg)
+            dlg.destroy()
+
+        dialog.connect("response", on_response)
+        dialog.present()
+        entry.grab_focus()
 
     def stage_marked(self) -> None:
         """Copy marked (or focused) files into the stage/outbox directory."""
@@ -1320,6 +1454,28 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if not in_sidebar and keyval == Gdk.KEY_space:
             self.toggle_mark_selected()
             return True
+        # Ratings 1–5 / 0 clear (not while typing search; not in sidebar)
+        if not in_sidebar and not in_search and not ctrl:
+            rating_keys = {
+                Gdk.KEY_0: 0,
+                Gdk.KEY_1: 1,
+                Gdk.KEY_2: 2,
+                Gdk.KEY_3: 3,
+                Gdk.KEY_4: 4,
+                Gdk.KEY_5: 5,
+                Gdk.KEY_KP_0: 0,
+                Gdk.KEY_KP_1: 1,
+                Gdk.KEY_KP_2: 2,
+                Gdk.KEY_KP_3: 3,
+                Gdk.KEY_KP_4: 4,
+                Gdk.KEY_KP_5: 5,
+            }
+            if keyval in rating_keys:
+                self.set_rating(rating_keys[keyval])
+                return True
+            if keyval in (Gdk.KEY_t, Gdk.KEY_T):
+                self.edit_tags_dialog()
+                return True
         # Y = all marked paths (or focused if none marked)
         # Ctrl+Y = file:// URI list
         # y / c = single focused path

@@ -13,3 +13,6 @@ venv/
 dist/
 build/
 .DS_Store
+# Never commit library locks or local secrets
+.eagle-browse.write.lock
+*.tmp.*

@@ -67,6 +67,7 @@ class Item:
     annotation: str
     modification_time: int
     star: int | None = None  # Eagle UI "rating"; absent = unrated
+    item_dir: Path | None = None  # images/<id>.info for metadata writes
     # Precomputed for fast smart-folder evaluation
     tag_set: frozenset[str] = field(default_factory=frozenset)
     folder_set: frozenset[str] = field(default_factory=frozenset)
@@ -409,6 +410,7 @@ class EagleLibrary:
                     annotation=str(raw.get("annotation") or ""),
                     modification_time=int(raw.get("modificationTime") or 0),
                     star=star,
+                    item_dir=item_dir.resolve(),
                     tag_set=frozenset(tags),
                     folder_set=frozenset(folders),
                     name_lower=name.lower(),
@@ -574,3 +576,144 @@ class EagleLibrary:
 
         walk(self.smart_folders, 0)
         return out
+
+    # ── Writes (tags, ratings) ────────────────────────────────────────
+
+    def _invalidate_caches(self) -> None:
+        self._query_cache.clear()
+
+    def _refresh_item_derived(self, item: Item) -> None:
+        item.tag_set = frozenset(item.tags)
+        item.folder_set = frozenset(item.folders)
+        item.name_lower = item.name.lower()
+        item.ext_lower = item.ext.lower()
+
+    def update_item(
+        self,
+        item_id: str,
+        *,
+        star: int | None | object = ...,  # type: ignore[assignment]
+        set_tags: list[str] | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+    ) -> Item:
+        """
+        Persist rating and/or tag changes for one item.
+
+        star: 1–5 to set, 0 or None to clear, omit (Ellipsis) to leave unchanged.
+        """
+        from write import (  # local import avoids cycles
+            WriteError,
+            apply_star,
+            apply_tags,
+            load_item_metadata,
+            save_item_metadata,
+            write_session,
+        )
+
+        item = self.items_by_id.get(item_id)
+        if item is None:
+            raise WriteError(f"Unknown item id: {item_id}")
+        if item.item_dir is None or not item.item_dir.is_dir():
+            raise WriteError(f"No item directory for {item_id}")
+
+        with write_session(self.root):
+            data = load_item_metadata(item.item_dir)
+            if star is not ...:
+                apply_star(data, None if star in (0, None) else int(star))  # type: ignore[arg-type]
+            if set_tags is not None or add_tags is not None or remove_tags is not None:
+                apply_tags(
+                    data,
+                    set_tags=set_tags,
+                    add_tags=add_tags,
+                    remove_tags=remove_tags,
+                )
+            save_item_metadata(self.root, item.item_dir, data)
+
+        # Update in-memory model
+        if star is not ...:
+            item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
+        if set_tags is not None or add_tags is not None or remove_tags is not None:
+            item.tags = list(data.get("tags") or [])
+        item.modification_time = int(data.get("modificationTime") or item.modification_time)
+        self._refresh_item_derived(item)
+        self._invalidate_caches()
+        return item
+
+    def update_items_batch(
+        self,
+        item_ids: list[str],
+        *,
+        star: int | None | object = ...,  # type: ignore[assignment]
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+    ) -> tuple[int, list[str]]:
+        """Apply the same star/tag delta to many items. Returns (ok_count, errors)."""
+        from write import WriteError, write_session
+
+        ok = 0
+        errors: list[str] = []
+        # One lock for the whole batch
+        try:
+            with write_session(self.root):
+                for iid in item_ids:
+                    try:
+                        # Nested session would re-lock; do inner write without new lock
+                        self._update_item_unlocked(
+                            iid,
+                            star=star,
+                            add_tags=add_tags,
+                            remove_tags=remove_tags,
+                        )
+                        ok += 1
+                    except WriteError as exc:
+                        errors.append(f"{iid}: {exc}")
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(f"{iid}: {exc}")
+        except WriteError as exc:
+            return 0, [str(exc)]
+        self._invalidate_caches()
+        return ok, errors
+
+    def _update_item_unlocked(
+        self,
+        item_id: str,
+        *,
+        star: int | None | object = ...,
+        set_tags: list[str] | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+    ) -> Item:
+        from write import (
+            WriteError,
+            apply_star,
+            apply_tags,
+            load_item_metadata,
+            save_item_metadata,
+        )
+
+        item = self.items_by_id.get(item_id)
+        if item is None:
+            raise WriteError(f"Unknown item id: {item_id}")
+        if item.item_dir is None or not item.item_dir.is_dir():
+            raise WriteError(f"No item directory for {item_id}")
+
+        data = load_item_metadata(item.item_dir)
+        if star is not ...:
+            apply_star(data, None if star in (0, None) else int(star))  # type: ignore[arg-type]
+        if set_tags is not None or add_tags is not None or remove_tags is not None:
+            apply_tags(
+                data,
+                set_tags=set_tags,
+                add_tags=add_tags,
+                remove_tags=remove_tags,
+            )
+        save_item_metadata(self.root, item.item_dir, data)
+
+        if star is not ...:
+            item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
+        if set_tags is not None or add_tags is not None or remove_tags is not None:
+            item.tags = list(data.get("tags") or [])
+        item.modification_time = int(data.get("modificationTime") or item.modification_time)
+        self._refresh_item_derived(item)
+        return item
