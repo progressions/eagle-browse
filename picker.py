@@ -12,7 +12,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 
-from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 RECENT_PATH = Path.home() / ".config" / "eagle-browse" / "recent.json"
 RECENT_MAX = 20
@@ -37,7 +37,7 @@ def push_recent(kind: str, value: str) -> None:
     items = items[:RECENT_MAX]
     RECENT_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
-        data = {}
+        data: dict = {}
         if RECENT_PATH.is_file():
             data = json.loads(RECENT_PATH.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -53,7 +53,7 @@ class TogglePicker(Gtk.Window):
     Filterable list where Enter toggles membership without closing.
 
     Keys:
-      type     — filter list
+      type     — filter list (entry keeps full string)
       Up/Down  — move highlight
       Enter    — toggle highlighted row
       Esc      — close
@@ -82,6 +82,7 @@ class TogglePicker(Gtk.Window):
             default_height=480,
         )
         self.set_destroy_with_parent(True)
+        self._parent = parent
         self._all = list(all_values)
         self._active = set(active)
         self._partial = set(partial or [])
@@ -89,8 +90,13 @@ class TogglePicker(Gtk.Window):
         self._allow_create = allow_create
         self._recent_kind = recent_kind
         self._on_toggle = on_toggle
-        self._on_close = on_close
-        self._rows: list[tuple[str, str]] = []  # (value, kind) kind=recent|match|create|active
+        self._on_close_cb = on_close
+        self._rows: list[tuple[str, str]] = []  # (value, kind)
+        self._rebuilding = False
+
+        # Tell parent to ignore global hotkeys while open
+        if hasattr(parent, "_picker_blocking"):
+            parent._picker_blocking = True  # type: ignore[attr-defined]
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         root.set_margin_top(12)
@@ -109,7 +115,12 @@ class TogglePicker(Gtk.Window):
         self.entry = Gtk.Entry()
         self.entry.set_placeholder_text("Type to filter…")
         self.entry.set_hexpand(True)
-        self.entry.connect("changed", lambda *_: self._rebuild_list())
+        self.entry.connect("changed", self._on_entry_changed)
+        # Navigation keys while typing in the entry
+        entry_keys = Gtk.EventControllerKey()
+        entry_keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        entry_keys.connect("key-pressed", self._on_key)
+        self.entry.add_controller(entry_keys)
         root.append(self.entry)
 
         hint = Gtk.Label(
@@ -127,24 +138,38 @@ class TogglePicker(Gtk.Window):
 
         self.list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.list.add_css_class("boxed-list")
+        self.list.set_can_focus(False)
         self.list.connect("row-activated", self._on_row_activated)
         scroll.set_child(self.list)
 
-        # Capture keys on window
-        controller = Gtk.EventControllerKey()
-        controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        controller.connect("key-pressed", self._on_key)
-        self.add_controller(controller)
+        # Window-level keys (when list somehow focused)
+        win_keys = Gtk.EventControllerKey()
+        win_keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        win_keys.connect("key-pressed", self._on_key)
+        self.add_controller(win_keys)
 
         self.connect("close-request", self._on_close_request)
 
-        self._rebuild_list()
-        GLib.idle_add(self.entry.grab_focus)
+        self._rebuild_list(preserve_entry_focus=False)
+        GLib.idle_add(self._focus_entry)
+
+    def _focus_entry(self) -> bool:
+        self.entry.grab_focus()
+        text = self.entry.get_text() or ""
+        self.entry.set_position(len(text))
+        return False
 
     def _on_close_request(self, *_args) -> bool:
-        if self._on_close:
-            self._on_close()
+        if hasattr(self._parent, "_picker_blocking"):
+            self._parent._picker_blocking = False  # type: ignore[attr-defined]
+        if self._on_close_cb:
+            self._on_close_cb()
         return False
+
+    def _on_entry_changed(self, *_args) -> None:
+        if self._rebuilding:
+            return
+        self._rebuild_list(preserve_entry_focus=True)
 
     def _status_prefix(self, value: str) -> str:
         if value in self._active:
@@ -153,84 +178,98 @@ class TogglePicker(Gtk.Window):
             return "± "
         return "  "
 
-    def _rebuild_list(self) -> None:
-        while (child := self.list.get_first_child()) is not None:
-            self.list.remove(child)
-        self._rows = []
+    def _rebuild_list(self, *, preserve_entry_focus: bool = True) -> None:
+        # Preserve filter text + cursor — never let list rebuild eat typing
+        cursor = self.entry.get_position()
+        text = self.entry.get_text() or ""
 
-        q = (self.entry.get_text() or "").strip()
-        q_lower = q.lower()
+        self._rebuilding = True
+        try:
+            while (child := self.list.get_first_child()) is not None:
+                self.list.remove(child)
+            self._rows = []
 
-        def add_row(value: str, meta: str = "") -> None:
-            if any(v == value for v, _ in self._rows):
-                return
-            kind = meta or "item"
-            self._rows.append((value, kind))
-            row = Gtk.ListBoxRow()
-            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            box.set_margin_start(10)
-            box.set_margin_end(10)
-            box.set_margin_top(8)
-            box.set_margin_bottom(8)
-            label = Gtk.Label(
-                label=f"{self._status_prefix(value)}{value}",
-                xalign=0,
-                hexpand=True,
-                ellipsize=3,
-            )
-            box.append(label)
-            if meta == "recent":
-                badge = Gtk.Label(label="recent")
-                badge.add_css_class("dim-label")
-                badge.add_css_class("caption")
-                box.append(badge)
-            elif meta == "create":
-                badge = Gtk.Label(label="new")
-                badge.add_css_class("accent")
-                badge.add_css_class("caption")
-                box.append(badge)
-            elif meta == "active":
-                badge = Gtk.Label(label="on item")
-                badge.add_css_class("dim-label")
-                badge.add_css_class("caption")
-                box.append(badge)
-            row.set_child(box)
-            row._value = value  # type: ignore[attr-defined]
-            self.list.append(row)
+            q = text.strip()
+            q_lower = q.lower()
 
-        if not q:
-            # Active first (currently applied), then recents, then rest
-            for v in sorted(self._active, key=str.lower):
-                add_row(v, "active")
-            for v in self._recent:
-                if v in self._all or v in self._active:
-                    add_row(v, "recent")
-            for v in self._all:
-                add_row(v)
-        else:
-            starts = [v for v in self._all if v.lower().startswith(q_lower)]
-            contains = [
-                v
-                for v in self._all
-                if q_lower in v.lower() and not v.lower().startswith(q_lower)
-            ]
-            # Prefer recents that match
-            for v in self._recent:
-                if q_lower in v.lower():
-                    add_row(v, "recent")
-            for v in sorted(starts, key=str.lower):
-                add_row(v)
-            for v in sorted(contains, key=str.lower):
-                add_row(v)
-            if self._allow_create:
-                exact = any(v.lower() == q_lower for v in self._all) or q in self._active
-                if not exact and q:
-                    add_row(q, "create")
+            def add_row(value: str, meta: str = "") -> None:
+                if any(v == value for v, _ in self._rows):
+                    return
+                self._rows.append((value, meta or "item"))
+                row = Gtk.ListBoxRow()
+                row.set_activatable(True)
+                row.set_can_focus(False)
+                box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                box.set_margin_start(10)
+                box.set_margin_end(10)
+                box.set_margin_top(8)
+                box.set_margin_bottom(8)
+                label = Gtk.Label(
+                    label=f"{self._status_prefix(value)}{value}",
+                    xalign=0,
+                    hexpand=True,
+                    ellipsize=3,
+                )
+                box.append(label)
+                if meta == "recent":
+                    badge = Gtk.Label(label="recent")
+                    badge.add_css_class("dim-label")
+                    badge.add_css_class("caption")
+                    box.append(badge)
+                elif meta == "create":
+                    badge = Gtk.Label(label="new")
+                    badge.add_css_class("accent")
+                    badge.add_css_class("caption")
+                    box.append(badge)
+                elif meta == "active":
+                    badge = Gtk.Label(label="on item")
+                    badge.add_css_class("dim-label")
+                    badge.add_css_class("caption")
+                    box.append(badge)
+                row.set_child(box)
+                row._value = value  # type: ignore[attr-defined]
+                self.list.append(row)
 
-        if self._rows:
-            row0 = self.list.get_row_at_index(0)
-            if row0:
-                self.list.select_row(row0)
+            if not q:
+                for v in sorted(self._active, key=str.lower):
+                    add_row(v, "active")
+                for v in self._recent:
+                    if v in self._all or v in self._active:
+                        add_row(v, "recent")
+                for v in self._all:
+                    add_row(v)
+            else:
+                starts = [v for v in self._all if v.lower().startswith(q_lower)]
+                contains = [
+                    v
+                    for v in self._all
+                    if q_lower in v.lower() and not v.lower().startswith(q_lower)
+                ]
+                for v in self._recent:
+                    if q_lower in v.lower():
+                        add_row(v, "recent")
+                for v in sorted(starts, key=str.lower):
+                    add_row(v)
+                for v in sorted(contains, key=str.lower):
+                    add_row(v)
+                if self._allow_create:
+                    exact = any(v.lower() == q_lower for v in self._all) or q in self._active
+                    if not exact and q:
+                        add_row(q, "create")
+
+            if self._rows:
+                row0 = self.list.get_row_at_index(0)
+                if row0:
+                    self.list.select_row(row0)
+        finally:
+            self._rebuilding = False
+
+        if preserve_entry_focus:
+            # Restore text if something clobbered it, then focus + cursor
+            if (self.entry.get_text() or "") != text:
+                self.entry.set_text(text)
+            self.entry.grab_focus()
+            self.entry.set_position(cursor if cursor >= 0 else len(text))
 
     def _selected_value(self) -> str | None:
         row = self.list.get_selected_row()
@@ -248,23 +287,20 @@ class TogglePicker(Gtk.Window):
         r = self.list.get_row_at_index(new)
         if r:
             self.list.select_row(r)
-            r.grab_focus()
-            # Keep entry focused for typing, but selection updates
-            self.entry.grab_focus()
-            # Move cursor to end so typing continues
-            self.entry.set_position(-1)
+        # Keep typing focus in the entry
+        text = self.entry.get_text() or ""
+        self.entry.grab_focus()
+        self.entry.set_position(len(text))
 
     def _toggle_selected(self) -> None:
         value = self._selected_value()
         if not value:
-            # If filter has text and create allowed, toggle create value
             q = (self.entry.get_text() or "").strip()
             if q and self._allow_create:
                 value = q
             else:
                 return
         currently_on = value in self._active and value not in self._partial
-        # If partial or off → turn on; if fully on → turn off
         turn_on = not currently_on
         try:
             self._on_toggle(value, turn_on)
@@ -274,14 +310,16 @@ class TogglePicker(Gtk.Window):
             self._active.add(value)
             self._partial.discard(value)
             push_recent(self._recent_kind, value)
-            # Keep recent list in UI fresh
             self._recent = [value] + [x for x in self._recent if x != value]
         else:
             self._active.discard(value)
             self._partial.discard(value)
-        # Rebuild to update checkmarks; preserve filter
-        self._rebuild_list()
-        # Re-select same value if present
+
+        # Keep filter text; only refresh checkmarks
+        keep = self.entry.get_text() or ""
+        self._rebuild_list(preserve_entry_focus=True)
+        if (self.entry.get_text() or "") != keep:
+            self.entry.set_text(keep)
         for i, (v, _) in enumerate(self._rows):
             if v == value:
                 r = self.list.get_row_at_index(i)
@@ -289,7 +327,7 @@ class TogglePicker(Gtk.Window):
                     self.list.select_row(r)
                 break
         self.entry.grab_focus()
-        self.entry.set_position(-1)
+        self.entry.set_position(len(self.entry.get_text() or ""))
 
     def _on_row_activated(self, _list: Gtk.ListBox, _row: Gtk.ListBoxRow) -> None:
         self._toggle_selected()
@@ -303,16 +341,17 @@ class TogglePicker(Gtk.Window):
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             self._toggle_selected()
             return True
-        if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down):
-            self._move_selection(1)
+        if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down, Gdk.KEY_j) and not (
+            state & Gdk.ModifierType.CONTROL_MASK
+        ):
+            # Only j as nav if we want — actually j would block typing "project"
+            # Only arrow keys for nav, not hjkl
+            if keyval in (Gdk.KEY_j, Gdk.KEY_k):
+                return False
+            self._move_selection(1 if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down) else -1)
             return True
         if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up):
             self._move_selection(-1)
             return True
-        # Let entry handle typing; Tab moves to list
-        if keyval == Gdk.KEY_Tab:
-            row = self.list.get_selected_row()
-            if row:
-                row.grab_focus()
-            return True
+        # All other keys → let the Entry handle them (typing)
         return False

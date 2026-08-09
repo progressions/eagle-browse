@@ -159,6 +159,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._known_inbox_names: set[str] = set()
         self._scope_text = "all"
         self._thumb_size = THUMB_SIZE_DEFAULT
+        # While tag/folder/type pickers are open, ignore main-window hotkeys
+        self._picker_blocking = False
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
 
@@ -1694,6 +1696,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._search_timeout_id = GLib.timeout_add(SEARCH_DEBOUNCE_MS, fire)
 
     def _on_key(self, _controller: Gtk.EventControllerKey, keyval: int, _keycode: int, state: Gdk.ModifierType) -> bool:
+        # Modal tag/folder/type pickers own the keyboard — do not steal letters
+        # (was eating s/o/f/i/b/… so filter text became "ie" from "Sofie")
+        if self._picker_blocking:
+            return False
+
         focus = self.get_focus()
         in_search = self._focus_is_search(focus)
         in_sidebar = self._focus_is_sidebar(focus)
