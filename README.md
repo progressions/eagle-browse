@@ -37,13 +37,32 @@ Default library: `~/Dropbox/ISAAC/GENNIE/Eunbi.library`
 | Key | Action |
 |-----|--------|
 | `←` / `→` or `h` / `l` | Previous / next image |
+| `←` on leftmost column | Focus sidebar on the **current** smart folder / folder |
 | `↑` / `↓` or `k` / `j` | Image above / below (one row) |
-| `y` / `Enter` / `c` | **Copy absolute path** to clipboard |
-| `o` | Open in `imv` / system viewer |
+| `Enter` / `o` | Open image larger (`imv` / system viewer) |
+| `y` / `c` | **Copy absolute path** to clipboard |
+
+### Image viewer (`imv`) keys
+
+When you press Enter on an image, **imv** opens. Useful keys:
+
+| Key | Action |
+|-----|--------|
+| **`q`** or **`Esc`** | Close the viewer |
+| `+` / `-` or `i` / `o` | Zoom in / out |
+| `a` | Actual size (100%) |
+| `r` | Reset view |
+| `f` | Fullscreen |
+| arrows | Next/prev if multiple files (single file: pan depends on config) |
 | `/` or `Ctrl+F` | Focus search |
 | `f` | Focus sidebar (smart folders + folders) |
+| `Enter` (in sidebar) | Toggle expand / collapse smart folder |
+| `→` / `←` (in sidebar) | Expand / collapse smart folder |
+| click ▶ / ▼ | Expand / collapse smart folder |
 | `a` | All items |
 | `d` | Toggle “include subfolders” (regular folders only) |
+
+Smart folders start **collapsed** at the top level. Expand only the category you’re working in.
 | `g` / `G` | First / last item |
 | `r` | Reload library from disk |
 | `Esc` | Clear search / leave search |

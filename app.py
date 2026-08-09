@@ -20,7 +20,7 @@ gi.require_version("GdkPixbuf", "2.0")
 
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk  # noqa: E402
 
-from library import DEFAULT_LIBRARY, EagleLibrary, Item  # noqa: E402
+from library import DEFAULT_LIBRARY, EagleLibrary, Item, SmartFolder  # noqa: E402
 
 APP_ID = "cool.eagle.Browse"
 THUMB_SIZE = 160  # square cell edge (Eagle-style uniform tiles)
@@ -97,6 +97,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.selected_item: Item | None = None
         self._items: list[Item] = []
         self._filter_text = ""
+        # Smart-folder ids that are expanded. Empty = all top levels collapsed.
+        self._smart_expanded: set[str] = set()
         # Forced grid column count (min_columns == max_columns). Arrow-down
         # must step by exactly this many items or selection drifts diagonally.
         self._cols = 4
@@ -202,8 +204,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "←→ next/prev · ↑↓ row up/down · y/Enter copy path · o open · "
-                "/ search · f sidebar · a all · r reload · q quit"
+                "←→ move · ← from first col → sidebar · Enter open · y copy path · "
+                "f sidebar · o open · / search · r reload · q quit"
             ),
             xalign=0,
         )
@@ -245,16 +247,45 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         folder_id: str | None = None,
         smart_folder_id: str | None = None,
         dim: bool = False,
+        has_children: bool = False,
+        expanded: bool = False,
     ) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow()
         row.row_kind = kind  # type: ignore[attr-defined]
         row.folder_id = folder_id  # type: ignore[attr-defined]
         row.smart_folder_id = smart_folder_id  # type: ignore[attr-defined]
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        box.set_margin_start(8 + depth * 12)
+        row.has_children = has_children  # type: ignore[attr-defined]
+        row.expanded = expanded  # type: ignore[attr-defined]
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.set_margin_start(4 + depth * 12)
         box.set_margin_end(8)
-        box.set_margin_top(4)
-        box.set_margin_bottom(4)
+        box.set_margin_top(2)
+        box.set_margin_bottom(2)
+
+        # Disclosure triangle for collapsible smart folders
+        if kind == "smart" and has_children:
+            twisty = Gtk.Button()
+            twisty.add_css_class("flat")
+            twisty.add_css_class("circular")
+            twisty.set_valign(Gtk.Align.CENTER)
+            twisty.set_focus_on_click(False)
+            icon = "pan-down-symbolic" if expanded else "pan-end-symbolic"
+            twisty.set_icon_name(icon)
+            twisty.set_tooltip_text("Collapse" if expanded else "Expand")
+            sid = smart_folder_id
+
+            def on_twisty(_btn: Gtk.Button, folder_sid: str = sid or "") -> None:
+                self._toggle_smart_expand(folder_sid)
+
+            twisty.connect("clicked", on_twisty)
+            box.append(twisty)
+            row.twisty = twisty  # type: ignore[attr-defined]
+        else:
+            # Spacer so labels line up with expandable rows
+            spacer = Gtk.Box()
+            spacer.set_size_request(28 if kind == "smart" else 0, 1)
+            box.append(spacer)
+
         text = Gtk.Label(label=label, xalign=0, hexpand=True, ellipsize=3)
         if dim:
             text.add_css_class("dim-label")
@@ -262,25 +293,77 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         row.set_child(box)
         return row
 
-    def _populate_sidebar(self) -> None:
+    def _smart_ancestors(self, smart_id: str) -> list[str]:
+        """Parent chain from root → immediate parent (not including smart_id)."""
+        chain: list[str] = []
+        sf = self.library.smart_folders_by_id.get(smart_id)
+        while sf and sf.parent_id:
+            chain.append(sf.parent_id)
+            sf = self.library.smart_folders_by_id.get(sf.parent_id)
+        chain.reverse()
+        return chain
+
+    def _ensure_smart_expanded_path(self, smart_id: str | None) -> None:
+        """Expand ancestors so a nested smart folder is visible in the sidebar."""
+        if not smart_id:
+            return
+        for parent_id in self._smart_ancestors(smart_id):
+            self._smart_expanded.add(parent_id)
+
+    def _toggle_smart_expand(self, smart_id: str) -> None:
+        if not smart_id:
+            return
+        if smart_id in self._smart_expanded:
+            self._smart_expanded.discard(smart_id)
+            # Collapse descendants too so re-expand starts clean
+            to_drop = {
+                sid
+                for sid in self._smart_expanded
+                if smart_id in self._smart_ancestors(sid) or sid == smart_id
+            }
+            # Also drop any expanded node whose ancestor chain includes smart_id
+            for sid in list(self._smart_expanded):
+                if smart_id in self._smart_ancestors(sid):
+                    to_drop.add(sid)
+            self._smart_expanded -= to_drop
+            self._smart_expanded.discard(smart_id)
+        else:
+            self._smart_expanded.add(smart_id)
+        self._repopulate_sidebar_keep_selection()
+
+    def _repopulate_sidebar_keep_selection(self) -> None:
+        # Keep current selection visible if it's nested
+        self._ensure_smart_expanded_path(self.current_smart_folder_id)
+        self._populate_sidebar(select_current=True)
+
+    def _append_smart_tree(self, nodes: list[SmartFolder], depth: int = 0) -> None:
+        for sf in nodes:
+            has_children = bool(sf.children)
+            expanded = sf.id in self._smart_expanded
+            self.folder_list.append(
+                self._make_nav_row(
+                    label=sf.name,
+                    depth=depth,
+                    kind="smart",
+                    smart_folder_id=sf.id,
+                    has_children=has_children,
+                    expanded=expanded,
+                )
+            )
+            if has_children and expanded:
+                self._append_smart_tree(sf.children, depth + 1)
+
+    def _populate_sidebar(self, *, select_current: bool = False) -> None:
         while (child := self.folder_list.get_first_child()) is not None:
             self.folder_list.remove(child)
 
         all_row = self._make_nav_row(label="All items", kind="all")
         self.folder_list.append(all_row)
 
-        # Smart folders first — primary navigation for this workflow
+        # Smart folders first — primary navigation; top levels collapsed by default
         if self.library.smart_folders:
             self.folder_list.append(self._make_header_row("Smart folders"))
-            for sf, depth in self.library.flatten_smart_folders():
-                self.folder_list.append(
-                    self._make_nav_row(
-                        label=sf.name,
-                        depth=depth,
-                        kind="smart",
-                        smart_folder_id=sf.id,
-                    )
-                )
+            self._append_smart_tree(self.library.smart_folders, 0)
 
         if self.library.folders:
             self.folder_list.append(self._make_header_row("Folders"))
@@ -294,7 +377,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     )
                 )
 
-        self.folder_list.select_row(all_row)
+        if select_current:
+            self._restore_sidebar_selection()
+        else:
+            self.folder_list.select_row(all_row)
 
     def _on_sidebar_selected(self, _list: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
         if row is None:
@@ -303,19 +389,35 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if kind == "header":
             return
         if kind == "smart":
-            self.current_smart_folder_id = getattr(row, "smart_folder_id", None)
-            self.current_folder_id = None
+            new_smart = getattr(row, "smart_folder_id", None)
+            new_folder = None
         elif kind == "folder":
-            self.current_folder_id = getattr(row, "folder_id", None)
-            self.current_smart_folder_id = None
+            new_smart = None
+            new_folder = getattr(row, "folder_id", None)
         else:  # all
-            self.current_folder_id = None
-            self.current_smart_folder_id = None
+            new_smart = None
+            new_folder = None
+
+        # Same place as already shown (e.g. returning from grid via ←) — don't re-query
+        if (
+            new_smart == self.current_smart_folder_id
+            and new_folder == self.current_folder_id
+        ):
+            return
+
+        self.current_smart_folder_id = new_smart
+        self.current_folder_id = new_folder
         self.refresh_items()
 
     def _restore_sidebar_selection(self) -> None:
         target_smart = self.current_smart_folder_id
         target_folder = self.current_folder_id
+        # Expand ancestors, rebuild if the tree shape must change
+        before = set(self._smart_expanded)
+        self._ensure_smart_expanded_path(target_smart)
+        if self._smart_expanded != before:
+            self._populate_sidebar(select_current=False)
+
         row = self.folder_list.get_first_child()
         match: Gtk.ListBoxRow | None = None
         first_selectable: Gtk.ListBoxRow | None = None
@@ -324,10 +426,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 if first_selectable is None:
                     first_selectable = row
                 kind = getattr(row, "row_kind", None)
-                if target_smart and kind == "smart" and getattr(row, "smart_folder_id", None) == target_smart:
+                if (
+                    target_smart
+                    and kind == "smart"
+                    and getattr(row, "smart_folder_id", None) == target_smart
+                ):
                     match = row
                     break
-                if target_folder and kind == "folder" and getattr(row, "folder_id", None) == target_folder:
+                if (
+                    target_folder
+                    and kind == "folder"
+                    and getattr(row, "folder_id", None) == target_folder
+                ):
                     match = row
                     break
                 if not target_smart and not target_folder and kind == "all":
@@ -335,6 +445,55 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     break
             row = row.get_next_sibling()
         self.folder_list.select_row(match or first_selectable)
+
+    def _sidebar_expand_selected(self) -> bool:
+        """Right-arrow in sidebar: expand smart folder with children."""
+        row = self.folder_list.get_selected_row()
+        if row is None or getattr(row, "row_kind", None) != "smart":
+            return False
+        if not getattr(row, "has_children", False):
+            return False
+        sid = getattr(row, "smart_folder_id", None)
+        if not sid or sid in self._smart_expanded:
+            return False
+        self._smart_expanded.add(sid)
+        self._repopulate_sidebar_keep_selection()
+        return True
+
+    def _sidebar_collapse_selected(self) -> bool:
+        """Left-arrow in sidebar: collapse expanded smart folder, or jump to parent."""
+        row = self.folder_list.get_selected_row()
+        if row is None or getattr(row, "row_kind", None) != "smart":
+            return False
+        sid = getattr(row, "smart_folder_id", None)
+        if not sid:
+            return False
+        if getattr(row, "has_children", False) and sid in self._smart_expanded:
+            self._toggle_smart_expand(sid)
+            return True
+        # Collapse parent path: select parent if any
+        sf = self.library.smart_folders_by_id.get(sid)
+        if sf and sf.parent_id:
+            self.current_smart_folder_id = sf.parent_id
+            self.current_folder_id = None
+            # Ensure parent visible; collapse is optional
+            self._repopulate_sidebar_keep_selection()
+            self.refresh_items()
+            return True
+        return False
+
+    def _sidebar_toggle_selected(self) -> bool:
+        """Enter in sidebar: toggle expand/collapse on a collapsible smart folder."""
+        row = self.folder_list.get_selected_row()
+        if row is None or getattr(row, "row_kind", None) != "smart":
+            return False
+        if not getattr(row, "has_children", False):
+            return False
+        sid = getattr(row, "smart_folder_id", None)
+        if not sid:
+            return False
+        self._toggle_smart_expand(sid)
+        return True
 
     # ── Grid ──────────────────────────────────────────────────────────
 
@@ -538,7 +697,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._update_path_label()
 
     def _on_grid_activate(self, _grid: Gtk.GridView, _position: int) -> None:
-        self.copy_selected_path()
+        self.open_selected()
 
     def _update_path_label(self) -> None:
         if self.selected_item:
@@ -575,9 +734,40 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast("Nothing selected")
             return
         path = str(item.path)
-        for cmd in (["imv", path], ["xdg-open", path]):
+        # imv with explicit close/zoom binds — system config often omits Escape
+        imv_cmd = [
+            "imv",
+            "-s",
+            "full",  # fit image in window
+            "-c",
+            "bind q quit",
+            "-c",
+            "bind Q quit",
+            "-c",
+            "bind <Escape> quit",
+            "-c",
+            "bind <Ctrl+q> quit",
+            "-c",
+            "bind f fullscreen",
+            "-c",
+            "bind i zoom 1",
+            "-c",
+            "bind o zoom -1",
+            "-c",
+            "bind <plus> zoom 1",
+            "-c",
+            "bind <minus> zoom -1",
+            "-c",
+            "bind a zoom actual",
+            "-c",
+            "bind r reset",
+            path,
+        ]
+        for cmd in (imv_cmd, ["xdg-open", path]):
             try:
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if cmd[0] == "imv":
+                    self._toast("Viewer · q or Esc to close · +/- zoom · f fullscreen")
                 return
             except FileNotFoundError:
                 continue
@@ -589,8 +779,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except Exception as exc:  # noqa: BLE001
             self._toast(f"Reload failed: {exc}")
             return
-        self._populate_sidebar()
-        self._restore_sidebar_selection()
+        # Keep expand state; show current selection path
+        self._populate_sidebar(select_current=True)
         self.refresh_items()
         n_smart = len(self.library.smart_folders_by_id)
         self._toast(
@@ -601,10 +791,32 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.search.grab_focus()
 
     def focus_folders(self) -> None:
-        row = self.folder_list.get_selected_row() or self.folder_list.get_row_at_index(0)
-        if row:
-            self.folder_list.select_row(row)
+        """Focus sidebar, restoring the active smart folder / folder row (not always 'All')."""
+        # Expand ancestors so the current smart folder row is actually in the list
+        before = set(self._smart_expanded)
+        self._ensure_smart_expanded_path(self.current_smart_folder_id)
+        if self._smart_expanded != before:
+            self._populate_sidebar(select_current=False)
+
+        self._restore_sidebar_selection()
+        row = self.folder_list.get_selected_row()
+        if row is None:
+            row = self.folder_list.get_row_at_index(0)
+            if row is not None:
+                self.folder_list.select_row(row)
+        if row is not None:
+            # Focus the row itself so ↑↓ continue from this smart folder, not the top
             row.grab_focus()
+            self.folder_list.grab_focus()
+            # Re-grab the row after list focus (GTK sometimes focuses first child)
+            GLib.idle_add(self._focus_sidebar_row, row)
+
+    def _focus_sidebar_row(self, row: Gtk.ListBoxRow) -> bool:
+        if row.get_parent() is None:
+            return False
+        self.folder_list.select_row(row)
+        row.grab_focus()
+        return False
 
     def focus_grid(self) -> None:
         self.grid.grab_focus()
@@ -705,22 +917,37 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 return True
             return False
 
-        # Let the sidebar keep arrow-key navigation for folders
-        arrows = {
-            Gdk.KEY_Up,
-            Gdk.KEY_Down,
-            Gdk.KEY_Left,
-            Gdk.KEY_Right,
-            Gdk.KEY_KP_Up,
-            Gdk.KEY_KP_Down,
-            Gdk.KEY_KP_Left,
-            Gdk.KEY_KP_Right,
-        }
-        if in_sidebar and keyval in arrows:
-            return False
+        # Sidebar: ↑↓ move list; ←→ / Enter collapse-expand smart folders
+        if in_sidebar:
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                if self._sidebar_toggle_selected():
+                    return True
+                # Non-collapsible row: keep selection, don't copy path
+                return True
+            if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right):
+                if self._sidebar_expand_selected():
+                    return True
+                # Already open / no children → move into the image grid
+                self.focus_grid()
+                return True
+            if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left):
+                if self._sidebar_collapse_selected():
+                    return True
+                return False
+            if keyval in (
+                Gdk.KEY_Up,
+                Gdk.KEY_Down,
+                Gdk.KEY_KP_Up,
+                Gdk.KEY_KP_Down,
+            ):
+                return False  # ListBox handles vertical movement
 
-        if keyval in (Gdk.KEY_y, Gdk.KEY_Y, Gdk.KEY_c, Gdk.KEY_C, Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+        if keyval in (Gdk.KEY_y, Gdk.KEY_Y, Gdk.KEY_c, Gdk.KEY_C):
             self.copy_selected_path()
+            return True
+        # Enter on image grid: open larger (sidebar Enter is handled above)
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self.open_selected()
             return True
         if keyval in (Gdk.KEY_o, Gdk.KEY_O):
             self.open_selected()
@@ -752,11 +979,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Grid movement (reading order is left→right, top→bottom):
         #   Left/Right / h/l  → previous / next image
         #   Up/Down / k/j     → image above / below (exactly one row)
+        #   Left on first column → focus sidebar
         # Use cached self._cols — never re-layout the grid on every keypress.
         if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right, Gdk.KEY_l, Gdk.KEY_L):
             self.move_selection(1)
             return True
         if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left, Gdk.KEY_h, Gdk.KEY_H):
+            idx = self.selection.get_selected()
+            n = self.store.get_n_items()
+            cols = max(1, self._cols)
+            if n == 0 or idx == Gtk.INVALID_LIST_POSITION or int(idx) % cols == 0:
+                # Leftmost cell in the row (or empty grid) → jump to sidebar
+                self.focus_folders()
+                return True
             self.move_selection(-1)
             return True
         if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down, Gdk.KEY_j, Gdk.KEY_J):
