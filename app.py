@@ -684,6 +684,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         smart_id = self.current_smart_folder_id
         descendants = self.include_descendants
         search = self._filter_text
+        type_filters = set(self._type_filters)
         scope = self._scope_label()
         self.status_left.set_text(f"Loading… · {scope}")
 
@@ -695,6 +696,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 search=search,
                 include_deleted=False,
             )
+            if type_filters:
+                items = [
+                    it for it in items if _item_matches_type_filters(it, type_filters)
+                ]
             total = len(items)
             truncated = total > PAGE_SOFT_CAP
             page = items[:PAGE_SOFT_CAP] if truncated else items
@@ -711,7 +716,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 else:
                     self.selected_item = None
                 note = f" · showing first {PAGE_SOFT_CAP} of {total}" if truncated else ""
-                self._scope_text = f"{total} items · {scope}{note}"
+                type_bit = ""
+                if type_filters:
+                    type_bit = " · type:" + ",".join(sorted(type_filters))
+                self._scope_text = f"{total} items · {scope}{type_bit}{note}"
                 self._refresh_status()
                 self._update_path_label()
                 return False
