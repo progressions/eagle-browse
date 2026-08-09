@@ -76,8 +76,21 @@ Buttons: **Tags · Folders · Type · Size · Duration · Clear filters**
 | Duration | min/max seconds (video/audio) | — |
 
 Active filters show as chips under the buttons; click a chip to remove it.
+
+### Multi-select
+
+| Action | Behavior |
+|--------|----------|
+| **Click** | Select only that asset (sets range anchor) |
+| **Shift+click** | Select range from anchor to clicked item |
+| **Ctrl+click** | Add/remove one item without clearing others |
+| **Shift+arrows** | Extend range selection as you move |
+| **Space** | Toggle focused item in the selection |
+| **Esc** | Collapse multi-select back to the focused item |
+
+Selection applies to: **copy paths** (`y`/`Y`), **tags** (`t`), **folders** (`f`), **ratings** (`1`–`5`), **stage** (`s`).
+
 | `+` / `-` | Larger / smaller thumbnails |
-| `Space` | **Mark / unmark** current item (multi-select) |
 
 ### Library writes (tags & ratings)
 
