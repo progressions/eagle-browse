@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Launch Eagle Browse against your Dropbox library (override with EAGLE_LIBRARY).
 set -euo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks so ~/.local/bin/eagle-browse still finds app.py
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 export EAGLE_LIBRARY="${EAGLE_LIBRARY:-$HOME/Dropbox/ISAAC/GENNIE/Eunbi.library}"
 exec python3 "$DIR/app.py" "$@"
