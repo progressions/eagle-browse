@@ -310,16 +310,35 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _build_inspector(self) -> Gtk.Widget:
         """Right sidebar: preview + rating + tags + folders for selection."""
+        INSPECTOR_WIDTH = 300
         outer = Gtk.ScrolledWindow()
         outer.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        outer.set_size_request(300, -1)
-        outer.add_css_class("sidebar")
+        outer.set_size_request(INSPECTOR_WIDTH, -1)
+        outer.set_hexpand(False)
+        outer.set_vexpand(True)
+        outer.add_css_class("inspector-sidebar")
+        # CSS min/max width so the pane stays fixed while the grid expands
+        css = Gtk.CssProvider()
+        css.load_from_data(
+            f"""
+            scrolledwindow.inspector-sidebar {{
+                min-width: {INSPECTOR_WIDTH}px;
+                max-width: {INSPECTOR_WIDTH}px;
+            }}
+            """.encode()
+        )
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
         box.set_margin_start(12)
         box.set_margin_end(12)
+        box.set_hexpand(False)
         outer.set_child(box)
 
         self.insp_title = Gtk.Label(xalign=0, wrap=True)
