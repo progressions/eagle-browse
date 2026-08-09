@@ -242,6 +242,18 @@ def apply_folders(
     return data
 
 
+def apply_deleted(data: dict[str, Any], deleted: bool) -> dict[str, Any]:
+    """Eagle soft-delete: isDeleted + deletedTime (files stay on disk)."""
+    now = _now_ms()
+    if deleted:
+        data["isDeleted"] = True
+        data["deletedTime"] = now
+    else:
+        data["isDeleted"] = False
+        data.pop("deletedTime", None)
+    return data
+
+
 def folder_auto_tags_from_metadata(
     library_root: Path,
     folder_ids: list[str],

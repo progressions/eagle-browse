@@ -13,6 +13,7 @@ import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import gi
 
@@ -38,6 +39,8 @@ SEARCH_DEBOUNCE_MS = 150
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
 # UI sounds extracted from Eagle.app (app/sounds/*.wav)
 _SOUNDS_DIR = Path(__file__).resolve().parent / "sounds"
+# Keep Gtk.MediaFile refs alive until playback finishes (otherwise GC stops audio).
+_playing_media: list[Any] = []
 
 
 def _cell_w(thumb: int) -> int:
@@ -48,25 +51,58 @@ def _cell_h(thumb: int) -> int:
     return thumb + 36
 
 
-def play_sound(name: str = "notification") -> None:
-    """Play an Eagle UI sound (notification / remove / duplicate / error).
-
-    Non-blocking. Prefers PipeWire/Pulse players; falls through if spawn fails.
-    Uses a louder stereo variant for notification when present (short mono
-    clicks are easy to miss on HDMI).
-    """
-    path = _SOUNDS_DIR / f"{name}.wav"
+def _sound_path(name: str) -> Path | None:
+    """Resolve WAV path; prefer louder stereo notification variant."""
     if name == "notification":
         boosted = _SOUNDS_DIR / "notification_play.wav"
         if boosted.is_file():
-            path = boosted
-    if not path.is_file():
+            return boosted
+    path = _SOUNDS_DIR / f"{name}.wav"
+    return path if path.is_file() else None
+
+
+def play_sound(name: str = "notification") -> None:
+    """Play an Eagle UI sound (notification / remove / duplicate / error).
+
+    Primary path: Gtk.MediaFile (same process / session audio as the app).
+    Fallbacks: canberra-gtk-play, pw-play, paplay, mpv.
+    Safe to call from the GTK main loop (e.g. GLib.idle_add).
+    """
+    path = _sound_path(name)
+    if path is None:
         return
     path_s = str(path)
-    # Keep env (XDG_RUNTIME_DIR) so PipeWire/Pulse can find the session socket.
-    # Do not start_new_session — some setups then lose the audio context.
+
+    # 1) In-process GStreamer via GTK (most reliable under uwsm / Wayland)
+    try:
+        media = Gtk.MediaFile.new_for_filename(path_s)
+        media.set_loop(False)
+
+        def _on_ended(m: Gtk.MediaStream, *_args: object) -> None:
+            try:
+                _playing_media.remove(m)
+            except ValueError:
+                pass
+
+        media.connect("notify::ended", _on_ended)
+        _playing_media.append(media)
+        media.set_playing(True)
+        # If stream errors immediately, fall through to external players
+        err = media.get_error()
+        if err is None:
+            return
+        try:
+            _playing_media.remove(media)
+        except ValueError:
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2) External CLI players (inherit session env for PipeWire/Pulse)
     env = os.environ.copy()
     players: list[list[str]] = []
+    if shutil.which("canberra-gtk-play"):
+        players.append(["canberra-gtk-play", "-f", path_s])
     if shutil.which("pw-play"):
         players.append(["pw-play", path_s])
     if shutil.which("paplay"):
@@ -77,17 +113,17 @@ def play_sound(name: str = "notification") -> None:
                 "mpv",
                 "--no-video",
                 "--really-quiet",
-                "--volume=130",
+                "--volume=150",
                 "--audio-display=no",
                 path_s,
             ]
         )
+    if shutil.which("gst-play-1.0"):
+        players.append(["gst-play-1.0", path_s])
     if shutil.which("ffplay"):
         players.append(
             ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path_s]
         )
-    if shutil.which("aplay"):
-        players.append(["aplay", "-q", path_s])
 
     for cmd in players:
         try:
@@ -208,8 +244,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._thumb_size = THUMB_SIZE_DEFAULT
         # While tag/folder/type pickers are open, ignore main-window hotkeys
         self._picker_blocking = False
+        # Soft-delete undo: each entry is a batch of item ids (newest last)
+        self._delete_undo_stack: list[list[str]] = []
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
+        # Super+W (killactive) / window close must quit the process, not leave
+        # a headless instance polling the inbox with a ThreadPoolExecutor alive.
+        self.connect("close-request", self._on_window_close_request)
 
         self._build_ui()
         self._install_keybinds()
@@ -377,13 +418,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Also track clicks that focus the grid
         self.grid.connect("notify::has-focus", self._on_grid_has_focus_notify)
 
-        # Status bar
+        # Right: inspector (thumbnail, rating, tags, folders)
+        self.inspector_sidebar = self._build_inspector()
+        mid.append(self.inspector_sidebar)
+
+        # Status + hints span full window width (under both sidebars)
         status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         status.add_css_class("toolbar")
+        status.set_hexpand(True)
         status.set_margin_start(10)
         status.set_margin_end(10)
         status.set_margin_top(4)
-        status.set_margin_bottom(6)
+        status.set_margin_bottom(2)
 
         self.status_left = Gtk.Label(xalign=0, hexpand=True, ellipsize=3)
         self.status_left.add_css_class("dim-label")
@@ -393,12 +439,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.status_path.add_css_class("dim-label")
         self.status_path.set_selectable(True)
         status.append(self.status_path)
-        grid_col.append(status)
+        root.append(status)
 
         hints = Gtk.Label(
             label=(
-                "1-5 rate · t tags · f folders · sidebar A auto-tags · "
-                "Y copy · q quit"
+                "1-5 rate · t tags · f folders · Ctrl+A all · Del delete · "
+                "Ctrl+Z undo · Y copy · Super+W close"
             ),
             xalign=0,
         )
@@ -407,28 +453,42 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints.set_margin_end(10)
         hints.set_margin_bottom(8)
         hints.set_wrap(True)
-        grid_col.append(hints)
-
-        # Right: inspector (thumbnail, rating, tags, folders)
-        self.inspector_sidebar = self._build_inspector()
-        mid.append(self.inspector_sidebar)
+        hints.set_hexpand(True)
+        root.append(hints)
 
     def _build_inspector(self) -> Gtk.Widget:
         """Right sidebar: preview + rating + tags + folders for selection."""
-        INSPECTOR_WIDTH = 240
+        # Fixed width; children constrained so stars/paths don't expand the pane.
+        INSPECTOR_WIDTH = 220
+        SIDE_PAD = 16  # left/right padding around preview + content
+        CONTENT_W = INSPECTOR_WIDTH - (SIDE_PAD * 2)
+        PREVIEW = 172  # centered; side pad gives breathing room
+
         outer = Gtk.ScrolledWindow()
         outer.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         outer.set_size_request(INSPECTOR_WIDTH, -1)
         outer.set_hexpand(False)
         outer.set_vexpand(True)
+        # Don't grow to fit wide children (stars, long path labels)
+        try:
+            outer.set_propagate_natural_width(False)
+        except AttributeError:
+            pass
         outer.add_css_class("inspector-sidebar")
-        # CSS min/max width so the pane stays fixed while the grid expands
         css = Gtk.CssProvider()
         css.load_from_data(
             f"""
             scrolledwindow.inspector-sidebar {{
                 min-width: {INSPECTOR_WIDTH}px;
                 max-width: {INSPECTOR_WIDTH}px;
+            }}
+            scrolledwindow.inspector-sidebar button {{
+                min-width: 0;
+                min-height: 0;
+                padding: 2px 4px;
+            }}
+            scrolledwindow.inspector-sidebar label {{
+                max-width: {CONTENT_W}px;
             }}
             """.encode()
         )
@@ -438,87 +498,114 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        box.set_margin_top(12)
-        box.set_margin_bottom(12)
-        box.set_margin_start(10)
-        box.set_margin_end(10)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(SIDE_PAD)
+        box.set_margin_end(SIDE_PAD)
         box.set_hexpand(False)
+        box.set_size_request(CONTENT_W, -1)
         outer.set_child(box)
 
-        self.insp_title = Gtk.Label(xalign=0, wrap=True)
-        self.insp_title.add_css_class("title-4")
+        def _narrow_label(lbl: Gtk.Label, *, chars: int = 18) -> Gtk.Label:
+            lbl.set_wrap(True)
+            lbl.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+            lbl.set_max_width_chars(chars)
+            lbl.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
+            lbl.set_hexpand(False)
+            lbl.set_xalign(0.0)
+            return lbl
+
+        self.insp_title = _narrow_label(Gtk.Label(xalign=0), chars=16)
+        self.insp_title.add_css_class("heading")
         box.append(self.insp_title)
 
-        self.insp_subtitle = Gtk.Label(xalign=0, wrap=True)
+        self.insp_subtitle = _narrow_label(Gtk.Label(xalign=0), chars=18)
         self.insp_subtitle.add_css_class("dim-label")
         self.insp_subtitle.add_css_class("caption")
         box.append(self.insp_subtitle)
 
         self.insp_picture = Gtk.Picture()
-        self.insp_picture.set_size_request(200, 200)
+        self.insp_picture.set_size_request(PREVIEW, PREVIEW)
         self.insp_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         self.insp_picture.set_can_shrink(True)
+        self.insp_picture.set_hexpand(False)
         frame = Gtk.Box()
         frame.add_css_class("card")
         frame.set_halign(Gtk.Align.CENTER)
+        frame.set_hexpand(False)
+        frame.set_size_request(PREVIEW, PREVIEW)
         frame.append(self.insp_picture)
         box.append(frame)
 
-        # Rating
+        # Rating — compact stars only (Clear on next row; 5+Clear in one row was ~250px)
         rate_lbl = Gtk.Label(label="Rating", xalign=0)
         rate_lbl.add_css_class("heading")
         box.append(rate_lbl)
-        self.insp_stars_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.insp_stars_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.insp_stars_box.set_halign(Gtk.Align.START)
+        self.insp_stars_box.set_hexpand(False)
         self.insp_star_buttons: list[Gtk.Button] = []
         for n in range(1, 6):
             btn = Gtk.Button(label="☆")
             btn.add_css_class("flat")
+            btn.add_css_class("circular")
             btn.set_tooltip_text(f"Set {n} star(s)")
+            btn.set_size_request(28, 28)
+            btn.set_hexpand(False)
             btn.connect("clicked", lambda _b, s=n: self.set_rating(s))
             self.insp_star_buttons.append(btn)
             self.insp_stars_box.append(btn)
+        box.append(self.insp_stars_box)
         clear_r = Gtk.Button(label="Clear")
         clear_r.add_css_class("flat")
+        clear_r.set_halign(Gtk.Align.START)
         clear_r.connect("clicked", lambda *_: self.set_rating(0))
-        self.insp_stars_box.append(clear_r)
-        box.append(self.insp_stars_box)
-        self.insp_rating_note = Gtk.Label(xalign=0, wrap=True)
+        box.append(clear_r)
+        self.insp_rating_note = _narrow_label(Gtk.Label(xalign=0), chars=18)
         self.insp_rating_note.add_css_class("dim-label")
         self.insp_rating_note.add_css_class("caption")
         box.append(self.insp_rating_note)
 
         # Tags
-        tags_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        tags_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        tags_head.set_hexpand(False)
         tags_lbl = Gtk.Label(label="Tags", xalign=0, hexpand=True)
         tags_lbl.add_css_class("heading")
         tags_head.append(tags_lbl)
         edit_t = Gtk.Button(label="Edit")
         edit_t.add_css_class("flat")
+        edit_t.set_hexpand(False)
         edit_t.connect("clicked", lambda *_: self.edit_tags_dialog())
         tags_head.append(edit_t)
         box.append(tags_head)
-        self.insp_tags = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.insp_tags = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.insp_tags.set_hexpand(False)
         box.append(self.insp_tags)
 
         # Folders
-        folders_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        folders_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        folders_head.set_hexpand(False)
         folders_lbl = Gtk.Label(label="Folders", xalign=0, hexpand=True)
         folders_lbl.add_css_class("heading")
         folders_head.append(folders_lbl)
         edit_f = Gtk.Button(label="Edit")
         edit_f.add_css_class("flat")
+        edit_f.set_hexpand(False)
         edit_f.connect("clicked", lambda *_: self.edit_folders_dialog())
         folders_head.append(edit_f)
         box.append(folders_head)
-        self.insp_folders = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.insp_folders = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.insp_folders.set_hexpand(False)
         box.append(self.insp_folders)
 
         # Path
         path_lbl = Gtk.Label(label="Path", xalign=0)
         path_lbl.add_css_class("heading")
         box.append(path_lbl)
-        self.insp_path = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        self.insp_path = _narrow_label(
+            Gtk.Label(xalign=0, selectable=True), chars=18
+        )
         self.insp_path.add_css_class("caption")
         self.insp_path.add_css_class("dim-label")
         box.append(self.insp_path)
@@ -543,7 +630,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             box.remove(c)
 
     def _add_chip_label(self, box: Gtk.Box, text: str, *, dim: bool = False) -> None:
-        lbl = Gtk.Label(label=text, xalign=0, wrap=True)
+        lbl = Gtk.Label(label=text, xalign=0)
+        lbl.set_wrap(True)
+        lbl.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        lbl.set_max_width_chars(16)
+        lbl.set_ellipsize(3)
+        lbl.set_hexpand(False)
         if dim:
             lbl.add_css_class("dim-label")
         lbl.add_css_class("caption")
@@ -643,6 +735,46 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         controller.connect("key-pressed", self._on_key)
         self.add_controller(controller)
+
+    def _shutdown_background(self) -> None:
+        """Stop timers / workers so the process can actually exit."""
+        if self._inbox_poll_id:
+            try:
+                GLib.source_remove(self._inbox_poll_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._inbox_poll_id = 0
+        if self._search_timeout_id:
+            try:
+                GLib.source_remove(self._search_timeout_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._search_timeout_id = 0
+        if self._cols_sync_timeout_id:
+            try:
+                GLib.source_remove(self._cols_sync_timeout_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._cols_sync_timeout_id = 0
+        try:
+            _thumb_executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            # Python < 3.9 has no cancel_futures
+            try:
+                _thumb_executor.shutdown(wait=False)
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_window_close_request(self, *_args) -> bool:
+        """Window closed (including Hyprland Super+W killactive)."""
+        self._shutdown_background()
+        app = self.get_application()
+        if app is not None:
+            # Quit after this close finishes so D-Bus single-instance releases.
+            GLib.idle_add(app.quit)
+        return False  # allow destroy
 
     # ── Sidebar ───────────────────────────────────────────────────────
 
@@ -939,7 +1071,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.current_smart_folder_id = new_smart
         self.current_folder_id = new_folder
         self._special_view = new_special
-        self.refresh_items()
+        self.refresh_items(reset_selection=True)
 
     def _restore_sidebar_selection(self) -> None:
         target_smart = self.current_smart_folder_id
@@ -1156,8 +1288,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _on_grid_has_focus_notify(self, *_args) -> None:
         self._set_grid_focus(self.grid.has_focus())
 
-    def refresh_items(self) -> None:
-        """Kick off a background query so the UI never freezes on smart folders."""
+    def refresh_items(self, *, reset_selection: bool = False) -> None:
+        """
+        Kick off a background query so the UI never freezes on smart folders.
+
+        By default, multi-selection (_marked) is preserved across refresh so
+        tagging/categorizing on Untagged/Uncategorized can remove items from
+        the view without clearing the selection. Pass reset_selection=True
+        when changing sidebar scope.
+        """
         self._query_gen += 1
         gen = self._query_gen
         folder_id = self.current_folder_id
@@ -1169,6 +1308,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         vf = self._view_filters
         scope = self._scope_label()
         self.status_left.set_text(f"Loading… · {scope}")
+        # Capture selection for restore after re-query
+        keep_marks = set(self._marked) if not reset_selection else set()
+        keep_focus_id = (
+            self.selected_item.id
+            if (not reset_selection and self.selected_item is not None)
+            else None
+        )
 
         def work() -> None:
             if special in ("untagged", "uncategorized"):
@@ -1177,8 +1323,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     include_deleted=False,
                 )
                 if special == "untagged":
+                    # Only assets with zero tags
                     items = [it for it in items if not it.tags]
                 else:
+                    # Only assets with zero folders/categories
                     items = [it for it in items if not it.folders]
             else:
                 items = self.library.query(
@@ -1201,29 +1349,83 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.store.remove_all()
                 for item in page:
                     self.store.append(ItemObject(item))
-                if page:
-                    self._sel_anchor = 0
-                    self._last_focus_idx = 0
-                    self._marked = {page[0].id}
-                    self.selected_item = page[0]
-                    # Only show blue highlight if grid currently has focus
-                    if self._grid_has_focus:
-                        self.selection.set_selected(0)
-                    else:
-                        try:
-                            self.selection.set_selected(Gtk.INVALID_LIST_POSITION)
-                        except Exception:
+
+                page_ids = {it.id for it in page}
+                id_to_idx = {it.id: i for i, it in enumerate(page)}
+
+                if reset_selection or not keep_marks:
+                    if page:
+                        self._sel_anchor = 0
+                        self._last_focus_idx = 0
+                        self._marked = {page[0].id}
+                        self.selected_item = page[0]
+                        if self._grid_has_focus:
                             self.selection.set_selected(0)
+                        else:
+                            try:
+                                self.selection.set_selected(
+                                    Gtk.INVALID_LIST_POSITION
+                                )
+                            except Exception:
+                                self.selection.set_selected(0)
+                    else:
+                        self.selected_item = None
+                        self._marked.clear()
+                        self._sel_anchor = 0
+                        try:
+                            self.selection.set_selected(
+                                Gtk.INVALID_LIST_POSITION
+                            )
+                        except Exception:
+                            pass
                 else:
-                    self.selected_item = None
-                    self._marked.clear()
-                    self._sel_anchor = 0
-                    try:
-                        self.selection.set_selected(Gtk.INVALID_LIST_POSITION)
-                    except Exception:
-                        pass
+                    # Keep marks even for items that left this view (e.g. just
+                    # tagged while on Untagged). Inspector / stage / delete
+                    # still see them via _marked_items().
+                    self._marked = set(keep_marks)
+                    focus_idx = 0
+                    if page:
+                        if keep_focus_id and keep_focus_id in id_to_idx:
+                            focus_idx = id_to_idx[keep_focus_id]
+                        else:
+                            # Prefer first still-visible marked item
+                            for mid in keep_marks:
+                                if mid in id_to_idx:
+                                    focus_idx = id_to_idx[mid]
+                                    break
+                        self.selected_item = page[focus_idx]
+                        self._last_focus_idx = focus_idx
+                        self._sel_anchor = focus_idx
+                        if self._grid_has_focus:
+                            self.selection.set_selected(focus_idx)
+                        else:
+                            try:
+                                self.selection.set_selected(
+                                    Gtk.INVALID_LIST_POSITION
+                                )
+                            except Exception:
+                                self.selection.set_selected(focus_idx)
+                        # Ensure at least the focused row is marked if nothing
+                        # was marked (shouldn't happen with keep_marks)
+                        if not self._marked:
+                            self._marked = {page[focus_idx].id}
+                    else:
+                        # View empty (all selected items left this filter)
+                        self.selected_item = None
+                        try:
+                            self.selection.set_selected(
+                                Gtk.INVALID_LIST_POSITION
+                            )
+                        except Exception:
+                            pass
+                        # keep_marks retained so handoff/delete still works
+
                 note = f" · showing first {PAGE_SOFT_CAP} of {total}" if truncated else ""
+                in_view = len(self._marked & page_ids) if self._marked else 0
+                out_view = len(self._marked) - in_view if self._marked else 0
                 self._scope_text = f"{total} items · {scope}{note}"
+                if out_view > 0:
+                    self._scope_text += f" · ✓ {len(self._marked)} selected ({out_view} off-view)"
                 self._refresh_status()
                 self._update_path_label()
                 self._rebuild_filter_chips()
@@ -1336,8 +1538,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
             shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
             self._select_index(int(pos), ctrl=ctrl, shift=shift, from_click=True)
-            # Child GestureClick steals the sequence from GridView, so open
-            # on double-click here (Enter still uses activate / keybinds).
+            # Open on double-click here. GridView "activate" is intentionally a
+            # no-op — both used to fire and spawn two viewers.
             if n_press == 2 and not ctrl and not shift:
                 self.open_selected()
 
@@ -1465,7 +1667,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.update_inspector()
 
     def _on_grid_activate(self, _grid: Gtk.GridView, _position: int) -> None:
-        self.open_selected()
+        # Do not open here. Card GestureClick handles double-click (n_press==2).
+        # Calling open_selected from both paths opened two imv/mpv windows.
+        return
 
     def _update_path_label(self) -> None:
         if self.selected_item:
@@ -1621,6 +1825,67 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._sync_columns()
         self._toast(f"Thumb size · {self._thumb_size}px")
 
+    def delete_selected(self) -> None:
+        """
+        Soft-delete focused / multi-selected items (Eagle isDeleted).
+
+        Files stay on disk; Ctrl+Z restores the last batch.
+        """
+        from write import WriteError
+
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing to delete")
+            return
+        ids = [it.id for it in items if not it.is_deleted]
+        if not ids:
+            self._toast("Already deleted")
+            return
+        try:
+            ok_ids, errors = self.library.set_items_deleted(ids, deleted=True)
+        except WriteError as exc:
+            self._toast(str(exc))
+            return
+        if ok_ids:
+            self._delete_undo_stack.append(list(ok_ids))
+            # Cap undo history
+            if len(self._delete_undo_stack) > 50:
+                self._delete_undo_stack = self._delete_undo_stack[-50:]
+            self._marked.clear()
+            self.refresh_items()
+            msg = f"Deleted {len(ok_ids)} · Ctrl+Z undo"
+            if errors:
+                msg += f" · {len(errors)} failed"
+            self._toast(msg)
+        elif errors:
+            self._toast(errors[0])
+
+    def undo_delete(self) -> None:
+        """Restore the last soft-deleted batch (Ctrl+Z)."""
+        from write import WriteError
+
+        if not self._delete_undo_stack:
+            self._toast("Nothing to undo")
+            return
+        ids = self._delete_undo_stack.pop()
+        try:
+            ok_ids, errors = self.library.set_items_deleted(ids, deleted=False)
+        except WriteError as exc:
+            # Put batch back so user can retry
+            self._delete_undo_stack.append(ids)
+            self._toast(str(exc))
+            return
+        if ok_ids:
+            self.refresh_items()
+            # Re-select restored items if still in view
+            self._marked = set(ok_ids)
+            msg = f"Restored {len(ok_ids)}"
+            if errors:
+                msg += f" · {len(errors)} failed"
+            self._toast(msg)
+        else:
+            self._toast(errors[0] if errors else "Undo failed")
+
     # ── Actions ───────────────────────────────────────────────────────
 
     def toggle_mark_selected(self) -> None:
@@ -1629,6 +1894,30 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if idx == Gtk.INVALID_LIST_POSITION:
             return
         self._select_index(int(idx), ctrl=True, shift=False)
+
+    def select_all_visible(self) -> None:
+        """Multi-select every asset in the current grid view (Ctrl+A)."""
+        if not self._items:
+            self._toast("Nothing to select")
+            return
+        self._marked = {it.id for it in self._items}
+        # Keep focus; anchor at first item for further Shift ranges
+        self._sel_anchor = 0
+        idx = self.selection.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION or int(idx) >= len(self._items):
+            self.selection.set_selected(0)
+            idx = 0
+        self.selected_item = self._items[int(idx)]
+        self._last_focus_idx = int(idx)
+        self._rebind_grid_keep_selection()
+        self._refresh_status()
+        self._update_path_label()
+        self.update_inspector()
+        self.grid.grab_focus()
+        n = len(self._marked)
+        # View may be soft-capped (PAGE_SOFT_CAP)
+        scope = getattr(self, "_scope_text", "") or ""
+        self._toast(f"Selected all {n} in view" + (f" · {scope}" if scope else ""))
 
     def clear_marks(self) -> bool:
         if len(self._marked) <= 1:
@@ -1782,9 +2071,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except WriteError as exc:
                 self._toast(str(exc))
                 raise
-            self._rebind_grid_keep_selection()
-            self._update_path_label()
-            self.update_inspector()
+            # Re-query so Untagged drops just-tagged items; keep multi-select
+            self.refresh_items()
             self._toast(("+ " if turn_on else "− ") + tag)
 
         def on_close() -> None:
@@ -1933,9 +2221,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except WriteError as exc:
                 self._toast(str(exc))
                 raise
-            self._rebind_grid_keep_selection()
-            self._update_path_label()
-            self.update_inspector()
+            # Re-query so Uncategorized drops just-filed items; keep multi-select
+            self.refresh_items()
             msg = ("+ " if turn_on else "− ") + path_label
             if turn_on:
                 auto = self.library.auto_tags_for_folders([fid])
@@ -2199,12 +2486,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         win = Gtk.Window(
             title=title,
             transient_for=self,
-            # Modal: Hyprland focus-follows-mouse must not dismiss on hover.
-            modal=True,
+            # Non-modal: click on main app closes; hover alone does not.
+            modal=False,
             default_width=360,
         )
         self._picker_blocking = True
         closing = {"v": False}
+        outside: dict[str, Gtk.GestureClick | None] = {"g": None}
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.set_margin_top(16)
         box.set_margin_bottom(16)
@@ -2233,6 +2521,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if closing["v"]:
                 return
             closing["v"] = True
+            if outside["g"] is not None:
+                try:
+                    self.remove_controller(outside["g"])
+                except Exception:  # noqa: BLE001
+                    pass
+                outside["g"] = None
             self._picker_blocking = False
             win.destroy()
             self.grid.grab_focus()
@@ -2277,6 +2571,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         key.connect("key-pressed", on_key)
         win.add_controller(key)
         win.connect("close-request", lambda *_: (close_win() or True))
+
+        def arm_outside() -> bool:
+            if closing["v"]:
+                return False
+            click = Gtk.GestureClick()
+            click.set_button(1)
+            click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            click.connect("pressed", lambda *_: close_win())
+            self.add_controller(click)
+            outside["g"] = click
+            return False
+
+        GLib.timeout_add(200, arm_outside)
         win.present()
 
     def stage_marked(self) -> None:
@@ -2401,28 +2708,47 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast(f"Importing from {inbox.name}…")
 
         def work() -> None:
-            from import_media import import_file, list_inbox_files
+            from import_media import (
+                classify_inbox_files,
+                import_file,
+                list_inbox_files,
+                reimport_existing,
+            )
             from write import WriteError, write_session
 
             files = list_inbox_files(inbox)
             if only_names is not None:
                 files = [p for p in files if p.name in only_names]
+            # Drop zero-byte / unreadable
+            ready: list[Path] = []
+            for f in files:
+                try:
+                    if f.stat().st_size > 0:
+                        ready.append(f)
+                except OSError:
+                    continue
+
             results = []
+            unique: list[Path] = []
+            dups = []
             try:
-                if files:
+                unique, dups = classify_inbox_files(ready, self.library.items)
+            except Exception:  # noqa: BLE001
+                # Fall back to treating everything as unique
+                unique, dups = ready, []
+
+            # 1) Unique files → import immediately
+            try:
+                if unique:
                     with write_session(self.library.root):
-                        for f in files:
-                            try:
-                                if f.stat().st_size == 0:
-                                    continue
-                            except OSError:
-                                continue
+                        for f in unique:
                             results.append(
                                 import_file(
                                     self.library.root,
                                     f,
                                     move_source=True,
                                     hold_lock=True,
+                                    force_new=True,
                                 )
                             )
             except WriteError as exc:
@@ -2436,9 +2762,60 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 GLib.idle_add(fail)
                 return
 
-            ok = sum(1 for r in results if r.ok)
-            fail_n = sum(1 for r in results if not r.ok and not r.skipped)
-            err_msgs = [r.error for r in results if r.error and not r.ok][:3]
+            # 2) Duplicates → interactive review on the UI thread
+            if dups:
+                decisions = self._review_duplicates_blocking(dups)
+                try:
+                    with write_session(self.library.root):
+                        for match, action in decisions:
+                            if action == "skip":
+                                continue
+                            if action == "reuse":
+                                results.append(
+                                    reimport_existing(
+                                        self.library.root,
+                                        match.existing_id,
+                                        source=match.source,
+                                        move_source=True,
+                                        hold_lock=True,
+                                    )
+                                )
+                            elif action == "new":
+                                results.append(
+                                    import_file(
+                                        self.library.root,
+                                        match.source,
+                                        move_source=True,
+                                        hold_lock=True,
+                                        force_new=True,
+                                    )
+                                )
+                except WriteError as exc:
+                    err = str(exc)
+
+                    def fail2() -> bool:
+                        self._inbox_importing = False
+                        self._toast(f"Import locked: {err}")
+                        return False
+
+                    GLib.idle_add(fail2)
+                    return
+
+            ok = sum(1 for r in results if getattr(r, "ok", False))
+            reused = sum(
+                1 for r in results if getattr(r, "ok", False) and getattr(r, "reused", False)
+            )
+            new_n = ok - reused
+            fail_n = sum(
+                1
+                for r in results
+                if not getattr(r, "ok", False) and not getattr(r, "skipped", False)
+            )
+            err_msgs = [
+                getattr(r, "error", None)
+                for r in results
+                if getattr(r, "error", None) and not getattr(r, "ok", False)
+            ][:3]
 
             def done() -> bool:
                 self._inbox_importing = False
@@ -2453,14 +2830,26 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self.refresh_items()
                 elif fail_n:
                     play_sound("error")
-                msg = f"Imported {ok} into library"
+                parts: list[str] = []
+                if new_n:
+                    parts.append(f"{new_n} new")
+                if reused:
+                    parts.append(f"{reused} existing")
+                if parts:
+                    msg = "Imported " + " · ".join(parts)
+                else:
+                    msg = f"Imported {ok} into library"
+                if ok:
+                    msg += " · ♪"
                 if fail_n:
                     msg += f" · {fail_n} failed"
-                    if err_msgs:
+                    if err_msgs and err_msgs[0]:
                         msg += f" ({err_msgs[0]})"
-                if not results and manual:
+                if not ready and manual:
                     msg = f"Inbox empty · {inbox}"
-                if ok or manual or fail_n:
+                elif not results and not dups and manual:
+                    msg = f"Inbox empty · {inbox}"
+                if ok or manual or fail_n or dups:
                     self._toast(msg)
                 return False
 
@@ -2468,11 +2857,275 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=work, name="eagle-import", daemon=True).start()
 
+    def _review_duplicates_blocking(
+        self, dups: list
+    ) -> list[tuple[Any, str]]:
+        """
+        Show Eagle-style duplicate dialogs on the GTK main loop.
+
+        Returns list of (DuplicateMatch, action) where action is
+        ``reuse`` | ``new`` | ``skip``. Blocks the import worker thread.
+        """
+        from import_media import DuplicateMatch
+
+        remaining = list(dups)
+        out: list[tuple[Any, str]] = []
+        apply_all_action: str | None = None
+        event = threading.Event()
+        state: dict[str, Any] = {"apply_all": False, "action": "skip"}
+
+        def present_one(match: DuplicateMatch, index: int, total: int) -> bool:
+            play_sound("duplicate")
+            self._show_duplicate_dialog(
+                match,
+                index=index,
+                total=total,
+                state=state,
+                on_done=lambda: event.set(),
+            )
+            return False
+
+        for i, match in enumerate(remaining):
+            if apply_all_action is not None:
+                out.append((match, apply_all_action))
+                # Still consume? for apply-all reuse/new we process later in batch;
+                # for skip, leave file? Eagle applies same action including consuming.
+                continue
+            event.clear()
+            state["apply_all"] = False
+            state["action"] = "skip"
+            GLib.idle_add(present_one, match, i + 1, len(remaining))
+            # Wait until user responds (main loop runs dialog)
+            while not event.wait(timeout=0.05):
+                # keep waiting; import thread is not the main loop
+                if not self.get_realized():
+                    state["action"] = "skip"
+                    break
+            action = state.get("action") or "skip"
+            if state.get("apply_all"):
+                apply_all_action = action
+                # Current + rest
+                out.append((match, action))
+                for rest in remaining[i + 1 :]:
+                    out.append((rest, action))
+                break
+            out.append((match, action))
+        return out
+
+    def _show_duplicate_dialog(
+        self,
+        match: Any,
+        *,
+        index: int,
+        total: int,
+        state: dict[str, Any],
+        on_done: Any,
+    ) -> bool:
+        """Modal UI: show existing asset vs incoming; reuse / import new / skip."""
+        self._picker_blocking = True
+
+        win = Gtk.Window(
+            title=f"Duplicate · {index} of {total}",
+            transient_for=self,
+            modal=True,
+            default_width=720,
+            default_height=480,
+        )
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        root.set_margin_top(16)
+        root.set_margin_bottom(16)
+        root.set_margin_start(16)
+        root.set_margin_end(16)
+        win.set_child(root)
+
+        head = Gtk.Label(
+            label="This file already exists in the library",
+            xalign=0,
+        )
+        head.add_css_class("title-3")
+        root.append(head)
+        sub = Gtk.Label(
+            label=(
+                f"Incoming: {match.source.name}  ·  "
+                f"{match.size:,} bytes\n"
+                f"Existing: {match.existing_name}"
+            ),
+            xalign=0,
+            wrap=True,
+        )
+        sub.add_css_class("dim-label")
+        root.append(sub)
+
+        # Side-by-side previews
+        panes = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        panes.set_homogeneous(True)
+        panes.set_hexpand(True)
+        panes.set_vexpand(True)
+        root.append(panes)
+
+        def _load_preview_paintable(*candidates: Path | None) -> Gdk.Paintable | None:
+            """Load a scaled texture; set_filename is unreliable for Dropbox paths."""
+            for candidate in candidates:
+                if candidate is None:
+                    continue
+                p = Path(candidate)
+                if not p.is_file():
+                    continue
+                # Prefer images we can decode with GdkPixbuf
+                ext = p.suffix.lower()
+                if ext in {
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                    ".webp",
+                    ".gif",
+                    ".bmp",
+                    ".tif",
+                    ".tiff",
+                    ".avif",
+                }:
+                    try:
+                        pb = GdkPixbuf.Pixbuf.new_from_file_at_size(str(p), 560, 560)
+                        return Gdk.Texture.new_for_pixbuf(pb)
+                    except Exception:  # noqa: BLE001
+                        continue
+                # Non-image (video): try sibling-style nothing; fall through
+            return None
+
+        def preview_col(title: str, path: Path | None, thumb: Path | None) -> Gtk.Box:
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            col.append(Gtk.Label(label=title, xalign=0))
+            frame = Gtk.Frame()
+            frame.set_hexpand(True)
+            frame.set_vexpand(True)
+            pic = Gtk.Picture()
+            pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+            pic.set_can_shrink(True)
+            pic.set_size_request(280, 280)
+            # Thumb first (small), then full file for images
+            paintable = _load_preview_paintable(thumb, path)
+            if paintable is not None:
+                pic.set_paintable(paintable)
+            else:
+                # Last resort: file URI (helps some formats / gio loaders)
+                shown = False
+                for candidate in (thumb, path):
+                    if candidate is None:
+                        continue
+                    p = Path(candidate)
+                    if p.is_file():
+                        try:
+                            pic.set_file(Gio.File.new_for_path(str(p)))
+                            shown = True
+                            break
+                        except Exception:  # noqa: BLE001
+                            continue
+                if not shown:
+                    placeholder = Gtk.Label(label="No preview")
+                    placeholder.add_css_class("dim-label")
+                    frame.set_child(placeholder)
+                    col.append(frame)
+                    if path is not None:
+                        path_lbl = Gtk.Label(
+                            label=str(path), xalign=0, wrap=True, ellipsize=3
+                        )
+                        path_lbl.add_css_class("caption")
+                        path_lbl.add_css_class("dim-label")
+                        col.append(path_lbl)
+                    return col
+            frame.set_child(pic)
+            col.append(frame)
+            if path is not None:
+                path_lbl = Gtk.Label(
+                    label=str(path),
+                    xalign=0,
+                    wrap=True,
+                    ellipsize=3,
+                )
+                path_lbl.add_css_class("caption")
+                path_lbl.add_css_class("dim-label")
+                col.append(path_lbl)
+            return col
+
+        panes.append(
+            preview_col("In library", match.existing_path, match.existing_thumb)
+        )
+        # Incoming: no separate thumb; decode the source (or its path as image)
+        panes.append(preview_col("Incoming", match.source, None))
+
+        remaining_n = total - index + 1
+        apply_all = Gtk.CheckButton(
+            label=f"Apply to all {remaining_n} duplicates"
+        )
+        if remaining_n <= 1:
+            apply_all.set_sensitive(False)
+            apply_all.set_active(False)
+        root.append(apply_all)
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btns.set_halign(Gtk.Align.END)
+        root.append(btns)
+
+        finished = {"v": False}
+
+        def finish(action: str) -> None:
+            if finished["v"]:
+                return
+            finished["v"] = True
+            state["action"] = action
+            state["apply_all"] = bool(apply_all.get_active()) and remaining_n > 1
+            self._picker_blocking = False
+            win.destroy()
+            on_done()
+
+        skip = Gtk.Button(label="Skip")
+        skip.connect("clicked", lambda *_: finish("skip"))
+        reuse = Gtk.Button(label="Use existing")
+        reuse.add_css_class("suggested-action")
+        reuse.set_tooltip_text(
+            "Keep the library copy; set its imported-at time to now; discard inbox file"
+        )
+        reuse.connect("clicked", lambda *_: finish("reuse"))
+        new_btn = Gtk.Button(label="Import as new")
+        new_btn.set_tooltip_text("Create another library item with this file")
+        new_btn.connect("clicked", lambda *_: finish("new"))
+        btns.append(skip)
+        btns.append(new_btn)
+        btns.append(reuse)
+
+        key = Gtk.EventControllerKey()
+
+        def on_key(_c, keyval, _kc, _state):
+            if keyval == Gdk.KEY_Escape:
+                finish("skip")
+                return True
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                finish("reuse")
+                return True
+            return False
+
+        key.connect("key-pressed", on_key)
+        win.add_controller(key)
+
+        def on_close(*_a):
+            finish("skip")
+            return True  # we destroy ourselves in finish
+
+        win.connect("close-request", on_close)
+        win.present()
+        return False
+
     def open_selected(self) -> None:
         item = self.selected_item
         if not item:
             self._toast("Nothing selected")
             return
+        # Debounce: ignore a second open within 400ms (double-activate / double-Enter)
+        now = time.monotonic()
+        last = getattr(self, "_last_open_mono", 0.0)
+        if now - last < 0.4:
+            return
+        self._last_open_mono = now
         path = str(item.path)
 
         # Video / audio → mpv (plays with keyboard controls)
@@ -2685,9 +3338,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         in_search = self._focus_is_search(focus)
         in_sidebar = self._focus_is_sidebar(focus)
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        super_mod = bool(state & Gdk.ModifierType.SUPER_MASK)
 
-        if keyval in (Gdk.KEY_q, Gdk.KEY_Q) and not in_search:
-            self.close()
+        # Undo soft-delete — Ctrl+Z (standard Omarchy / Linux app undo)
+        if keyval in (Gdk.KEY_z, Gdk.KEY_Z) and ctrl and not super_mod and not in_search:
+            self.undo_delete()
+            return True
+        # Soft-delete selection (not while typing search)
+        if (
+            keyval in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete, Gdk.KEY_BackSpace)
+            and not in_search
+            and not in_sidebar
+            and not ctrl
+            and not super_mod
+        ):
+            self.delete_selected()
             return True
         if keyval == Gdk.KEY_Escape:
             if in_search:
@@ -2750,6 +3415,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Multi-select handoff (grid)
         if not in_sidebar and keyval == Gdk.KEY_space:
             self.toggle_mark_selected()
+            return True
+        # Ctrl+A — select all assets in the current view
+        if (
+            not in_sidebar
+            and not in_search
+            and keyval in (Gdk.KEY_a, Gdk.KEY_A)
+            and ctrl
+            and not super_mod
+        ):
+            self.select_all_visible()
             return True
         # Ratings 1–5 / 0 clear (not while typing search; not in sidebar)
         if not in_sidebar and not in_search and not ctrl:
@@ -2914,7 +3589,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if width <= 1:
             width = self.grid.get_width()
         if width <= 1:
-            width = max(400, self.get_width() - 300)
+            width = max(400, self.get_width() - 200)
 
         cell_w = _cell_w(self._thumb_size) + 16
         cols = max(1, min(16, int(width) // int(cell_w)))
@@ -2932,12 +3607,26 @@ class EagleBrowseApp(Adw.Application):
         self.library_path = library_path
         self.library = EagleLibrary(library_path)
         self.connect("activate", self._on_activate)
+        self.connect("shutdown", self._on_shutdown)
+
+    def _on_shutdown(self, *_args) -> None:
+        try:
+            _thumb_executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            try:
+                _thumb_executor.shutdown(wait=False)
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_activate(self, app: Adw.Application) -> None:
         win = self.props.active_window
-        if win:
+        if win is not None:
             win.present()
             return
+        # No active window: either first launch, or a zombie process after a
+        # compositor kill left us running. Create a fresh main window.
         try:
             self.library.load()
         except Exception as exc:  # noqa: BLE001

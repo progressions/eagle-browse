@@ -1,0 +1,16 @@
+[Unit]
+Description=Eagle Browse headless inbox importer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/eagle-inbox-watch --dup=reuse
+Restart=on-failure
+RestartSec=5
+# Dropbox may lag after login
+Environment=EAGLE_LIBRARY=%h/Dropbox/ISAAC/GENNIE/Eunbi.library
+Environment=EAGLE_INBOX=%h/Dropbox/ISAAC/GENNIE/Eunbi/PICS/Eunbi
+
+[Install]
+WantedBy=default.target

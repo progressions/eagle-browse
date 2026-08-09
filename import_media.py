@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -10,9 +11,16 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
-from write import WriteError, atomic_write_json, backup_file, write_session
+from write import (
+    WriteError,
+    atomic_write_json,
+    backup_file,
+    load_item_metadata,
+    save_item_metadata,
+    write_session,
+)
 
 # Default: user's Dropbox Eunbi inbox (watch/import only — no auto folder/tags)
 DEFAULT_INBOX = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/PICS/Eunbi"
@@ -35,6 +43,222 @@ class ImportResult:
     ok: bool = False
     skipped: bool = False
     error: str | None = None
+    # True when we re-touched an existing duplicate instead of creating a new item
+    reused: bool = False
+
+
+@dataclass
+class DuplicateMatch:
+    """An inbox file whose content already exists in the library."""
+
+    source: Path
+    content_hash: str
+    size: int
+    existing_id: str
+    existing_name: str
+    existing_path: Path
+    existing_thumb: Path | None
+    existing_width: int = 0
+    existing_height: int = 0
+
+
+def file_content_hash(path: Path, *, chunk: int = 1024 * 1024) -> str:
+    """MD5 of full file contents (Eagle-style exact content match)."""
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        while True:
+            block = f.read(chunk)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def _item_is_deleted(it: Any) -> bool:
+    """True for Eagle soft-deleted assets (never treat as import duplicates)."""
+    if getattr(it, "is_deleted", False):
+        return True
+    # Defensive: raw dicts / alternate attr names
+    if getattr(it, "isDeleted", False):
+        return True
+    return False
+
+
+def build_size_index(
+    items: Iterable[Any],
+) -> dict[int, list[Any]]:
+    """size → active (non-deleted) library items for content-hash dedupe."""
+    index: dict[int, list[Any]] = {}
+    for it in items:
+        if _item_is_deleted(it):
+            continue
+        sz = int(getattr(it, "size", 0) or 0)
+        if sz <= 0:
+            continue
+        index.setdefault(sz, []).append(it)
+    return index
+
+
+def find_duplicate_item(
+    source: Path,
+    *,
+    size_index: dict[int, list[Any]],
+    hash_cache: dict[str, str] | None = None,
+) -> DuplicateMatch | None:
+    """
+    Return a library match if *source* is an exact content duplicate.
+
+    Candidates are narrowed by file size, then verified with MD5.
+    Soft-deleted items (isDeleted) are never considered matches — re-importing
+    the same file after trash should create a fresh library item (or prompt
+    only against live assets).
+    """
+    source = source.expanduser().resolve()
+    try:
+        size = source.stat().st_size
+    except OSError:
+        return None
+    if size <= 0:
+        return None
+    candidates = size_index.get(size) or []
+    if not candidates:
+        return None
+
+    cache = hash_cache if hash_cache is not None else {}
+    src_key = str(source)
+    if src_key not in cache:
+        try:
+            cache[src_key] = file_content_hash(source)
+        except OSError:
+            return None
+    src_hash = cache[src_key]
+
+    for it in candidates:
+        if _item_is_deleted(it):
+            continue
+        path = getattr(it, "path", None)
+        if path is None:
+            continue
+        p = Path(path)
+        if not p.is_file():
+            continue
+        try:
+            if p.stat().st_size != size:
+                continue
+        except OSError:
+            continue
+        pkey = str(p)
+        if pkey not in cache:
+            try:
+                cache[pkey] = file_content_hash(p)
+            except OSError:
+                continue
+        if cache[pkey] != src_hash:
+            continue
+        thumb = getattr(it, "thumb", None)
+        return DuplicateMatch(
+            source=source,
+            content_hash=src_hash,
+            size=size,
+            existing_id=str(getattr(it, "id", "")),
+            existing_name=str(
+                getattr(it, "display_name", None)
+                or f"{getattr(it, 'name', '')}.{getattr(it, 'ext', '')}"
+            ),
+            existing_path=p,
+            existing_thumb=Path(thumb) if thumb else None,
+            existing_width=int(getattr(it, "width", 0) or 0),
+            existing_height=int(getattr(it, "height", 0) or 0),
+        )
+    return None
+
+
+def classify_inbox_files(
+    sources: list[Path],
+    items: Iterable[Any],
+) -> tuple[list[Path], list[DuplicateMatch]]:
+    """
+    Split inbox paths into unique imports vs content duplicates.
+
+    Soft-deleted library items are excluded from matching.
+    """
+    size_index = build_size_index(items)
+    hash_cache: dict[str, str] = {}
+    unique: list[Path] = []
+    dups: list[DuplicateMatch] = []
+    for src in sources:
+        match = find_duplicate_item(src, size_index=size_index, hash_cache=hash_cache)
+        if match:
+            dups.append(match)
+        else:
+            unique.append(src)
+    return unique, dups
+
+
+def reimport_existing(
+    library_root: Path,
+    item_id: str,
+    *,
+    source: Path | None = None,
+    move_source: bool = True,
+    hold_lock: bool = False,
+) -> ImportResult:
+    """
+    Eagle "use existing": bump import timestamps, do not create a new item.
+
+    Optionally consume the inbox *source* file afterward.
+    """
+    library_root = library_root.expanduser().resolve()
+    item_dir = library_root / "images" / f"{item_id}.info"
+    if not item_dir.is_dir():
+        return ImportResult(
+            source=source or Path("."),
+            ok=False,
+            error=f"existing item missing: {item_id}",
+        )
+
+    def _do() -> ImportResult:
+        try:
+            data = load_item_metadata(item_dir)
+            # save_item_metadata sets modificationTime + lastModified + mtime.json
+            save_item_metadata(library_root, item_dir, data, do_backup=True)
+            if move_source and source is not None:
+                try:
+                    source.unlink(missing_ok=True)
+                except OSError as exc:
+                    return ImportResult(
+                        source=source,
+                        item_id=item_id,
+                        ok=True,
+                        reused=True,
+                        error=f"reused but could not remove source: {exc}",
+                    )
+            return ImportResult(
+                source=source or item_dir,
+                item_id=item_id,
+                ok=True,
+                reused=True,
+            )
+        except WriteError as exc:
+            return ImportResult(
+                source=source or item_dir,
+                ok=False,
+                error=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ImportResult(
+                source=source or item_dir,
+                ok=False,
+                error=str(exc),
+            )
+
+    if hold_lock:
+        return _do()
+    try:
+        with write_session(library_root):
+            return _do()
+    except WriteError as exc:
+        return ImportResult(source=source or Path("."), ok=False, error=str(exc))
 
 
 def _now_ms() -> int:
@@ -252,6 +476,10 @@ def import_file(
     tags: list[str] | None = None,
     move_source: bool = True,
     hold_lock: bool = False,
+    force_new: bool = False,
+    size_index: dict[int, list[Any]] | None = None,
+    hash_cache: dict[str, str] | None = None,
+    items: Iterable[Any] | None = None,
 ) -> ImportResult:
     """
     Copy one media file into the Eagle library as a new item.
@@ -259,10 +487,30 @@ def import_file(
     If move_source is True (default), deletes the inbox file after a successful
     library copy so it is not re-imported. If hold_lock is False, acquires
     write_session; if True, caller holds the lock.
+
+    Duplicate handling is normally done by the UI (classify + dialog). If
+    *force_new* is False and *items*/*size_index* is provided, exact content
+    duplicates return skipped with error ``duplicate:<id>`` instead of importing.
     """
     source = source.expanduser().resolve()
     if not is_importable(source):
         return ImportResult(source=source, skipped=True, error="not importable")
+
+    if not force_new:
+        idx = size_index
+        if idx is None and items is not None:
+            idx = build_size_index(items)
+        if idx is not None:
+            match = find_duplicate_item(
+                source, size_index=idx, hash_cache=hash_cache
+            )
+            if match:
+                return ImportResult(
+                    source=source,
+                    item_id=match.existing_id,
+                    skipped=True,
+                    error=f"duplicate:{match.existing_id}",
+                )
 
     if folder_ids is not None:
         folder_ids = list(folder_ids)

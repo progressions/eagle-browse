@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Headless inbox consumer for Eagle Browse (no GTK UI).
+set -euo pipefail
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+export EAGLE_LIBRARY="${EAGLE_LIBRARY:-$HOME/Dropbox/ISAAC/GENNIE/Eunbi.library}"
+export EAGLE_INBOX="${EAGLE_INBOX:-$HOME/Dropbox/ISAAC/GENNIE/Eunbi/PICS/Eunbi}"
+exec python3 "$DIR/inbox_watch.py" "$@"

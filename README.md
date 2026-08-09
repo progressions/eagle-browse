@@ -59,6 +59,9 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `Enter` / `o` | Open larger: **images → imv**, **video/audio → mpv** |
 | `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
+| `Ctrl+A` | **Select all** assets in the current grid view |
+| `Delete` / `Backspace` | **Soft-delete** selection (Eagle trash — files stay on disk) |
+| `Ctrl+Z` | **Undo** last delete batch (restore items) |
 
 ### Inspector (right sidebar)
 
@@ -147,12 +150,56 @@ Default inbox:
 
 Import:
 
-1. Copies into `Eunbi.library/images/<ID>.info/`
-2. Writes Eagle `metadata.json` + thumbnail (ffmpeg for video)
-3. Leaves items untagged / uncategorized (assign tags/folders yourself in the app)
-4. Deletes the inbox file (library already has the copy)
+1. Content-hash (MD5) check against the library — exact duplicates open a review dialog
+2. Copies new items into `Eunbi.library/images/<ID>.info/`
+3. Writes Eagle `metadata.json` + thumbnail (ffmpeg for video)
+4. Leaves new items untagged / uncategorized (unless folder auto-tags apply when you file them)
+5. Deletes the inbox file after import or “use existing”
+
+### Duplicate import review
+
+When an inbox file is byte-identical to something already in the library:
+
+| Action | Behavior |
+|--------|----------|
+| **Use existing** | Keep the library item; set its imported-at (`modificationTime`) to now; delete inbox file |
+| **Import as new** | Create another library item with a full copy |
+| **Skip** | Leave the inbox file alone |
+| **Apply to all N** | Repeat the chosen action for every remaining duplicate in this batch |
 
 Requires `ffmpeg` / `ffprobe` for video (and ImageMagick `convert` as thumb fallback).
+
+### Headless inbox watcher (no UI)
+
+Runs at login and imports inbox files without opening Eagle Browse:
+
+```bash
+# Install launcher + enable user service
+ln -sfn ~/Work/tech/eagle-browse/eagle-inbox-watch ~/.local/bin/eagle-inbox-watch
+mkdir -p ~/.config/systemd/user
+cp ~/Work/tech/eagle-browse/eagle-inbox-watch.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now eagle-inbox-watch.service
+
+# Status / logs
+systemctl --user status eagle-inbox-watch
+journalctl --user -u eagle-inbox-watch -f
+# also: ~/.local/state/eagle-browse/inbox-watch.log
+
+# One-shot test
+eagle-inbox-watch --once -v
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--dup=reuse` | Exact MD5 match → bump imported-at, delete inbox file (**default**) |
+| `--dup=skip` | Leave duplicates in the inbox |
+| `--dup=queue` | Move dups to `inbox/.dup-queue/` for later review |
+| `--dup=new` | Always create a new library item |
+| `--once` | Single scan then exit |
+| `--no-notify` / `--no-sound` | Quiet mode |
+
+The watcher and the GUI share the same write lock, so only one imports at a time.
 | `Y` | **Copy all marked paths** (newline-separated; if none marked, copies focused) |
 | `Ctrl+Y` | Copy marked as `file://` URIs |
 | `y` / `c` | Copy **one** focused path |
@@ -213,7 +260,7 @@ Smart folders start **collapsed** at the top level. Expand only the category you
 | `g` / `G` | First / last item |
 | `r` | Reload library from disk |
 | `Esc` | Clear search / leave search |
-| `q` | Quit |
+| Super+W | Close window (Hyprland; `q` does not quit) |
 
 ## Safety
 

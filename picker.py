@@ -82,10 +82,10 @@ class TogglePicker(Gtk.Window):
         super().__init__(
             title=title,
             transient_for=parent,
-            # Modal keeps focus under Hyprland focus-follows-mouse; do not
-            # auto-close on is-active (mouse moving over the main window
-            # would dismiss the picker).
-            modal=True,
+            # Non-modal so clicks on the main window reach the parent (we close
+            # on that click). Do NOT close on is-active — Hyprland
+            # focus-follows-mouse would dismiss the picker on mere hover.
+            modal=False,
             default_width=420,
             default_height=480,
         )
@@ -105,6 +105,7 @@ class TogglePicker(Gtk.Window):
         self._rows: list[tuple[str, str]] = []  # (value, kind)
         self._rebuilding = False
         self._closing = False
+        self._outside_click: Gtk.GestureClick | None = None
 
         # Tell parent to ignore global hotkeys while open
         if hasattr(parent, "_picker_blocking"):
@@ -164,6 +165,8 @@ class TogglePicker(Gtk.Window):
 
         self._rebuild_list(preserve_entry_focus=False)
         GLib.idle_add(self._focus_entry)
+        # Arm after a short delay so the open-click doesn't immediately dismiss
+        GLib.timeout_add(200, self._install_outside_click)
 
     def _focus_entry(self) -> bool:
         self.entry.grab_focus()
@@ -171,8 +174,38 @@ class TogglePicker(Gtk.Window):
         self.entry.set_position(len(text))
         return False
 
+    def _install_outside_click(self) -> bool:
+        """Close when the user clicks the main app (not on mouse-over alone)."""
+        if self._closing or self._outside_click is not None:
+            return False
+        parent = self._parent
+        click = Gtk.GestureClick()
+        click.set_button(1)
+        click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+
+        def on_press(_g: Gtk.GestureClick, _n: int, _x: float, _y: float) -> None:
+            if self._closing:
+                return
+            # Click landed on parent (or its children) → dismiss picker
+            self.close()
+
+        click.connect("pressed", on_press)
+        parent.add_controller(click)
+        self._outside_click = click
+        return False
+
+    def _remove_outside_click(self) -> None:
+        if self._outside_click is None:
+            return
+        try:
+            self._parent.remove_controller(self._outside_click)
+        except Exception:  # noqa: BLE001
+            pass
+        self._outside_click = None
+
     def _on_close_request(self, *_args) -> bool:
         self._closing = True
+        self._remove_outside_click()
         if hasattr(self._parent, "_picker_blocking"):
             self._parent._picker_blocking = False  # type: ignore[attr-defined]
         if self._on_close_cb:

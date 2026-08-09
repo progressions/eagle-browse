@@ -658,6 +658,59 @@ class EagleLibrary:
         folder.tags = cleaned
         return folder
 
+    def set_items_deleted(
+        self, item_ids: list[str], *, deleted: bool
+    ) -> tuple[list[str], list[str]]:
+        """
+        Soft-delete or restore items (Eagle isDeleted / deletedTime).
+
+        Returns (ok_ids, error messages). Files are not removed from disk.
+        """
+        from write import (
+            WriteError,
+            apply_deleted,
+            load_item_metadata,
+            save_item_metadata,
+            write_session,
+        )
+
+        ok_ids: list[str] = []
+        errors: list[str] = []
+        if not item_ids:
+            return ok_ids, errors
+        try:
+            with write_session(self.root):
+                for iid in item_ids:
+                    item = self.items_by_id.get(iid)
+                    if item is None:
+                        errors.append(f"{iid}: unknown")
+                        continue
+                    if item.item_dir is None or not item.item_dir.is_dir():
+                        errors.append(f"{iid}: no item dir")
+                        continue
+                    if bool(item.is_deleted) == bool(deleted):
+                        # Already in desired state — still count as ok for undo noop
+                        ok_ids.append(iid)
+                        continue
+                    try:
+                        data = load_item_metadata(item.item_dir)
+                        apply_deleted(data, deleted)
+                        save_item_metadata(self.root, item.item_dir, data)
+                        item.is_deleted = deleted
+                        item.modification_time = int(
+                            data.get("modificationTime") or item.modification_time
+                        )
+                        self._refresh_item_derived(item)
+                        ok_ids.append(iid)
+                    except WriteError as exc:
+                        errors.append(f"{iid}: {exc}")
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(f"{iid}: {exc}")
+        except WriteError as exc:
+            return [], [str(exc)]
+        self._invalidate_caches()
+        return ok_ids, errors
+
     def update_item(
         self,
         item_id: str,
