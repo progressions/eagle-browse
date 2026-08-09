@@ -85,8 +85,11 @@ Active filters show as chips under the buttons; click a chip to remove it.
 | **Shift+click** | Select range from anchor to clicked item |
 | **Ctrl+click** | Add/remove one item without clearing others |
 | **Shift+arrows** | Extend range selection as you move |
-| **Space** | Toggle focused item in the selection |
+| **Ctrl+arrows** | Move focus **without** clearing the selection |
+| **Space** | Toggle focused item in/out of the selection |
 | **Esc** | Collapse multi-select back to the focused item |
+
+**Non-contiguous with keyboard only:** select a range (Shift+arrows) → **Ctrl+arrows** to another asset → **Space** to add it.
 
 Selection applies to: **copy paths** (`y`/`Y`), **tags** (`t`), **folders** (`f`), **ratings** (`1`–`5`), **stage** (`s`).
 

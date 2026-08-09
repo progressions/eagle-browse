@@ -282,8 +282,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "Filter bar: tags/folders/type/size/duration · Shift+Enter exclude · "
-                "t edit tags · f edit folders · b sidebar · 1-5 rate · q quit"
+                "Shift+arrows / Shift+click range · Ctrl+click add · Space toggle · "
+                "Y/y copy selection · t tags · f folders · 1-5 rate · q quit"
             ),
             xalign=0,
         )
@@ -1192,7 +1192,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if not self._clipboard_set_text(text):
             return
         kind = "file URIs" if as_file_uris else "paths"
-        if len(items) == 1 and not self._marked:
+        if len(items) == 1:
             self._toast(f"Copied {kind} · {items[0].display_name}")
         else:
             self._toast(f"Copied {len(items)} {kind}")
@@ -2008,7 +2008,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._toast(state)
         self.refresh_items()
 
-    def move_selection(self, delta: int) -> None:
+    def move_selection(
+        self, delta: int, *, extend: bool = False, keep_selection: bool = False
+    ) -> None:
+        """
+        Move focus by delta indices.
+        extend=True (Shift): select range from anchor to new focus.
+        keep_selection=True (Ctrl): move focus only; multi-selection unchanged.
+        neither: select only the new focus (and set anchor).
+        """
         n = self.store.get_n_items()
         if n == 0:
             return
@@ -2016,8 +2024,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if idx == Gtk.INVALID_LIST_POSITION:
             idx = 0
         new = max(0, min(n - 1, int(idx) + delta))
-        self.selection.set_selected(new)
-        self.grid.scroll_to(new, Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None)
+        if keep_selection and not extend:
+            # Move cursor only — selection set stays put (then Space / Ctrl+Space to add)
+            self.selection.set_selected(new)
+            self.grid.scroll_to(
+                new, Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None
+            )
+            obj = self.selection.get_selected_item()
+            self.selected_item = obj.item if obj else None
+            self._update_path_label()
+            self.grid.grab_focus()
+            return
+        self._select_index(new, ctrl=False, shift=extend)
         self.grid.grab_focus()
 
     def _toast(self, text: str) -> None:
@@ -2212,40 +2230,46 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.toggle_descendants()
             return True
         if keyval in (Gdk.KEY_g,):
-            self.selection.set_selected(0)
             if self.store.get_n_items():
-                self.grid.scroll_to(0, Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None)
+                self._select_index(
+                    0, shift=bool(state & Gdk.ModifierType.SHIFT_MASK)
+                )
             return True
         if keyval in (Gdk.KEY_G,):
             n = self.store.get_n_items()
             if n:
-                self.selection.set_selected(n - 1)
-                self.grid.scroll_to(n - 1, Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None)
+                self._select_index(
+                    n - 1, shift=bool(state & Gdk.ModifierType.SHIFT_MASK)
+                )
             return True
 
         # Grid movement (reading order is left→right, top→bottom):
         #   Left/Right / h/l  → previous / next image
         #   Up/Down / k/j     → image above / below (exactly one row)
+        #   Shift+arrows      → extend multi-selection range
         #   Left on first column → focus sidebar
-        # Use cached self._cols — never re-layout the grid on every keypress.
+        shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
         if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right, Gdk.KEY_l, Gdk.KEY_L):
-            self.move_selection(1)
+            self.move_selection(1, extend=shift)
             return True
         if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left, Gdk.KEY_h, Gdk.KEY_H):
             idx = self.selection.get_selected()
             n = self.store.get_n_items()
             cols = max(1, self._cols)
-            if n == 0 or idx == Gtk.INVALID_LIST_POSITION or int(idx) % cols == 0:
+            if (
+                not shift
+                and (n == 0 or idx == Gtk.INVALID_LIST_POSITION or int(idx) % cols == 0)
+            ):
                 # Leftmost cell in the row (or empty grid) → jump to sidebar
                 self.focus_folders()
                 return True
-            self.move_selection(-1)
+            self.move_selection(-1, extend=shift)
             return True
         if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down, Gdk.KEY_j, Gdk.KEY_J):
-            self.move_selection(self._cols)
+            self.move_selection(self._cols, extend=shift)
             return True
         if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up, Gdk.KEY_k, Gdk.KEY_K):
-            self.move_selection(-self._cols)
+            self.move_selection(-self._cols, extend=shift)
             return True
 
         return False
