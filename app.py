@@ -25,13 +25,22 @@ from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk  # noqa: 
 from library import DEFAULT_LIBRARY, EagleLibrary, Item, SmartFolder  # noqa: E402
 
 APP_ID = "cool.eagle.Browse"
-THUMB_SIZE = 160  # square cell edge (Eagle-style uniform tiles)
-CELL_W = THUMB_SIZE + 12
-CELL_H = THUMB_SIZE + 36  # square + caption
+THUMB_SIZE_DEFAULT = 160  # square cell edge (Eagle-style uniform tiles)
+THUMB_SIZE_MIN = 72
+THUMB_SIZE_MAX = 360
+THUMB_SIZE_STEP = 24
 PAGE_SOFT_CAP = 500  # smaller page = snappier folder switches
 SEARCH_DEBOUNCE_MS = 150
 # Staging handoff (copy out of library — never writes into .library)
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
+
+
+def _cell_w(thumb: int) -> int:
+    return thumb + 12
+
+
+def _cell_h(thumb: int) -> int:
+    return thumb + 36
 
 # Decode thumbs off the UI thread; textures are applied on the main loop.
 _thumb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="eagle-thumb")
@@ -62,7 +71,7 @@ def _center_crop_square(pixbuf: GdkPixbuf.Pixbuf, size: int) -> GdkPixbuf.Pixbuf
     return pixbuf
 
 
-def _decode_square_pixbuf(path: str, size: int = THUMB_SIZE) -> GdkPixbuf.Pixbuf | None:
+def _decode_square_pixbuf(path: str, size: int = THUMB_SIZE_DEFAULT) -> GdkPixbuf.Pixbuf | None:
     """Worker-thread: decode + crop. Do not touch GTK widgets here."""
     try:
         # Decode already scaled down — much faster than full-res then crop
@@ -70,6 +79,10 @@ def _decode_square_pixbuf(path: str, size: int = THUMB_SIZE) -> GdkPixbuf.Pixbuf
         return _center_crop_square(pixbuf, size)
     except Exception:
         return None
+
+
+def _thumb_cache_key(path: str, size: int) -> str:
+    return f"{path}@{size}"
 
 
 def _type_badge(item: Item) -> str:
@@ -115,6 +128,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._search_timeout_id = 0
         self._cols_sync_timeout_id = 0
         self._scope_text = "all"
+        self._thumb_size = THUMB_SIZE_DEFAULT
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
 
@@ -214,8 +228,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "Space mark · Y copy marked · s stage marked · y copy one · Enter open · "
-                "←→ move · Esc clear marks · f sidebar · r reload · q quit"
+                "Space mark · Y copy marked · s stage · +/- thumb size · y copy one · "
+                "Enter open · ←→ move · Esc clear marks · f sidebar · q quit"
             ),
             xalign=0,
         )
@@ -566,9 +580,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         threading.Thread(target=work, name="eagle-query", daemon=True).start()
 
     def _on_factory_setup(self, _factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem) -> None:
-        # Fixed-size card: square tile + one-line caption (uniform grid like Eagle default)
+        # Card sizes applied in bind from self._thumb_size (+/- zoom)
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        card.set_size_request(CELL_W, CELL_H)
         card.set_hexpand(False)
         card.set_vexpand(False)
         card.set_halign(Gtk.Align.CENTER)
@@ -580,7 +593,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         # Clip host so nothing paints outside the square
         tile = Gtk.Overlay()
-        tile.set_size_request(THUMB_SIZE, THUMB_SIZE)
         tile.set_hexpand(False)
         tile.set_vexpand(False)
         tile.set_overflow(Gtk.Overflow.HIDDEN)
@@ -588,7 +600,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         tile.add_css_class("frame")
 
         picture = Gtk.Picture()
-        picture.set_size_request(THUMB_SIZE, THUMB_SIZE)
         picture.set_content_fit(Gtk.ContentFit.COVER)
         picture.set_can_shrink(True)
         picture.set_halign(Gtk.Align.FILL)
@@ -628,7 +639,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         label = Gtk.Label(xalign=0.5, ellipsize=3, max_width_chars=18)
         label.add_css_class("caption")
-        label.set_size_request(THUMB_SIZE, -1)
         card.append(label)
 
         list_item.set_child(card)
@@ -638,12 +648,27 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         list_item.icon = icon  # type: ignore[attr-defined]
         list_item.mark = mark  # type: ignore[attr-defined]
         list_item.card = card  # type: ignore[attr-defined]
+        list_item.tile = tile  # type: ignore[attr-defined]
+
+    def _apply_thumb_geometry(self, list_item: Gtk.ListItem) -> int:
+        """Size card/tile/picture for current zoom level. Returns edge length."""
+        size = self._thumb_size
+        card: Gtk.Box = list_item.card  # type: ignore[attr-defined]
+        tile: Gtk.Overlay = list_item.tile  # type: ignore[attr-defined]
+        picture: Gtk.Picture = list_item.picture  # type: ignore[attr-defined]
+        label: Gtk.Label = list_item.label  # type: ignore[attr-defined]
+        card.set_size_request(_cell_w(size), _cell_h(size))
+        tile.set_size_request(size, size)
+        picture.set_size_request(size, size)
+        label.set_size_request(size, -1)
+        return size
 
     def _on_factory_bind(self, _factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem) -> None:
         obj = list_item.get_item()
         if obj is None:
             return
         item: Item = obj.item
+        size = self._apply_thumb_geometry(list_item)
         list_item.label.set_text(item.display_name)  # type: ignore[attr-defined]
         picture: Gtk.Picture = list_item.picture  # type: ignore[attr-defined]
         badge: Gtk.Label = list_item.badge  # type: ignore[attr-defined]
@@ -679,8 +704,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             icon.set_visible(True)
             return
 
+        cache_key = _thumb_cache_key(path, size)
         # Instant if cached
-        cached = _thumb_textures.get(path)
+        cached = _thumb_textures.get(cache_key)
         if cached is not None:
             picture.set_paintable(cached)
             picture.set_visible(True)
@@ -699,7 +725,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         icon.set_visible(True)
 
         def work() -> None:
-            pixbuf = _decode_square_pixbuf(path)
+            pixbuf = _decode_square_pixbuf(path, size)
 
             def apply() -> bool:
                 if getattr(list_item, "_thumb_gen", None) != gen:
@@ -714,7 +740,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                             _thumb_textures.pop(next(iter(_thumb_textures)))
                         except StopIteration:
                             break
-                _thumb_textures[path] = texture
+                _thumb_textures[cache_key] = texture
                 picture.set_paintable(texture)
                 picture.set_visible(True)
                 icon.set_visible(False)
@@ -796,6 +822,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.grid.scroll_to(
                 int(idx), Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None
             )
+
+    def adjust_thumb_size(self, direction: int) -> None:
+        """direction +1 larger, -1 smaller (keyboard +/-)."""
+        new = self._thumb_size + direction * THUMB_SIZE_STEP
+        new = max(THUMB_SIZE_MIN, min(THUMB_SIZE_MAX, new))
+        if new == self._thumb_size:
+            self._toast(f"Thumb size · {self._thumb_size}px (limit)")
+            return
+        self._thumb_size = new
+        self._rebind_grid_keep_selection()
+        self._sync_columns()
+        self._toast(f"Thumb size · {self._thumb_size}px")
 
     # ── Actions ───────────────────────────────────────────────────────
 
@@ -1162,6 +1200,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_s, Gdk.KEY_S) and not ctrl:
             self.stage_marked()
             return True
+        # Thumbnail zoom (+ larger / - smaller); skip when typing in search
+        if keyval in (
+            Gdk.KEY_plus,
+            Gdk.KEY_equal,  # unshifted = on many keyboards
+            Gdk.KEY_KP_Add,
+        ):
+            self.adjust_thumb_size(+1)
+            return True
+        if keyval in (Gdk.KEY_minus, Gdk.KEY_KP_Subtract):
+            self.adjust_thumb_size(-1)
+            return True
         # Enter on image grid: open larger (sidebar Enter is handled above)
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             self.open_selected()
@@ -1245,8 +1294,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if width <= 1:
             width = max(400, self.get_width() - 300)
 
-        cell_w = CELL_W + 16
-        cols = max(2, min(12, int(width) // int(cell_w)))
+        cell_w = _cell_w(self._thumb_size) + 16
+        cols = max(1, min(16, int(width) // int(cell_w)))
         if cols == self._cols and self.grid.get_min_columns() == cols:
             return False
         self._cols = cols
