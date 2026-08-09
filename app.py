@@ -106,6 +106,24 @@ def _thumb_path_for(item: Item) -> str | None:
     return None
 
 
+def _item_matches_type_filters(item: Item, filters: set[str]) -> bool:
+    """True if item matches any selected type filter (ext or image/video/audio)."""
+    if not filters:
+        return True
+    ext = item.ext_lower.lstrip(".")
+    for f in filters:
+        key = f.lower().lstrip(".")
+        if key == "image" and item.is_image:
+            return True
+        if key == "video" and item.is_video:
+            return True
+        if key == "audio" and item.is_audio:
+            return True
+        if key == ext:
+            return True
+    return False
+
+
 class EagleBrowseWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application, library: EagleLibrary):
         super().__init__(application=app, title="Eagle Browse", default_width=1280, default_height=800)
@@ -116,6 +134,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.selected_item: Item | None = None
         self._items: list[Item] = []
         self._filter_text = ""
+        # Media type filter: ext ("png") and/or kind ("image","video","audio"). Empty = all.
+        self._type_filters: set[str] = set()
         # Multi-select marks (item ids) — hand off via Y (paths) / s (stage)
         self._marked: set[str] = set()
         self._stage_dir = Path(
@@ -239,8 +259,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "1-5 rate · t tags · f folders · b sidebar · i import · Space mark · "
-                "Y copy · s stage · +/- size · Enter open · q quit"
+                "1-5 rate · t tags · f folders · m type filter · b sidebar · i import · "
+                "Space mark · Y copy · s stage · +/- size · Enter open · q quit"
             ),
             xalign=0,
         )
@@ -1229,6 +1249,70 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         picker.present()
 
+    def edit_type_filter_dialog(self) -> None:
+        """Filter grid by media kind (image/video/audio) and/or extension."""
+        from collections import Counter
+
+        from picker import TogglePicker, load_recent
+
+        counts: Counter[str] = Counter()
+        for it in self.library.items:
+            if it.is_deleted:
+                continue
+            if it.ext_lower:
+                counts[it.ext_lower] += 1
+            if it.is_image:
+                counts["image"] += 1
+            if it.is_video:
+                counts["video"] += 1
+            if it.is_audio:
+                counts["audio"] += 1
+
+        # Categories first, then extensions by frequency
+        categories = ["image", "video", "audio"]
+        exts = [
+            ext
+            for ext, _n in counts.most_common()
+            if ext not in categories
+        ]
+        all_values = categories + exts
+        recent = [r for r in load_recent("types") if r in counts or r in categories]
+        active = set(self._type_filters)
+
+        def on_toggle(value: str, turn_on: bool) -> None:
+            key = value.lower().lstrip(".")
+            if turn_on:
+                self._type_filters.add(key)
+            else:
+                self._type_filters.discard(key)
+            # refresh list from library with new filter
+            self.refresh_items()
+            if self._type_filters:
+                self._toast("Filter · " + ", ".join(sorted(self._type_filters)))
+            else:
+                self._toast("Filter · all types")
+
+        def on_close() -> None:
+            self.grid.grab_focus()
+
+        picker = TogglePicker(
+            self,
+            title="Filter by type",
+            subtitle=(
+                "Enter toggles · Esc closes · empty = show all · "
+                "image / video / audio or png, mp4, mp3…"
+            ),
+            all_values=all_values,
+            active=active,
+            partial=set(),
+            recent=recent,
+            allow_create=False,
+            recent_kind="types",
+            on_toggle=on_toggle,
+            on_close=on_close,
+        )
+        picker.present()
+
     def stage_marked(self) -> None:
         """Copy marked (or focused) files into the stage/outbox directory."""
         items = self._effective_hand_off_items()
@@ -1617,6 +1701,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 return True
             if self.clear_marks():
                 return True
+            if self._type_filters:
+                self._type_filters.clear()
+                self.refresh_items()
+                self._toast("Filter · all types")
+                return True
             if self._filter_text:
                 self.search.set_text("")
                 return True
@@ -1686,6 +1775,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 return True
             if keyval in (Gdk.KEY_f, Gdk.KEY_F):
                 self.edit_folders_dialog()
+                return True
+            if keyval in (Gdk.KEY_m, Gdk.KEY_M):
+                self.edit_type_filter_dialog()
                 return True
         # Y = all marked paths (or focused if none marked)
         # Ctrl+Y = file:// URI list

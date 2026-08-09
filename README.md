@@ -61,6 +61,8 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `0` | Clear rating |
 | `t` | **Tags** picker (recent + autocomplete; Enter toggles; Esc closes) |
 | `f` | **Folders / categories** picker (same UX as tags) |
+| `m` | **Filter by type** — `image` / `video` / `audio` or ext (`png`, `mp4`, `mp3`…) |
+| `Esc` | Clear marks → clear type filter → clear search |
 | `b` | Focus **sidebar** (was `f`) |
 | `+` / `-` | Larger / smaller thumbnails |
 | `Space` | **Mark / unmark** current item (multi-select) |
