@@ -312,6 +312,18 @@ def import_file(
             else:
                 _make_audio_thumbnail(thumb_path)
 
+            # Merge folder auto-tags (Eagle: folder.tags + ancestors) onto import
+            item_tags = list(tags)
+            if folder_ids:
+                try:
+                    from write import folder_auto_tags_from_metadata
+
+                    for t in folder_auto_tags_from_metadata(library_root, folder_ids):
+                        if t not in item_tags:
+                            item_tags.append(t)
+                except Exception:  # noqa: BLE001
+                    pass
+
             meta: dict[str, Any] = {
                 "id": iid,
                 "name": name,
@@ -319,7 +331,7 @@ def import_file(
                 "btime": btime,
                 "mtime": mtime,
                 "ext": ext,
-                "tags": tags,
+                "tags": item_tags,
                 "folders": folder_ids,
                 "isDeleted": False,
                 "url": "",

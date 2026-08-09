@@ -242,6 +242,116 @@ def apply_folders(
     return data
 
 
+def folder_auto_tags_from_metadata(
+    library_root: Path,
+    folder_ids: list[str],
+) -> list[str]:
+    """
+    Read folder auto-tags from metadata.json without a full library load.
+
+    For each folder id, merges tags from that folder and its ancestors
+    (root → leaf), de-duplicated, order-preserving.
+    """
+    meta_path = library_root / "metadata.json"
+    if not meta_path.is_file():
+        return []
+    try:
+        with meta_path.open("r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(meta, dict):
+        return []
+
+    # id -> (parent_id, tags)
+    index: dict[str, tuple[str | None, list[str]]] = {}
+
+    def index_walk(nodes: list[Any], parent_id: str | None = None) -> None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            fid = node.get("id")
+            if not fid:
+                continue
+            raw = node.get("tags") or []
+            tags = [str(t) for t in raw if t] if isinstance(raw, list) else []
+            index[str(fid)] = (parent_id, tags)
+            children = node.get("children")
+            if isinstance(children, list):
+                index_walk(children, str(fid))
+
+    roots = meta.get("folders")
+    if isinstance(roots, list):
+        index_walk(roots)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for fid in folder_ids:
+        chain: list[str] = []
+        cur: str | None = fid
+        walked: set[str] = set()
+        while cur and cur in index and cur not in walked:
+            walked.add(cur)
+            chain.append(cur)
+            cur = index[cur][0]
+        chain.reverse()
+        for aid in chain:
+            for t in index.get(aid, (None, []))[1]:
+                if t and t not in seen:
+                    seen.add(t)
+                    out.append(t)
+    return out
+
+
+def set_folder_auto_tags(
+    library_root: Path,
+    folder_id: str,
+    tags: list[str],
+) -> None:
+    """
+    Write Eagle folder auto-tags into library metadata.json.
+
+    Matches official Eagle: each folder node has a ``tags`` array applied to
+    items when they are added to that folder.
+    """
+    meta_path = library_root / "metadata.json"
+    if not meta_path.is_file():
+        raise WriteError(f"Missing library metadata: {meta_path}")
+    try:
+        with meta_path.open("r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WriteError(f"Cannot read metadata.json: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise WriteError("metadata.json root must be an object")
+
+    cleaned = list(dict.fromkeys(t.strip() for t in tags if t and str(t).strip()))
+    now = int(time.time() * 1000)
+    found = False
+
+    def walk(nodes: list[Any]) -> bool:
+        nonlocal found
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if node.get("id") == folder_id:
+                node["tags"] = cleaned
+                node["modificationTime"] = now
+                found = True
+                return True
+            children = node.get("children")
+            if isinstance(children, list) and walk(children):
+                return True
+        return False
+
+    roots = meta.get("folders")
+    if not isinstance(roots, list) or not walk(roots):
+        raise WriteError(f"Folder not found in metadata.json: {folder_id}")
+
+    backup_file(library_root, meta_path)
+    atomic_write_json(meta_path, meta)
+
+
 @contextmanager
 def write_session(library_root: Path) -> Iterator[LibraryLock]:
     lock = LibraryLock(library_root)

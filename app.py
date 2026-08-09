@@ -397,8 +397,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "1-5 rate (or inspector) · Shift+arrows select · Space add · "
-                "t tags · f folders · Y copy · q quit"
+                "1-5 rate · t tags · f folders · sidebar A auto-tags · "
+                "Y copy · q quit"
             ),
             xalign=0,
         )
@@ -763,6 +763,37 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if dim:
             text.add_css_class("dim-label")
         box.append(text)
+
+        # Folder auto-tags (Eagle "Auto tagging")
+        if kind == "folder" and folder_id:
+            folder = self.library.folders_by_id.get(folder_id)
+            auto = list(folder.tags) if folder else []
+            if auto:
+                badge = Gtk.Label(label="🏷")
+                badge.add_css_class("caption")
+                badge.set_tooltip_text("Auto-tags: " + ", ".join(auto))
+                box.append(badge)
+            tip = f"{label}"
+            if auto:
+                tip += f"\nAuto-tags: {', '.join(auto)}"
+            tip += "\nRight-click or press A · edit auto-tags"
+            row.set_tooltip_text(tip)
+
+            click = Gtk.GestureClick()
+            click.set_button(3)
+
+            def on_right(
+                _g: Gtk.GestureClick,
+                _n: int,
+                _x: float,
+                _y: float,
+                fid: str = folder_id,
+            ) -> None:
+                self.edit_folder_auto_tags(fid)
+
+            click.connect("pressed", on_right)
+            row.add_controller(click)
+
         row.set_child(box)
         return row
 
@@ -1774,6 +1805,78 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         picker.present()
 
+    def edit_folder_auto_tags(self, folder_id: str | None = None) -> None:
+        """
+        Edit Eagle-style auto-tags for a library folder.
+
+        When items are added to this folder, these tags (plus ancestor folder
+        auto-tags) are applied automatically — same as Eagle's folder Auto tagging.
+        """
+        from picker import TogglePicker, load_recent
+        from write import WriteError
+
+        fid = folder_id or self.current_folder_id
+        if not fid:
+            self._toast("Select a folder in the sidebar first")
+            return
+        folder = self.library.folders_by_id.get(fid)
+        if folder is None:
+            self._toast("Unknown folder")
+            return
+
+        path = self.library.folder_paths.get(fid, folder.name)
+        active = set(folder.tags)
+        # Live set for toggles (written on each Enter)
+        current = set(active)
+        all_tags = self.library.all_tags()
+        recent = load_recent("tags")
+
+        def on_toggle(tag: str, turn_on: bool) -> None:
+            if turn_on:
+                current.add(tag)
+            else:
+                current.discard(tag)
+            try:
+                self.library.set_folder_auto_tags(fid, sorted(current, key=str.lower))
+            except WriteError as exc:
+                self._toast(str(exc))
+                raise
+            # Sidebar badge / tooltip
+            self._repopulate_sidebar_keep_selection()
+            self._toast(
+                f"Auto-tags · {path}: "
+                + (", ".join(sorted(current, key=str.lower)) or "(none)")
+            )
+
+        def on_close() -> None:
+            self.folder_list.grab_focus()
+
+        inherited = [
+            t
+            for t in self.library.auto_tags_for_folders([fid])
+            if t not in current
+        ]
+        sub = (
+            f"{path} · Enter toggles · Esc closes\n"
+            "Applied when items are added to this folder"
+        )
+        if inherited:
+            sub += f"\nAlso from parents: {', '.join(inherited)}"
+
+        picker = TogglePicker(
+            self,
+            title=f"Auto-tags · {folder.name}",
+            subtitle=sub,
+            all_values=all_tags,
+            active=active,
+            recent=recent,
+            allow_create=True,
+            recent_kind="tags",
+            on_toggle=on_toggle,
+            on_close=on_close,
+        )
+        picker.present()
+
     def edit_folders_dialog(self) -> None:
         """Keyboard folder/category picker (same UX as tags)."""
         from picker import TogglePicker, load_recent
@@ -1833,7 +1936,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._rebind_grid_keep_selection()
             self._update_path_label()
             self.update_inspector()
-            self._toast(("+ " if turn_on else "− ") + path_label)
+            msg = ("+ " if turn_on else "− ") + path_label
+            if turn_on:
+                auto = self.library.auto_tags_for_folders([fid])
+                if auto:
+                    msg += " · auto-tags " + ", ".join(auto)
+            self._toast(msg)
 
         def on_close() -> None:
             self.grid.grab_focus()
@@ -2609,6 +2717,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         # Sidebar: ↑↓ move list; ←→ / Enter collapse-expand smart folders
         if in_sidebar:
+            if keyval in (Gdk.KEY_a, Gdk.KEY_A) and not ctrl:
+                # Auto-tags for the selected library folder
+                row = self.folder_list.get_selected_row()
+                fid = getattr(row, "folder_id", None) if row else None
+                if fid or self.current_folder_id:
+                    self.edit_folder_auto_tags(fid or self.current_folder_id)
+                    return True
             if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
                 if self._sidebar_toggle_selected():
                     return True

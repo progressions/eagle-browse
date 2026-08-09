@@ -71,11 +71,20 @@ Shows the focused asset (or **common** values when multi-selected):
 - Path (single selection)
 | `t` | **Tags** picker (recent + autocomplete; Enter toggles; Esc closes) |
 | `f` | **Folders / categories** picker (same UX as tags) |
+| `A` (sidebar) | **Folder auto-tags** for the selected folder (or right-click the folder) |
 | `m` | **Filter by type** (or use the **Type** button on the filter bar) |
 | `Esc` | Clear marks → clear view filters → clear search |
 | `b` | Focus **sidebar** |
 
 Left nav includes **Untagged** and **Uncategorized** virtual views.
+
+### Folder auto-tags (Eagle-compatible)
+
+Same as Eagle’s **Auto tagging** on a folder: each folder stores a `tags` list in library `metadata.json`. When you add an item to that folder (via **`f`**), those tags — plus auto-tags from ancestor folders — are applied to the item.
+
+- **Edit:** select a folder in the left nav → **`A`**, or **right-click** the folder name  
+- **Badge:** folders with auto-tags show a 🏷 marker; tooltip lists the tags  
+- **Storage:** same field Eagle uses (`folder.tags` in `metadata.json`), so desktop Eagle and Eagle Browse stay in sync  
 
 ### Collapsible sidebars
 

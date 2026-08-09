@@ -38,6 +38,8 @@ class Folder:
     name: str
     children: list[Folder] = field(default_factory=list)
     parent_id: str | None = None
+    # Eagle "Auto tagging" on folders — applied when an item is added to this folder
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -106,10 +108,13 @@ def _parse_folders(
     roots: list[Folder] = []
     by_id: dict[str, Folder] = {}
     for node in nodes:
+        raw_tags = node.get("tags") or []
+        tags = [str(t) for t in raw_tags if t] if isinstance(raw_tags, list) else []
         folder = Folder(
             id=node["id"],
             name=node.get("name") or "(unnamed)",
             parent_id=parent_id,
+            tags=tags,
         )
         by_id[folder.id] = folder
         children, child_map = _parse_folders(node.get("children") or [], folder.id)
@@ -602,7 +607,56 @@ class EagleLibrary:
         tags: set[str] = set()
         for it in self.items:
             tags.update(it.tags)
+        # Include folder auto-tags (may not be used on any item yet)
+        for folder in self.folders_by_id.values():
+            tags.update(folder.tags)
         return sorted(tags, key=str.lower)
+
+    def folder_ancestor_ids(self, folder_id: str) -> list[str]:
+        """Root → … → folder_id (inclusive)."""
+        chain: list[str] = []
+        seen: set[str] = set()
+        cur: str | None = folder_id
+        while cur and cur not in seen:
+            seen.add(cur)
+            chain.append(cur)
+            folder = self.folders_by_id.get(cur)
+            cur = folder.parent_id if folder else None
+        chain.reverse()
+        return chain
+
+    def auto_tags_for_folders(self, folder_ids: Iterable[str]) -> list[str]:
+        """
+        Eagle-style folder auto-tags for the given folders.
+
+        Tags from each folder and its ancestors are merged (order preserved,
+        de-duplicated). Nested auto-tag folders stack when an item is filed deep.
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+        for fid in folder_ids:
+            for aid in self.folder_ancestor_ids(fid):
+                folder = self.folders_by_id.get(aid)
+                if not folder:
+                    continue
+                for t in folder.tags:
+                    if t and t not in seen:
+                        seen.add(t)
+                        out.append(t)
+        return out
+
+    def set_folder_auto_tags(self, folder_id: str, tags: list[str]) -> Folder:
+        """Persist Eagle folder auto-tags into library metadata.json."""
+        from write import WriteError, set_folder_auto_tags, write_session
+
+        if folder_id not in self.folders_by_id:
+            raise WriteError(f"Unknown folder id: {folder_id}")
+        cleaned = list(dict.fromkeys(t.strip() for t in tags if t and t.strip()))
+        with write_session(self.root):
+            set_folder_auto_tags(self.root, folder_id, cleaned)
+        folder = self.folders_by_id[folder_id]
+        folder.tags = cleaned
+        return folder
 
     def update_item(
         self,
@@ -653,18 +707,32 @@ class EagleLibrary:
                 or add_folders is not None
                 or remove_folders is not None
             ):
+                before = set(data.get("folders") or [])
                 apply_folders(
                     data,
                     set_folders=set_folders,
                     add_folders=add_folders,
                     remove_folders=remove_folders,
                 )
+                after = set(data.get("folders") or [])
+                added = after - before
+                if added:
+                    auto = self.auto_tags_for_folders(added)
+                    if auto:
+                        apply_tags(data, add_tags=auto)
             save_item_metadata(self.root, item.item_dir, data)
 
         # Update in-memory model
         if star is not ...:
             item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
-        if set_tags is not None or add_tags is not None or remove_tags is not None:
+        # Tags may change from explicit edit and/or folder auto-tags
+        if (
+            set_tags is not None
+            or add_tags is not None
+            or remove_tags is not None
+            or set_folders is not None
+            or add_folders is not None
+        ):
             item.tags = list(data.get("tags") or [])
         if (
             set_folders is not None
@@ -803,17 +871,30 @@ class EagleLibrary:
             or add_folders is not None
             or remove_folders is not None
         ):
+            before = set(data.get("folders") or [])
             apply_folders(
                 data,
                 set_folders=set_folders,
                 add_folders=add_folders,
                 remove_folders=remove_folders,
             )
+            after = set(data.get("folders") or [])
+            added = after - before
+            if added:
+                auto = self.auto_tags_for_folders(added)
+                if auto:
+                    apply_tags(data, add_tags=auto)
         save_item_metadata(self.root, item.item_dir, data)
 
         if star is not ...:
             item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
-        if set_tags is not None or add_tags is not None or remove_tags is not None:
+        if (
+            set_tags is not None
+            or add_tags is not None
+            or remove_tags is not None
+            or set_folders is not None
+            or add_folders is not None
+        ):
             item.tags = list(data.get("tags") or [])
         if (
             set_folders is not None
