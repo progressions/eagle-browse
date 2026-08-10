@@ -102,8 +102,18 @@ def _play_sound(name: str = "notification") -> None:
                 continue
 
 
-def _stable_ready(inbox: Path, sizes: dict[str, int]) -> tuple[list[Path], dict[str, int]]:
-    """Return files seen twice with the same size (Dropbox-finished)."""
+def _stable_ready(
+    inbox: Path,
+    sizes: dict[str, int],
+    *,
+    wait_logged: set[str] | None = None,
+) -> tuple[list[Path], dict[str, int]]:
+    """
+    Return files seen twice with the same size (Dropbox-finished) *and*
+    that pass media completeness (not a tiny incomplete stub).
+    """
+    from import_media import check_media_complete
+
     files = list_inbox_files(inbox)
     current: dict[str, int] = {}
     ready: list[Path] = []
@@ -117,7 +127,21 @@ def _stable_ready(inbox: Path, sizes: dict[str, int]) -> tuple[list[Path], dict[
         current[p.name] = sz
         prev = sizes.get(p.name)
         if prev is not None and prev == sz:
-            ready.append(p)
+            ok, reason = check_media_complete(p)
+            if ok:
+                ready.append(p)
+                if wait_logged is not None:
+                    wait_logged.discard(p.name)
+            else:
+                # Still downloading or corrupt — keep waiting.
+                key = f"{p.name}:{sz}"
+                if wait_logged is not None and key not in wait_logged:
+                    wait_logged.add(key)
+                    # Drop stale keys for this name
+                    wait_logged.difference_update(
+                        {k for k in list(wait_logged) if k.startswith(p.name + ":") and k != key}
+                    )
+                    LOG.info("waiting on %s: %s", p.name, reason)
     return ready, current
 
 
@@ -178,6 +202,9 @@ def process_ready(
                 if r.ok:
                     new_n += 1
                     LOG.info("imported new %s → %s", f.name, r.item_id)
+                elif r.skipped and r.error and str(r.error).startswith("not-ready:"):
+                    # Incomplete download; leave in inbox for a later poll.
+                    LOG.info("defer %s: %s", f.name, r.error)
                 else:
                     fail_n += 1
                     LOG.warning("import failed %s: %s", f.name, r.error)
@@ -270,10 +297,11 @@ def run_loop(
     LOG.info("library ready · %d items · inbox %s · dup=%s", len(library.items), inbox, dup_policy)
 
     sizes: dict[str, int] = {}
+    wait_logged: set[str] = set()
     while True:
         try:
-            ready, sizes = _stable_ready(inbox, sizes)
-            # Only import files that are ready (stable size)
+            ready, sizes = _stable_ready(inbox, sizes, wait_logged=wait_logged)
+            # Only import files that are ready (stable size + playable)
             if ready:
                 process_ready(
                     library,

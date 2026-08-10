@@ -35,6 +35,16 @@ VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".m4v", ".avi"}
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".aiff", ".aif"}
 SKIP_NAMES = {".ds_store", "thumbs.db", "desktop.ini"}
 
+# Incomplete Dropbox / progressive writes often leave a tiny ftyp-only stub
+# (commonly 32–64 bytes) that stays size-stable until the real payload arrives.
+# Reject below these floors before even probing.
+MIN_BYTES_IMAGE = 32
+MIN_BYTES_VIDEO = 1024
+MIN_BYTES_AUDIO = 256
+
+# Error prefix: temporary incomplete download — leave in inbox and retry later.
+NOT_READY_PREFIX = "not-ready:"
+
 
 @dataclass
 class ImportResult:
@@ -84,6 +94,30 @@ def _item_is_deleted(it: Any) -> bool:
     return False
 
 
+def _item_looks_corrupt(it: Any) -> bool:
+    """True for unplayable stubs we must never treat as dedupe matches."""
+    sz = int(getattr(it, "size", 0) or 0)
+    ext = str(getattr(it, "ext", "") or "").lower().lstrip(".")
+    dotted = f".{ext}" if ext else ""
+    if dotted in VIDEO_EXTS:
+        if sz < MIN_BYTES_VIDEO:
+            return True
+        # Imported incomplete videos end up with width/height 0
+        w = int(getattr(it, "width", 0) or 0)
+        h = int(getattr(it, "height", 0) or 0)
+        if w <= 0 or h <= 0:
+            return True
+    elif dotted in AUDIO_EXTS:
+        if sz < MIN_BYTES_AUDIO:
+            return True
+    elif dotted in IMAGE_EXTS or ext in {e.lstrip(".") for e in IMAGE_EXTS}:
+        if sz < MIN_BYTES_IMAGE:
+            return True
+    elif sz <= 0:
+        return True
+    return False
+
+
 def build_size_index(
     items: Iterable[Any],
 ) -> dict[int, list[Any]]:
@@ -91,6 +125,8 @@ def build_size_index(
     index: dict[int, list[Any]] = {}
     for it in items:
         if _item_is_deleted(it):
+            continue
+        if _item_looks_corrupt(it):
             continue
         sz = int(getattr(it, "size", 0) or 0)
         if sz <= 0:
@@ -283,6 +319,95 @@ def is_importable(path: Path) -> bool:
     if path.suffix.lower() in {".crdownload", ".part", ".tmp"}:
         return False
     return True
+
+
+def _media_kind(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in VIDEO_EXTS:
+        return "video"
+    if ext in AUDIO_EXTS:
+        return "audio"
+    if ext in IMAGE_EXTS:
+        return "image"
+    return "other"
+
+
+def check_media_complete(path: Path) -> tuple[bool, str]:
+    """
+    Return (True, \"\") if *path* is fully readable media safe to import.
+
+    Incomplete Dropbox / progressive writes often stabilize at a tiny size
+    (ftyp-only MP4 stubs) before the payload arrives. Size-stable checks alone
+    treat those as ready; this probe rejects them so the inbox keeps waiting.
+
+    Failures use reason text; callers may prefix with NOT_READY_PREFIX for
+    temporary incompleteness (retry) vs permanent unreadable media.
+    """
+    path = path.expanduser()
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return False, f"unreadable: {exc}"
+    if size <= 0:
+        return False, "empty file"
+
+    kind = _media_kind(path)
+    if kind == "video" and size < MIN_BYTES_VIDEO:
+        return False, f"video too small ({size} B) — still downloading?"
+    if kind == "audio" and size < MIN_BYTES_AUDIO:
+        return False, f"audio too small ({size} B) — still downloading?"
+    if kind == "image" and size < MIN_BYTES_IMAGE:
+        return False, f"image too small ({size} B)"
+
+    if kind == "image":
+        w, h = _image_size(path)
+        if w <= 0 or h <= 0:
+            return False, "image unreadable (decode failed)"
+        return True, ""
+
+    if kind == "video":
+        w, h, duration = _video_meta(path)
+        if w <= 0 or h <= 0:
+            # Classic incomplete MP4: "moov atom not found"
+            return False, "video unreadable (incomplete or missing moov)"
+        return True, ""
+
+    if kind == "audio":
+        # Reuse ffprobe path: duration from format, or any audio stream
+        try:
+            out = subprocess.check_output(
+                [
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
+                    "-show_streams",
+                    "-show_format",
+                    str(path),
+                ],
+                text=True,
+                timeout=60,
+            )
+            data = json.loads(out)
+            has_audio = any(
+                s.get("codec_type") == "audio" for s in (data.get("streams") or [])
+            )
+            try:
+                duration = float((data.get("format") or {}).get("duration") or 0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            if not has_audio and duration <= 0:
+                return False, "audio unreadable (no stream)"
+            return True, ""
+        except Exception as exc:  # noqa: BLE001
+            return False, f"audio unreadable ({exc})"
+
+    return False, "unsupported type"
+
+
+def is_not_ready_error(error: str | None) -> bool:
+    return bool(error) and str(error).startswith(NOT_READY_PREFIX)
 
 
 def list_inbox_files(inbox: Path) -> list[Path]:
@@ -495,6 +620,15 @@ def import_file(
     source = source.expanduser().resolve()
     if not is_importable(source):
         return ImportResult(source=source, skipped=True, error="not importable")
+
+    complete, reason = check_media_complete(source)
+    if not complete:
+        # Leave source in place; watcher/GUI will retry when the file grows.
+        return ImportResult(
+            source=source,
+            skipped=True,
+            error=f"{NOT_READY_PREFIX}{reason}",
+        )
 
     if not force_new:
         idx = size_index

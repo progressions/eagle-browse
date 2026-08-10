@@ -592,6 +592,25 @@ class EagleLibrary:
         walk(self.smart_folders, 0)
         return out
 
+    def invalidate_smart_folder_cache(self, smart_folder_id: str | None = None) -> None:
+        """Drop cached query results for one smart folder, or all if None."""
+        if smart_folder_id is None:
+            self._query_cache.clear()
+            return
+        self._query_cache = {
+            k: v for k, v in self._query_cache.items() if k[1] != smart_folder_id
+        }
+
+    def count_smart_folder(
+        self, smart_folder_id: str, *, fresh: bool = False
+    ) -> int:
+        """Number of non-deleted items matching a smart folder."""
+        if fresh:
+            self.invalidate_smart_folder_cache(smart_folder_id)
+        return len(
+            self.query(smart_folder_id=smart_folder_id, include_deleted=False)
+        )
+
     # ── Writes (tags, ratings) ────────────────────────────────────────
 
     def _invalidate_caches(self) -> None:

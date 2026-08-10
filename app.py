@@ -42,6 +42,22 @@ _SOUNDS_DIR = Path(__file__).resolve().parent / "sounds"
 # Keep Gtk.MediaFile refs alive until playback finishes (otherwise GC stops audio).
 _playing_media: list[Any] = []
 
+# Grid sort options: (id, label) — applied after folder/smart/search filters
+SORT_OPTIONS: list[tuple[str, str]] = [
+    ("mtime_desc", "Modified · newest"),
+    ("mtime_asc", "Modified · oldest"),
+    ("name_asc", "Name · A–Z"),
+    ("name_desc", "Name · Z–A"),
+    ("size_desc", "Size · largest"),
+    ("size_asc", "Size · smallest"),
+    ("rating_desc", "Rating · high"),
+    ("rating_asc", "Rating · low"),
+    ("duration_desc", "Duration · long"),
+    ("duration_asc", "Duration · short"),
+]
+SORT_IDS = [s[0] for s in SORT_OPTIONS]
+SORT_LABELS = [s[1] for s in SORT_OPTIONS]
+
 
 def _cell_w(thumb: int) -> int:
     return thumb + 12
@@ -242,6 +258,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._known_inbox_names: set[str] = set()
         self._scope_text = "all"
         self._thumb_size = THUMB_SIZE_DEFAULT
+        # Sort key id from SORT_OPTIONS (default: newest modified first)
+        self._sort_key = "mtime_desc"
+        # Smart-folder id → last known item count for sidebar "(N)" labels
+        self._smart_counts: dict[str, int] = {}
         # While tag/folder/type pickers are open, ignore main-window hotkeys
         self._picker_blocking = False
         # Soft-delete undo: each entry is a batch of item ids (newest last)
@@ -347,6 +367,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         clear_btn.connect("clicked", lambda *_: self.clear_view_filters())
         filter_btns.append(clear_btn)
 
+        # Sort dropdown (top bar)
+        sort_lbl = Gtk.Label(label="Sort")
+        sort_lbl.add_css_class("dim-label")
+        sort_lbl.set_margin_start(8)
+        filter_btns.append(sort_lbl)
+        sort_model = Gtk.StringList.new(SORT_LABELS)
+        self.sort_dropdown = Gtk.DropDown(model=sort_model)
+        self.sort_dropdown.set_selected(0)
+        self.sort_dropdown.set_tooltip_text("Sort items in the current view")
+        self.sort_dropdown.connect("notify::selected", self._on_sort_changed)
+        filter_btns.append(self.sort_dropdown)
+
         self.btn_toggle_right = Gtk.Button(label="Inspector ▶")
         self.btn_toggle_right.add_css_class("flat")
         self.btn_toggle_right.set_tooltip_text("Collapse/expand right inspector")
@@ -368,17 +400,98 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         mid.set_hexpand(True)
         main.append(mid)
 
-        # Left: grid + status
+        # Center column: grid OR inline image viewer (fills space between sidebars)
         grid_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         grid_col.set_hexpand(True)
         grid_col.set_vexpand(True)
         mid.append(grid_col)
 
+        self.center_stack = Gtk.Stack()
+        self.center_stack.set_hexpand(True)
+        self.center_stack.set_vexpand(True)
+        self.center_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.center_stack.set_transition_duration(120)
+        grid_col.append(self.center_stack)
+
         self.grid_scroll = Gtk.ScrolledWindow()
         self.grid_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         self.grid_scroll.set_vexpand(True)
         self.grid_scroll.set_hexpand(True)
-        grid_col.append(self.grid_scroll)
+        self.center_stack.add_named(self.grid_scroll, "grid")
+
+        # Inline viewer (Eagle-style detail pane) — images + in-frame video
+        self._viewer_open = False
+        self._viewer_item_id: str | None = None
+        self._viewer_mode: str = "image"  # "image" | "video"
+        self._viewer_fit = True  # True = contain; False = actual size (scroll)
+        viewer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        viewer.set_hexpand(True)
+        viewer.set_vexpand(True)
+        viewer.add_css_class("view")
+
+        vbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        vbar.add_css_class("toolbar")
+        vbar.set_margin_start(8)
+        vbar.set_margin_end(8)
+        vbar.set_margin_top(4)
+        vbar.set_margin_bottom(4)
+        self.viewer_title = Gtk.Label(xalign=0, hexpand=True, ellipsize=3)
+        self.viewer_title.add_css_class("heading")
+        vbar.append(self.viewer_title)
+        self.viewer_hint = Gtk.Label(label="←→ · Esc close · +/- zoom")
+        self.viewer_hint.add_css_class("dim-label")
+        self.viewer_hint.add_css_class("caption")
+        vbar.append(self.viewer_hint)
+        close_btn = Gtk.Button(label="Close")
+        close_btn.add_css_class("flat")
+        close_btn.connect("clicked", lambda *_: self.close_inline_viewer())
+        vbar.append(close_btn)
+        viewer.append(vbar)
+
+        # Stack: still image (Picture) vs video (Gtk.Video with controls)
+        self.viewer_body = Gtk.Stack()
+        self.viewer_body.set_hexpand(True)
+        self.viewer_body.set_vexpand(True)
+        self.viewer_body.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.viewer_body.set_transition_duration(80)
+
+        self.viewer_scroll = Gtk.ScrolledWindow()
+        self.viewer_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.viewer_scroll.set_hexpand(True)
+        self.viewer_scroll.set_vexpand(True)
+        self.viewer_picture = Gtk.Picture()
+        self.viewer_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.viewer_picture.set_can_shrink(True)
+        self.viewer_picture.set_halign(Gtk.Align.CENTER)
+        self.viewer_picture.set_valign(Gtk.Align.CENTER)
+        self.viewer_picture.set_hexpand(True)
+        self.viewer_picture.set_vexpand(True)
+        self.viewer_scroll.set_child(self.viewer_picture)
+        self.viewer_body.add_named(self.viewer_scroll, "image")
+
+        self.viewer_video = Gtk.Video()
+        self.viewer_video.set_autoplay(True)
+        self.viewer_video.set_loop(False)
+        self.viewer_video.set_hexpand(True)
+        self.viewer_video.set_vexpand(True)
+        self.viewer_video.set_halign(Gtk.Align.FILL)
+        self.viewer_video.set_valign(Gtk.Align.FILL)
+        self.viewer_body.add_named(self.viewer_video, "video")
+        viewer.append(self.viewer_body)
+
+        # Double-click still image to close (video uses its own controls)
+        vclick = Gtk.GestureClick()
+        vclick.set_button(1)
+
+        def on_viewer_click(_g, n_press: int, _x, _y) -> None:
+            if n_press == 2 and self._viewer_mode == "image":
+                self.close_inline_viewer()
+
+        vclick.connect("pressed", on_viewer_click)
+        self.viewer_picture.add_controller(vclick)
+
+        self.center_stack.add_named(viewer, "viewer")
+        self.center_stack.set_visible_child_name("grid")
 
         self.store = Gio.ListStore(item_type=ItemObject)
         self.selection = Gtk.SingleSelection(model=self.store)
@@ -443,8 +556,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "1-5 rate · t tags · f folders · Ctrl+A all · Del delete · "
-                "Ctrl+Z undo · Y copy · Super+W close"
+                "Enter open (image/video) · Esc close viewer · Space play/pause · "
+                "t tags · f folders · Ctrl+A all · Del · Ctrl+Z · Super+W"
             ),
             xalign=0,
         )
@@ -895,6 +1008,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if dim:
             text.add_css_class("dim-label")
         box.append(text)
+        row.name_label = text  # type: ignore[attr-defined]
 
         # Folder auto-tags (Eagle "Auto tagging")
         if kind == "folder" and folder_id:
@@ -974,13 +1088,45 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._folders_section_expanded = True
         self._populate_sidebar(select_current=True)
 
+    def _smart_label(self, sf: SmartFolder) -> str:
+        """Sidebar label with live count, e.g. 'images (12)'."""
+        n = self._smart_counts.get(sf.id)
+        if n is None:
+            # Prefer cached query; first open of a large tree is still O(n) once
+            try:
+                n = self.library.count_smart_folder(sf.id, fresh=False)
+            except Exception:  # noqa: BLE001
+                n = 0
+            self._smart_counts[sf.id] = n
+        return f"{sf.name} ({n})"
+
+    def _update_smart_count_label(self, smart_id: str, count: int) -> None:
+        """Patch the sidebar row label for one smart folder without full rebuild."""
+        self._smart_counts[smart_id] = count
+        sf = self.library.smart_folders_by_id.get(smart_id)
+        if not sf:
+            return
+        label_text = f"{sf.name} ({count})"
+        row = self.folder_list.get_first_child()
+        while row is not None:
+            if (
+                isinstance(row, Gtk.ListBoxRow)
+                and getattr(row, "row_kind", None) == "smart"
+                and getattr(row, "smart_folder_id", None) == smart_id
+            ):
+                name_lbl = getattr(row, "name_label", None)
+                if name_lbl is not None:
+                    name_lbl.set_text(label_text)
+                break
+            row = row.get_next_sibling()
+
     def _append_smart_tree(self, nodes: list[SmartFolder], depth: int = 0) -> None:
         for sf in nodes:
             has_children = bool(sf.children)
             expanded = sf.id in self._smart_expanded
             self.folder_list.append(
                 self._make_nav_row(
-                    label=sf.name,
+                    label=self._smart_label(sf),
                     depth=depth,
                     kind="smart",
                     smart_folder_id=sf.id,
@@ -1060,18 +1206,40 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             new_smart = None
             new_folder = None
 
-        # Same place as already shown (e.g. returning from grid via ←) — don't re-query
-        if (
+        same_place = (
             new_smart == self.current_smart_folder_id
             and new_folder == self.current_folder_id
             and new_special == self._special_view
-        ):
+        )
+
+        # Smart folders: always recompute count on click so the "(N)" is fresh
+        if kind == "smart" and new_smart:
+            def recount(sid: str = new_smart) -> None:
+                try:
+                    n = self.library.count_smart_folder(sid, fresh=True)
+                except Exception:  # noqa: BLE001
+                    return
+
+                def apply() -> bool:
+                    self._update_smart_count_label(sid, n)
+                    return False
+
+                GLib.idle_add(apply)
+
+            # Count in background so large smart folders don't freeze the UI
+            threading.Thread(
+                target=recount, name="eagle-smart-count", daemon=True
+            ).start()
+
+        # Same place as already shown (e.g. returning from grid via ←) — don't re-query
+        # Except smart folders: re-click still refreshes the grid after a count refresh
+        if same_place and kind != "smart":
             return
 
         self.current_smart_folder_id = new_smart
         self.current_folder_id = new_folder
         self._special_view = new_special
-        self.refresh_items(reset_selection=True)
+        self.refresh_items(reset_selection=not same_place)
 
     def _restore_sidebar_selection(self) -> None:
         target_smart = self.current_smart_folder_id
@@ -1338,13 +1506,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 )
             if vf.active():
                 items = [it for it in items if item_matches_view_filters(it, vf)]
+            items = self._sort_items(items)
             total = len(items)
+            # Keep smart-folder sidebar count in sync with this view (no filters)
+            if smart_id and not search and not vf.active() and special is None:
+                self._smart_counts[smart_id] = total
             truncated = total > PAGE_SOFT_CAP
             page = items[:PAGE_SOFT_CAP] if truncated else items
 
             def apply() -> bool:
                 if gen != self._query_gen:
                     return False  # stale
+                if smart_id and not search and not vf.active() and special is None:
+                    self._update_smart_count_label(smart_id, total)
                 self._items = page
                 self.store.remove_all()
                 for item in page:
@@ -1434,6 +1608,51 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             GLib.idle_add(apply)
 
         threading.Thread(target=work, name="eagle-query", daemon=True).start()
+
+    def _on_sort_changed(self, dropdown: Gtk.DropDown, *_args: object) -> None:
+        idx = int(dropdown.get_selected())
+        if idx < 0 or idx >= len(SORT_IDS):
+            return
+        new_key = SORT_IDS[idx]
+        if new_key == self._sort_key:
+            return
+        self._sort_key = new_key
+        self.refresh_items()
+
+    def _sort_items(self, items: list[Item]) -> list[Item]:
+        """Sort a query result list by the current top-bar sort option."""
+        key = self._sort_key
+
+        def name_key(it: Item) -> str:
+            return it.display_name.lower()
+
+        def rating_key(it: Item) -> int:
+            return int(it.star or 0)
+
+        def duration_key(it: Item) -> float:
+            return float(it.duration or 0.0)
+
+        if key == "mtime_desc":
+            return sorted(items, key=lambda it: it.modification_time, reverse=True)
+        if key == "mtime_asc":
+            return sorted(items, key=lambda it: it.modification_time)
+        if key == "name_asc":
+            return sorted(items, key=name_key)
+        if key == "name_desc":
+            return sorted(items, key=name_key, reverse=True)
+        if key == "size_desc":
+            return sorted(items, key=lambda it: it.size, reverse=True)
+        if key == "size_asc":
+            return sorted(items, key=lambda it: it.size)
+        if key == "rating_desc":
+            return sorted(items, key=rating_key, reverse=True)
+        if key == "rating_asc":
+            return sorted(items, key=rating_key)
+        if key == "duration_desc":
+            return sorted(items, key=duration_key, reverse=True)
+        if key == "duration_asc":
+            return sorted(items, key=duration_key)
+        return items
 
     def _on_factory_setup(self, _factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem) -> None:
         # Card sizes applied in bind from self._thumb_size (+/- zoom)
@@ -2661,6 +2880,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except OSError:
             return
 
+        from import_media import check_media_complete
+
         ready: set[str] = set()
         current: dict[str, int] = {}
         for p in files:
@@ -2673,9 +2894,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             current[p.name] = sz
             prev = self._inbox_sizes.get(p.name)
             if prev is not None and prev == sz:
-                # Seen twice with same size → settled
-                ready.add(p.name)
-            # else first sighting or still growing — wait another poll
+                # Seen twice with same size → settled; also must be playable
+                # (Dropbox often parks a tiny ftyp stub before the real payload).
+                ok, _reason = check_media_complete(p)
+                if ok:
+                    ready.add(p.name)
+            # else first sighting, still growing, or incomplete stub — wait
 
         self._inbox_sizes = current
         # Forget stability for files that disappeared
@@ -2710,8 +2934,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         def work() -> None:
             from import_media import (
+                check_media_complete,
                 classify_inbox_files,
                 import_file,
+                is_not_ready_error,
                 list_inbox_files,
                 reimport_existing,
             )
@@ -2720,14 +2946,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             files = list_inbox_files(inbox)
             if only_names is not None:
                 files = [p for p in files if p.name in only_names]
-            # Drop zero-byte / unreadable
+            # Drop zero-byte / incomplete stubs (leave partials in inbox)
             ready: list[Path] = []
+            deferred_names: list[str] = []
             for f in files:
                 try:
-                    if f.stat().st_size > 0:
-                        ready.append(f)
+                    if f.stat().st_size <= 0:
+                        continue
                 except OSError:
                     continue
+                ok_media, reason = check_media_complete(f)
+                if ok_media:
+                    ready.append(f)
+                else:
+                    deferred_names.append(f.name)
+                    # Auto-watch will retry; manual import gets a toast via results
 
             results = []
             unique: list[Path] = []
@@ -2810,16 +3043,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             fail_n = sum(
                 1
                 for r in results
-                if not getattr(r, "ok", False) and not getattr(r, "skipped", False)
+                if not getattr(r, "ok", False)
+                and not getattr(r, "skipped", False)
+                and not is_not_ready_error(getattr(r, "error", None))
             )
             err_msgs = [
                 getattr(r, "error", None)
                 for r in results
-                if getattr(r, "error", None) and not getattr(r, "ok", False)
+                if getattr(r, "error", None)
+                and not getattr(r, "ok", False)
+                and not is_not_ready_error(getattr(r, "error", None))
             ][:3]
+            defer_n = len(deferred_names)
 
             def done() -> bool:
                 self._inbox_importing = False
+                # Incomplete stubs: allow another poll once the file grows
+                for name in deferred_names:
+                    self._known_inbox_names.discard(name)
                 if ok:
                     play_sound("notification")
                     try:
@@ -2846,11 +3087,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     msg += f" · {fail_n} failed"
                     if err_msgs and err_msgs[0]:
                         msg += f" ({err_msgs[0]})"
-                if not ready and manual:
+                if defer_n and not ok:
+                    msg = (
+                        f"Waiting for {defer_n} file(s) to finish downloading "
+                        "(incomplete media left in inbox)"
+                    )
+                elif defer_n:
+                    msg += f" · {defer_n} still downloading"
+                if not ready and not defer_n and manual:
                     msg = f"Inbox empty · {inbox}"
-                elif not results and not dups and manual:
+                elif not results and not dups and not defer_n and manual:
                     msg = f"Inbox empty · {inbox}"
-                if ok or manual or fail_n or dups:
+                if ok or manual or fail_n or dups or (defer_n and manual):
                     self._toast(msg)
                 return False
 
@@ -3116,6 +3364,208 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         win.present()
         return False
 
+    def is_viewer_open(self) -> bool:
+        return bool(getattr(self, "_viewer_open", False))
+
+    def _stop_inline_video(self) -> None:
+        """Pause and detach any in-frame video stream."""
+        try:
+            stream = self.viewer_video.get_media_stream()
+            if stream is not None:
+                stream.set_playing(False)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.viewer_video.set_file(None)
+        except Exception:  # noqa: BLE001
+            try:
+                self.viewer_video.set_media_stream(None)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def open_inline_viewer(self, item: Item | None = None) -> None:
+        """Show image or video in the center pane (between sidebars), Eagle-style."""
+        item = item or self.selected_item
+        if item is None:
+            self._toast("Nothing selected")
+            return
+        if item.is_video:
+            self._open_inline_video(item)
+            return
+        if not item.is_image:
+            # Audio / other: external player
+            self._open_external_media(item)
+            return
+        path = item.path
+        if not path.is_file():
+            self._toast(f"Missing file: {path}")
+            return
+
+        # Leave any previous video stream before showing a still
+        self._stop_inline_video()
+
+        # Prefer full image; GdkPixbuf scales for display memory
+        paintable = None
+        try:
+            # Cap decode size so huge assets don't OOM
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_size(str(path), 4096, 4096)
+            paintable = Gdk.Texture.new_for_pixbuf(pb)
+        except Exception:
+            try:
+                paintable = Gdk.Texture.new_from_filename(str(path))
+            except Exception as exc:  # noqa: BLE001
+                self._toast(f"Could not load image: {exc}")
+                return
+
+        self.viewer_picture.set_paintable(paintable)
+        self.viewer_title.set_text(item.display_name)
+        self.viewer_hint.set_text("←→ · Esc close · +/- zoom")
+        self._viewer_item_id = item.id
+        self._viewer_open = True
+        self._viewer_mode = "image"
+        self._viewer_fit = True
+        self.viewer_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.viewer_picture.set_can_shrink(True)
+        self.viewer_body.set_visible_child_name("image")
+        self.center_stack.set_visible_child_name("viewer")
+        self.viewer_picture.grab_focus()
+        # Keep grid selection in sync for inspector
+        self.selected_item = item
+        self.update_inspector()
+        self._update_path_label()
+
+    def _open_inline_video(self, item: Item) -> None:
+        """Play a video in the center pane (Gtk.Video / GStreamer)."""
+        path = item.path
+        if not path.is_file():
+            self._toast(f"Missing file: {path}")
+            return
+
+        # Clear still image; load file into Gtk.Video
+        self.viewer_picture.set_paintable(None)
+        try:
+            self.viewer_video.set_filename(str(path))
+            self.viewer_video.set_autoplay(True)
+        except Exception as exc:  # noqa: BLE001
+            self._toast(f"Could not load video: {exc}")
+            self._open_external_media(item)
+            return
+
+        self.viewer_title.set_text(item.display_name)
+        self.viewer_hint.set_text("Space play/pause · ←→ next · Esc close")
+        self._viewer_item_id = item.id
+        self._viewer_open = True
+        self._viewer_mode = "video"
+        self.viewer_body.set_visible_child_name("video")
+        self.center_stack.set_visible_child_name("viewer")
+        self.viewer_video.grab_focus()
+        self.selected_item = item
+        self.update_inspector()
+        self._update_path_label()
+
+    def close_inline_viewer(self) -> bool:
+        """Leave detail view; return True if a viewer was closed."""
+        if not self.is_viewer_open():
+            return False
+        self._viewer_open = False
+        self._viewer_item_id = None
+        self._viewer_mode = "image"
+        self._stop_inline_video()
+        self.viewer_picture.set_paintable(None)
+        self.center_stack.set_visible_child_name("grid")
+        self.grid.grab_focus()
+        return True
+
+    def viewer_toggle_play(self) -> None:
+        """Space while video is open: play/pause."""
+        if not self.is_viewer_open() or self._viewer_mode != "video":
+            return
+        stream = self.viewer_video.get_media_stream()
+        if stream is None:
+            return
+        stream.set_playing(not stream.get_playing())
+
+    def viewer_navigate(self, delta: int) -> None:
+        """Prev/next image or video in current view while inline viewer is open."""
+        if not self.is_viewer_open() or not self._items:
+            return
+        # Find current index by id
+        cur = 0
+        if self._viewer_item_id:
+            for i, it in enumerate(self._items):
+                if it.id == self._viewer_item_id:
+                    cur = i
+                    break
+        new = max(0, min(len(self._items) - 1, cur + delta))
+        # Prefer images and videos (skip audio / unknown)
+        step = 1 if delta >= 0 else -1
+        i = new
+        while 0 <= i < len(self._items):
+            it = self._items[i]
+            if it.is_image or it.is_video:
+                self._select_index(i, ctrl=False, shift=False)
+                self.open_inline_viewer(it)
+                return
+            i += step
+        self._toast("No more media in this view")
+
+    def viewer_toggle_zoom(self, *, larger: bool | None = None) -> None:
+        """Toggle fit vs actual, or nudge fit mode with +/-. Images only."""
+        if not self.is_viewer_open() or self._viewer_mode != "image":
+            return
+        if larger is None:
+            self._viewer_fit = not self._viewer_fit
+        else:
+            self._viewer_fit = not larger  # + → actual-ish; - → fit
+        if self._viewer_fit:
+            self.viewer_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+            self.viewer_picture.set_can_shrink(True)
+            self._toast("Viewer · fit")
+        else:
+            self.viewer_picture.set_content_fit(Gtk.ContentFit.SCALE_DOWN)
+            # Prefer native pixels when smaller than pane; still allow scroll
+            self.viewer_picture.set_can_shrink(False)
+            self._toast("Viewer · actual size")
+
+    def _open_external_media(self, item: Item) -> None:
+        path = str(item.path)
+        if item.is_video or item.is_audio:
+            players = [
+                [
+                    "mpv",
+                    "--force-window=yes",
+                    "--keep-open=yes",
+                    "--osc=yes",
+                    path,
+                ],
+                ["xdg-open", path],
+            ]
+            for cmd in players:
+                try:
+                    subprocess.Popen(
+                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    if cmd[0] == "mpv":
+                        kind = "Video" if item.is_video else "Audio"
+                        self._toast(
+                            f"{kind} · Space play/pause · ←→ seek · q/Esc close · f fullscreen"
+                        )
+                    return
+                except FileNotFoundError:
+                    continue
+            self._toast("Could not open media (install mpv?)")
+            return
+        # Fallback for non-image stills we couldn't show inline
+        for cmd in (["xdg-open", path], ["imv", path]):
+            try:
+                subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                return
+            except FileNotFoundError:
+                continue
+        self._toast("Could not open file")
+
     def open_selected(self) -> None:
         item = self.selected_item
         if not item:
@@ -3127,72 +3577,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if now - last < 0.4:
             return
         self._last_open_mono = now
-        path = str(item.path)
 
-        # Video / audio → mpv (plays with keyboard controls)
-        if item.is_video or item.is_audio:
-            players = [
-                [
-                    "mpv",
-                    "--force-window=yes",
-                    "--keep-open=yes",  # don't quit at end; Esc/q to close
-                    "--osc=yes",
-                    path,
-                ],
-                ["xdg-open", path],
-            ]
-            for cmd in players:
-                try:
-                    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if cmd[0] == "mpv":
-                        kind = "Video" if item.is_video else "Audio"
-                        self._toast(
-                            f"{kind} · Space play/pause · ←→ seek · q/Esc close · f fullscreen"
-                        )
-                    return
-                except FileNotFoundError:
-                    continue
-            self._toast("Could not open media (install mpv?)")
+        if item.is_image or item.is_video:
+            self.open_inline_viewer(item)
             return
-
-        # Images → imv with explicit close/zoom binds
-        imv_cmd = [
-            "imv",
-            "-s",
-            "full",  # fit image in window
-            "-c",
-            "bind q quit",
-            "-c",
-            "bind Q quit",
-            "-c",
-            "bind <Escape> quit",
-            "-c",
-            "bind <Ctrl+q> quit",
-            "-c",
-            "bind f fullscreen",
-            "-c",
-            "bind i zoom 1",
-            "-c",
-            "bind o zoom -1",
-            "-c",
-            "bind <plus> zoom 1",
-            "-c",
-            "bind <minus> zoom -1",
-            "-c",
-            "bind a zoom actual",
-            "-c",
-            "bind r reset",
-            path,
-        ]
-        for cmd in (imv_cmd, ["xdg-open", path]):
-            try:
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if cmd[0] == "imv":
-                    self._toast("Viewer · q or Esc to close · +/- zoom · f fullscreen")
-                return
-            except FileNotFoundError:
-                continue
-        self._toast("Could not open image")
+        self._open_external_media(item)
 
     def reload_library(self) -> None:
         try:
@@ -3200,6 +3589,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except Exception as exc:  # noqa: BLE001
             self._toast(f"Reload failed: {exc}")
             return
+        # Counts are stale after a full reload
+        self._smart_counts.clear()
         # Keep expand state; show current selection path
         self._populate_sidebar(select_current=True)
         self.refresh_items()
@@ -3357,6 +3748,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.delete_selected()
             return True
         if keyval == Gdk.KEY_Escape:
+            if self.is_viewer_open():
+                self.close_inline_viewer()
+                return True
             if in_search:
                 self.search.set_text("")
                 self.focus_grid()
@@ -3414,8 +3808,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ):
                 return False  # ListBox handles vertical movement
 
-        # Multi-select handoff (grid)
+        # Multi-select handoff (grid); in video viewer Space = play/pause
         if not in_sidebar and keyval == Gdk.KEY_space:
+            if self.is_viewer_open() and self._viewer_mode == "video":
+                self.viewer_toggle_play()
+                return True
             self.toggle_mark_selected()
             return True
         # Ctrl+A — select all assets in the current view
@@ -3477,23 +3874,35 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_e, Gdk.KEY_E) and not ctrl and not in_sidebar:
             self.reveal_selected_in_files()
             return True
-        # Thumbnail zoom (+ larger / - smaller); skip when typing in search
+        # In viewer: +/- toggle fit/actual; grid: thumb size
         if keyval in (
             Gdk.KEY_plus,
             Gdk.KEY_equal,  # unshifted = on many keyboards
             Gdk.KEY_KP_Add,
         ):
-            self.adjust_thumb_size(+1)
+            if self.is_viewer_open():
+                self.viewer_toggle_zoom(larger=True)
+            else:
+                self.adjust_thumb_size(+1)
             return True
         if keyval in (Gdk.KEY_minus, Gdk.KEY_KP_Subtract):
-            self.adjust_thumb_size(-1)
+            if self.is_viewer_open():
+                self.viewer_toggle_zoom(larger=False)
+            else:
+                self.adjust_thumb_size(-1)
             return True
         # Enter on image grid: open larger (sidebar Enter is handled above)
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            self.open_selected()
+            if self.is_viewer_open():
+                self.close_inline_viewer()
+            else:
+                self.open_selected()
             return True
         if keyval in (Gdk.KEY_o, Gdk.KEY_O):
-            self.open_selected()
+            if self.is_viewer_open():
+                self.close_inline_viewer()
+            else:
+                self.open_selected()
             return True
         if keyval in (Gdk.KEY_r, Gdk.KEY_R):
             self.reload_library()
@@ -3522,10 +3931,30 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 )
             return True
 
+        # Inline viewer: left/right step images in current view
+        if self.is_viewer_open() and not in_search and not in_sidebar:
+            if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right) or (
+                keyval in (Gdk.KEY_l, Gdk.KEY_L) and not ctrl
+            ):
+                self.viewer_navigate(+1)
+                return True
+            if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left) or (
+                keyval in (Gdk.KEY_h, Gdk.KEY_H) and not ctrl
+            ):
+                self.viewer_navigate(-1)
+                return True
+            if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up, Gdk.KEY_Down, Gdk.KEY_KP_Down):
+                # Ignore vertical in viewer (or map to prev/next)
+                if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down):
+                    self.viewer_navigate(+1)
+                else:
+                    self.viewer_navigate(-1)
+                return True
+
         # Grid movement (reading order is left→right, top→bottom):
         #   Left/Right / h/l  → previous / next image
         #   Up/Down / k/j     → image above / below (exactly one row)
-        #   Shift+arrows      → extend multi-selection range
+        #   Shift+arrows      → path multi-select
         #   Ctrl+arrows       → move focus only (keep multi-selection); then Space to add
         #   Left on first column → focus sidebar
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
