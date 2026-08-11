@@ -10,6 +10,7 @@ Use from Python::
 Or CLI (JSON stdout)::
 
     eagle-api search --tag eunbi --rating-min 3
+    eagle-api crop <id> --aspect 9:16 --mode new
     eagle-api smart-folder show "Eunbi/images"
     eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
 """
@@ -379,6 +380,103 @@ class EagleAPI:
             return {"ok": False, "error": str(exc)}
         return {"ok": ok > 0 or not errors, "updated": ok, "errors": errors, "rating": star}
 
+    def crop(
+        self,
+        item_id: str,
+        *,
+        mode: str = "overwrite",
+        x: int | None = None,
+        y: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        aspect: str | None = None,
+        anchor: str = "center",
+    ) -> dict[str, Any]:
+        """
+        Crop an image item.
+
+        Parameters
+        ----------
+        item_id:
+            Eagle item id.
+        mode:
+            ``"overwrite"`` — replace the original media (tags/folders kept).
+            ``"new"`` / ``"save-as"`` — create a fresh library item with the crop
+            and **no tags / no folders** (same as a new import).
+        x, y:
+            Top-left of the crop in source pixels. Omit to place via *anchor*.
+        width, height:
+            Crop size in source pixels. With *aspect*, one side can be omitted.
+        aspect:
+            Ratio lock: ``"9:16"``, ``"3:4"``, ``"1:1"``, ``"orig"``, ``"free"``.
+            Alone → largest centered fit of that ratio.
+        anchor:
+            Placement when x/y omitted: ``center`` (default), ``top``, ``bottom``,
+            ``left``, ``right``, ``top-left``, ``top-right``, ``bottom-left``,
+            ``bottom-right``.
+
+        Returns JSON-shaped dict with ``ok``, ``mode``, ``rect``, and ``item``
+        (the overwritten or newly created item).
+        """
+        from crop import (
+            apply_crop_to_item,
+            resolve_crop_rect,
+            save_crop_as_new_item,
+        )
+
+        iid = (item_id or "").strip()
+        if not iid:
+            return {"ok": False, "error": "item id required"}
+        item = self.library.items_by_id.get(iid)
+        if item is None:
+            return {"ok": False, "error": f"Unknown item id: {iid}"}
+        if not item.is_image:
+            return {"ok": False, "error": "Crop only works on images"}
+
+        mode_l = (mode or "overwrite").strip().lower().replace("_", "-")
+        if mode_l in ("overwrite", "save", "original", "in-place", "inplace"):
+            mode_l = "overwrite"
+        elif mode_l in ("new", "save-as", "saveas", "as-new", "copy"):
+            mode_l = "new"
+        else:
+            return {
+                "ok": False,
+                "error": f"Unknown mode {mode!r}; use overwrite or new",
+            }
+
+        try:
+            rect = resolve_crop_rect(
+                int(item.width or 0),
+                int(item.height or 0),
+                x=x,
+                y=y,
+                width=width,
+                height=height,
+                aspect=aspect,
+                anchor=anchor,
+            )
+            if mode_l == "overwrite":
+                out = apply_crop_to_item(self.library.root, item, rect)
+                # Keep map pointer (mutated in place)
+                self.library.items_by_id[out.id] = out
+            else:
+                out = save_crop_as_new_item(self.library.root, item, rect)
+                self.library.items_by_id[out.id] = out
+                self.library.items.insert(0, out)
+            self.library._invalidate_caches()  # noqa: SLF001
+        except WriteError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+        return {
+            "ok": True,
+            "mode": mode_l,
+            "source_id": iid,
+            "rect": {"x": rect.x, "y": rect.y, "width": rect.w, "height": rect.h},
+            "item": _item_to_dict(out, library=self.library),
+        }
+
     # ── Catalog ───────────────────────────────────────────────────────
 
     def list_tags(self, *, limit: int | None = None) -> dict[str, Any]:
@@ -624,6 +722,29 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("ids", help="Item id or comma-separated ids")
     r.add_argument("rating", type=int)
 
+    c = sub.add_parser(
+        "crop",
+        parents=[shared],
+        help="Crop image: overwrite original or save as new untagged item",
+    )
+    c.add_argument("id", help="Item id")
+    c.add_argument(
+        "--mode",
+        default="overwrite",
+        choices=("overwrite", "new", "save-as"),
+        help="overwrite | new (save-as: no tags/folders)",
+    )
+    c.add_argument("--x", type=int, default=None)
+    c.add_argument("--y", type=int, default=None)
+    c.add_argument("--width", type=int, default=None)
+    c.add_argument("--height", type=int, default=None)
+    c.add_argument(
+        "--aspect",
+        default="",
+        help="9:16, 3:4, 1:1, 16:9, 2:3, 3:2, 4:3, orig, free",
+    )
+    c.add_argument("--anchor", default="center")
+
     sub.add_parser("tags", parents=[shared], help="List all tags")
     sub.add_parser("folders", parents=[shared], help="List folders/categories")
     sub.add_parser("reload", parents=[shared], help="Reload library from disk")
@@ -729,6 +850,23 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cmd == "rate":
             result = api.set_rating(_split_csv(args.ids), args.rating)
+            _json_out(result, pretty=pretty)
+            return 0 if result.get("ok") else 2
+
+        if args.cmd == "crop":
+            mode = args.mode
+            if mode == "save-as":
+                mode = "new"
+            result = api.crop(
+                args.id,
+                mode=mode,
+                x=args.x,
+                y=args.y,
+                width=args.width,
+                height=args.height,
+                aspect=args.aspect or None,
+                anchor=args.anchor,
+            )
             _json_out(result, pretty=pretty)
             return 0 if result.get("ok") else 2
 

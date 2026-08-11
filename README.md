@@ -59,9 +59,30 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `Enter` / `o` | Open larger: **images → imv**, **video/audio → mpv** |
 | `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
+| `x` | **Crop** focused image (also inspector **Crop** button) |
 | `Ctrl+A` | **Select all** assets in the current grid view |
 | `Delete` / `Backspace` | **Soft-delete** selection (Eagle trash — files stay on disk) |
 | `Ctrl+Z` | **Undo** last delete batch (restore items) |
+
+### Crop
+
+Opens a modal editor for the focused **image** (hotkey **`x`**, or **Crop** in the right inspector):
+
+- Enter **width × height** (source pixels) — the overlay updates to that size
+- **Aspect presets:** Free · Orig · 1:1 · **3:4** · 4:3 · **9:16** · 16:9 · 2:3 · 3:2  
+  Locked ratios keep the aspect while you drag corners/edges
+- **Drag** the crop rectangle to move it; drag **corners/edges** to resize
+- Arrow keys (or `h`/`j`/`k`/`l`) nudge 1px; **Shift+arrows** = 10px
+
+Footer actions:
+
+| Button | Keys | Result |
+|--------|------|--------|
+| **Cancel** | `Esc` | Close without writing |
+| **Save as** | `Shift+Enter` | New library item with the crop — **no tags, no folders** (same as a fresh import) |
+| **Save** | `Enter` | Overwrite the original media in place (backup under `backup/eagle-browse-writes/`), update `width`/`height`/`size`, regenerate thumbnail |
+
+Videos/audio are not croppable.
 
 ### Inspector (right sidebar)
 
@@ -69,6 +90,7 @@ Shows the focused asset (or **common** values when multi-selected):
 
 - Thumbnail preview  
 - **Rating** — click stars or use `1`–`5` / Clear  
+- **Crop** — single image only (`x`)  
 - **Tags** — `✓` shared by all; `±` only on some; **Edit** opens tag picker  
 - **Folders** — same commonality rules; **Edit** opens folder picker  
 - Path (single selection)
@@ -126,12 +148,13 @@ Selection applies to: **copy paths** (`y`/`Y`), **tags** (`t`), **folders** (`f`
 
 | `+` / `-` | Larger / smaller thumbnails |
 
-### Library writes (tags & ratings)
+### Library writes (tags, ratings, crop)
 
-Eagle Browse can **write** item metadata into the library (tags, stars):
+Eagle Browse can **write** item metadata (and crop media) into the library:
 
 - Uses a lock file `.eagle-browse.write.lock`
 - Atomic JSON writes + backups under `backup/eagle-browse-writes/`
+- **Crop** also backs up the media file before overwrite and rewrites the thumbnail
 - Prefer **one writer** (don’t run official Eagle edits at the same time)
 
 Smart folder **rules** are not edited in-app yet — see [docs/SMART_FOLDERS.md](docs/SMART_FOLDERS.md) for agent/JSON editing.
@@ -181,6 +204,8 @@ eagle-api search --tag eunbi --rating-min 3 --type video
 eagle-api tag add <id> sofie
 eagle-api folder add <id> Eunbi
 eagle-api rate <id> 4
+eagle-api crop <id> --aspect 9:16 --mode new
+eagle-api crop <id> --width 1080 --height 1440 --mode overwrite
 eagle-api smart-folder show "Eunbi/images"
 eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
 ```

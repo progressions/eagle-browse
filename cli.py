@@ -7,6 +7,7 @@ Human-readable tables by default; pass --json for machine-readable output.
   eagle-api search --tag eunbi --rating-min 3
   eagle-api search --smart-folder Eunbi/images --json
   eagle-api tag add <id> sofie
+  eagle-api crop <id> --aspect 9:16 --mode new
   eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
 """
 
@@ -176,6 +177,26 @@ def _fmt_smart_create(data: dict[str, Any]) -> None:
     print("reload Eagle Browse (r) to see it in the sidebar")
 
 
+def _fmt_crop(data: dict[str, Any]) -> None:
+    if not data.get("ok"):
+        _err(data.get("error") or "crop failed")
+        return
+    mode = data.get("mode")
+    rect = data.get("rect") or {}
+    it = data.get("item") or {}
+    print(f"crop · {mode}")
+    print(
+        f"  rect:  {rect.get('width')}×{rect.get('height')} "
+        f"@ ({rect.get('x')}, {rect.get('y')})"
+    )
+    print(f"  id:    {it.get('id')}")
+    print(f"  size:  {it.get('width')}×{it.get('height')}")
+    print(f"  tags:  {', '.join(it.get('tags') or []) or '—'}")
+    print(f"  path:  {it.get('path')}")
+    if mode == "new":
+        print(f"  source: {data.get('source_id')} (unchanged)")
+
+
 def _fmt_reload(data: dict[str, Any]) -> None:
     if not data.get("ok"):
         _err(data.get("error") or "failed")
@@ -204,6 +225,8 @@ examples:
   eagle-api tag add MXXXXXXXXXXXX sofie,raw
   eagle-api folder add MXXXXXXXXXXXX Eunbi
   eagle-api rate MXXXXXXXXXXXX 4
+  eagle-api crop MXXXXXXXXXXXX --aspect 9:16 --mode new
+  eagle-api crop MXXXXXXXXXXXX --width 1080 --height 1440 --anchor top --mode overwrite
   eagle-api smart-folder list
   eagle-api smart-folder show Eunbi/images
   eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
@@ -278,6 +301,34 @@ environment:
     r = sub.add_parser("rate", parents=[shared], help="Set rating 0–5 (0 clears)")
     r.add_argument("ids", help="Item id or comma-separated ids")
     r.add_argument("rating", type=int)
+
+    c = sub.add_parser(
+        "crop",
+        parents=[shared],
+        help="Crop an image (overwrite original or save as new untagged item)",
+    )
+    c.add_argument("id", help="Item id")
+    c.add_argument(
+        "--mode",
+        default="overwrite",
+        choices=("overwrite", "new", "save-as"),
+        help="overwrite = replace original; new/save-as = fresh item, no tags/folders",
+    )
+    c.add_argument("--x", type=int, default=None, help="Crop left (source px)")
+    c.add_argument("--y", type=int, default=None, help="Crop top (source px)")
+    c.add_argument("--width", type=int, default=None, help="Crop width (source px)")
+    c.add_argument("--height", type=int, default=None, help="Crop height (source px)")
+    c.add_argument(
+        "--aspect",
+        default="",
+        help="Aspect lock: 9:16, 3:4, 1:1, 16:9, 2:3, 3:2, 4:3, orig, free",
+    )
+    c.add_argument(
+        "--anchor",
+        default="center",
+        help="Placement when --x/--y omitted (center, top, bottom, left, right, "
+        "top-left, top-right, bottom-left, bottom-right)",
+    )
 
     sub.add_parser("tags", parents=[shared], help="List all tags")
     sub.add_parser("folders", parents=[shared], help="List categories (tree)")
@@ -392,6 +443,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "rate":
             result = api.set_rating(_split_csv(args.ids), args.rating)
             return out(result, _fmt_ok_action)
+
+        if args.cmd == "crop":
+            mode = args.mode
+            if mode == "save-as":
+                mode = "new"
+            result = api.crop(
+                args.id,
+                mode=mode,
+                x=args.x,
+                y=args.y,
+                width=args.width,
+                height=args.height,
+                aspect=args.aspect or None,
+                anchor=args.anchor,
+            )
+            return out(result, _fmt_crop)
 
         if args.cmd == "tags":
             return out(api.list_tags(), _fmt_tags)

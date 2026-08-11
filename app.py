@@ -680,6 +680,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_rating_note.add_css_class("caption")
         box.append(self.insp_rating_note)
 
+        # Crop (single image only)
+        self.insp_crop_btn = Gtk.Button(label="Crop")
+        self.insp_crop_btn.set_halign(Gtk.Align.START)
+        self.insp_crop_btn.set_tooltip_text("Crop image (x) — ratios, drag overlay")
+        self.insp_crop_btn.connect("clicked", lambda *_: self.open_crop_dialog())
+        box.append(self.insp_crop_btn)
+
         # Tags
         tags_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         tags_head.set_hexpand(False)
@@ -729,6 +736,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _inspector_empty(self) -> None:
         self.insp_title.set_text("No selection")
         self.insp_subtitle.set_text("Select an asset in the grid")
+        if hasattr(self, "insp_crop_btn"):
+            self.insp_crop_btn.set_sensitive(False)
         self.insp_picture.set_paintable(None)
         self.insp_rating_note.set_text("")
         for b in self.insp_star_buttons:
@@ -782,6 +791,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self.insp_picture.set_paintable(None)
             else:
                 self.insp_picture.set_paintable(None)
+            if hasattr(self, "insp_crop_btn"):
+                self.insp_crop_btn.set_sensitive(bool(it.is_image and it.path.is_file()))
         else:
             self.insp_title.set_text(f"{n} assets selected")
             self.insp_subtitle.set_text("Showing values shared by all")
@@ -795,6 +806,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self.insp_picture.set_paintable(None)
             else:
                 self.insp_picture.set_paintable(None)
+            if hasattr(self, "insp_crop_btn"):
+                self.insp_crop_btn.set_sensitive(False)
 
         # Rating commonality
         stars = {it.star for it in items}
@@ -2250,6 +2263,78 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if errors:
             msg += f" · {len(errors)} failed"
         self._toast(msg)
+
+    def open_crop_dialog(self) -> None:
+        """Open the interactive crop editor for the focused image."""
+        from crop import open_crop_dialog
+
+        if self._picker_blocking:
+            return
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        if len(items) != 1:
+            self._toast("Crop one image at a time")
+            return
+        item = items[0]
+        if not item.is_image:
+            self._toast("Crop works on images only")
+            return
+
+        self._picker_blocking = True
+
+        def on_done(mode: str, it: Item) -> None:
+            if mode == "new":
+                # Fresh item: no tags/folders — inject into in-memory library
+                self.library.items_by_id[it.id] = it
+                self.library.items.insert(0, it)
+                self.library._invalidate_caches()  # noqa: SLF001
+                # Aim selection at the new item after re-query (if visible)
+                self.selected_item = it
+                self._marked = {it.id}
+                self.refresh_items(reset_selection=False)
+                self._toast(
+                    f"Saved as new · {it.width}×{it.height} · untagged / uncategorized"
+                )
+                return
+
+            # Overwrite original
+            self._invalidate_thumb_cache_for(it)
+            if it.id in self.library.items_by_id:
+                self.library.items_by_id[it.id] = it
+            self.library._invalidate_caches()  # noqa: SLF001
+            self._rebind_grid_keep_selection()
+            self._update_path_label()
+            self.update_inspector()
+            self._toast(f"Saved crop · {it.width}×{it.height}")
+
+        def on_close() -> None:
+            self._picker_blocking = False
+            self.grid.grab_focus()
+
+        open_crop_dialog(
+            self,
+            item,
+            library_root=self.library.root,
+            on_done=on_done,
+            on_close=on_close,
+        )
+
+    def _invalidate_thumb_cache_for(self, item: Item) -> None:
+        """Drop cached textures for this item so the grid reloads after crop."""
+        paths: list[str] = []
+        if item.thumb is not None:
+            paths.append(str(item.thumb))
+        paths.append(str(item.path))
+        with _thumb_lock:
+            drop = [
+                k
+                for k in list(_thumb_textures.keys())
+                if any(k.startswith(p + "@") or k == p for p in paths)
+            ]
+            for k in drop:
+                _thumb_textures.pop(k, None)
 
     def edit_tags_dialog(self) -> None:
         """Keyboard tag picker: recent + autocomplete, Enter toggles, Esc closes."""
@@ -3852,6 +3937,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 return True
             if keyval in (Gdk.KEY_m, Gdk.KEY_M):
                 self.open_view_type_filter()
+                return True
+            if keyval in (Gdk.KEY_x, Gdk.KEY_X):
+                self.open_crop_dialog()
                 return True
         # Y = all marked paths (or focused if none marked)
         # Ctrl+Y = file:// URI list

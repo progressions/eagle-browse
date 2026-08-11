@@ -34,6 +34,13 @@ eagle-api folder remove MXXXXXXXXXXXX Eunbi
 eagle-api rate MXXXXXXXXXXXX 4
 eagle-api rate MXXXXXXXXXXXX,MYYYYYYYYYYYY 0   # clear
 
+# Crop (images only)
+eagle-api crop MXXXXXXXXXXXX --aspect 9:16 --mode new          # new untagged item
+eagle-api crop MXXXXXXXXXXXX --aspect 3:4 --mode overwrite     # replace original
+eagle-api crop MXXXXXXXXXXXX --width 1080 --height 1440 --anchor top
+eagle-api crop MXXXXXXXXXXXX --x 100 --y 50 --width 800 --height 1200 --mode new
+eagle-api crop MXXXXXXXXXXXX --aspect 9:16 --mode new --json   # agent output
+
 # Catalog
 eagle-api tags
 eagle-api folders
@@ -76,6 +83,12 @@ api.add_tags(item_id, ["sofie"])
 api.add_folders(item_id, ["Eunbi"])
 api.set_rating(item_id, 4)
 
+# Crop
+api.crop(item_id, aspect="9:16", mode="new")          # new item, no tags/folders
+api.crop(item_id, aspect="3:4", mode="overwrite")     # replace original
+api.crop(item_id, width=1080, height=1440, anchor="top")
+api.crop(item_id, x=100, y=50, width=800, height=1200, mode="new")
+
 # Create smart folder under Sofie
 api.create_smart_folder(
     "Sofie videos 3+",
@@ -85,6 +98,20 @@ api.create_smart_folder(
     rating_min=3,
 )
 ```
+
+### Crop details
+
+| Arg | Meaning |
+|-----|---------|
+| `mode` | `overwrite` (default) or `new` / `save-as` |
+| `aspect` | `9:16`, `3:4`, `1:1`, `16:9`, `2:3`, `3:2`, `4:3`, `orig`, `free` |
+| `width` / `height` | Crop size in source pixels (with aspect, one side can be omitted) |
+| `x` / `y` | Top-left; omit to place with `anchor` |
+| `anchor` | `center` (default), `top`, `bottom`, `left`, `right`, corners |
+
+- **`overwrite`**: backs up media, rewrites file + thumbnail, keeps tags/folders.
+- **`new`**: creates a new item with empty tags and folders (fresh import). Source unchanged.
+- Response includes `rect` and full `item` dict (id, path, width, height, …).
 
 ## Notes
 
