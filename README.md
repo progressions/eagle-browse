@@ -333,9 +333,9 @@ On the phone open **`http://eagle.local:8787/`** (mDNS via Avahi; printed at sta
 IP fallback is also printed if `.local` fails. Override name with `--mdns-name other` or `EAGLE_PHONE_MDNS`.
 
 - Filter chips: **Eunbi** / **Sofie** (folder **or** tag)
-- Drawer: full folder tree + top tags
+- Drawer: **smart folders** (same rules as desktop Eagle Browse), folder tree, top tags
 - Thumbnails and full media served from the local `*.library` path
-- **Rebuild index** in the drawer after bulk tagging
+- **Rebuild index** in the drawer after bulk tagging (also refreshes smart-folder rules)
 
 `phone-index.json` is also what a future Dropbox-hosted web app can download instead of scanning every item.
 

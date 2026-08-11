@@ -27,11 +27,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from library import DEFAULT_LIBRARY, EagleLibrary  # noqa: E402
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 DEFAULT_NAME = "phone-index.json"
 
 # Well-known character folders in this library (also resolved by name).
 CHARACTER_NAMES = ("Eunbi", "Sofie")
+
+
+def _strip_eagle_keys(obj):
+    """Drop Eagle UI-only keys like $$hashKey from condition trees."""
+    if isinstance(obj, dict):
+        return {
+            k: _strip_eagle_keys(v)
+            for k, v in obj.items()
+            if not str(k).startswith("$$")
+        }
+    if isinstance(obj, list):
+        return [_strip_eagle_keys(x) for x in obj]
+    return obj
 
 
 def _folder_tree(nodes) -> list[dict]:
@@ -43,6 +56,22 @@ def _folder_tree(nodes) -> list[dict]:
                 "name": f.name,
                 "tags": list(f.tags),
                 "children": _folder_tree(f.children),
+            }
+        )
+    return out
+
+
+def _smart_folder_tree(nodes) -> list[dict]:
+    """Export smart folders with precomputed inherited conditions (parent AND self)."""
+    out = []
+    for sf in nodes:
+        out.append(
+            {
+                "id": sf.id,
+                "name": sf.name,
+                "conditions": _strip_eagle_keys(list(sf.conditions)),
+                "inherited": _strip_eagle_keys(list(sf.inherited_conditions)),
+                "children": _smart_folder_tree(sf.children),
             }
         )
     return out
@@ -84,6 +113,8 @@ def build_index(library_path: Path) -> dict:
             row["star"] = item.star
         if item.duration is not None:
             row["duration"] = item.duration
+        if item.annotation:
+            row["annotation"] = item.annotation
         items.append(row)
 
     # Newest first (same as EagleLibrary.load)
@@ -94,6 +125,8 @@ def build_index(library_path: Path) -> dict:
         for t in row["tags"]:
             tag_counts[t] = tag_counts.get(t, 0) + 1
 
+    smart = _smart_folder_tree(lib.smart_folders)
+
     catalog = {
         "version": INDEX_VERSION,
         "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -102,6 +135,7 @@ def build_index(library_path: Path) -> dict:
         "load_seconds": round(load_s, 2),
         "characters": _character_folder_ids(lib),
         "folders": _folder_tree(lib.folders),
+        "smart_folders": smart,
         "tags": sorted(tag_counts.keys(), key=lambda t: (-tag_counts[t], t.lower())),
         "tag_counts": tag_counts,
         "items": items,

@@ -235,6 +235,11 @@ body {
 }
 .folder-item.on { background: var(--chip-on); }
 .folder-item:active { background: var(--chip); }
+.folder-item.smart-root { font-weight: 600; }
+.folder-item.has-kids::before {
+  content: "› ";
+  color: var(--muted);
+}
 .foot { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 
 .scrim {

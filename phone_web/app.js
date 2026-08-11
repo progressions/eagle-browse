@@ -4,15 +4,27 @@
 
   const PAGE = 60;
   const VIDEO_EXT = new Set(["mp4", "mov", "webm", "mkv", "m4v", "avi", "wmv", "flv"]);
+  const AUDIO_EXT = new Set([
+    "mp3", "wav", "flac", "aac", "m4a", "ogg", "wma", "aiff", "aif",
+  ]);
+  const IMAGE_EXT = new Set([
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif",
+    "heic", "heif", "svg", "ico",
+  ]);
+
   const state = {
     catalog: null,
     character: null, // 'eunbi' | 'sofie' | null
     folderId: null,
     folderDescendants: null, // Set
+    smartFolderId: null,
+    smartConditions: null, // inherited condition groups
+    smartFolderName: null,
     tag: null,
     search: "",
     filtered: [],
     shown: 0,
+    smartById: {}, // id -> node with path name
   };
 
   const $ = (id) => document.getElementById(id);
@@ -22,6 +34,7 @@
     chars: $("chars"),
     drawerChars: $("drawer-chars"),
     folderTree: $("folder-tree"),
+    smartTree: $("smart-tree"),
     tagList: $("tag-list"),
     drawer: $("drawer"),
     scrim: $("scrim"),
@@ -70,6 +83,172 @@
     return VIDEO_EXT.has(String(ext || "").toLowerCase());
   }
 
+  function asStrList(value) {
+    if (value == null) return [];
+    if (Array.isArray(value)) return value.map(String);
+    return [String(value)];
+  }
+
+  function typeMatches(ext, value) {
+    const v = String(value || "").toLowerCase().replace(/^\./, "");
+    const e = String(ext || "").toLowerCase().replace(/^\./, "");
+    if (v === "video") return VIDEO_EXT.has(e);
+    if (v === "audio") return AUDIO_EXT.has(e);
+    if (v === "image" || v === "img" || v === "photo") return IMAGE_EXT.has(e);
+    return e === v;
+  }
+
+  /** Same semantics as library.py _eval_rule / eval_smart_conditions */
+  function evalRule(item, propertyName, method, value) {
+    method = String(method || "").toLowerCase();
+    const prop = String(propertyName || "").toLowerCase();
+    const tags = new Set((item.tags || []).map(String));
+    const folders = new Set((item.folders || []).map(String));
+    const ext = String(item.ext || "").toLowerCase();
+    const name = String(item.name || "").toLowerCase();
+
+    if (prop === "tags") {
+      const vals = new Set(asStrList(value));
+      if (method === "intersection" || method === "union") {
+        for (const v of vals) if (tags.has(v)) return true;
+        return false;
+      }
+      if (method === "identity") {
+        for (const v of vals) if (tags.has(v)) return false;
+        return true;
+      }
+      if (method === "equal") {
+        if (tags.size !== vals.size) return false;
+        for (const v of vals) if (!tags.has(v)) return false;
+        return true;
+      }
+      if (method === "unequal") {
+        if (tags.size !== vals.size) return true;
+        for (const v of vals) if (!tags.has(v)) return true;
+        return false;
+      }
+      return false;
+    }
+
+    if (prop === "folders") {
+      const vals = new Set(asStrList(value));
+      if (method === "intersection" || method === "union") {
+        for (const v of vals) if (folders.has(v)) return true;
+        return false;
+      }
+      if (method === "identity") {
+        for (const v of vals) if (folders.has(v)) return false;
+        return true;
+      }
+      if (method === "equal") {
+        if (folders.size !== vals.size) return false;
+        for (const v of vals) if (!folders.has(v)) return false;
+        return true;
+      }
+      if (method === "unequal") {
+        if (folders.size !== vals.size) return true;
+        for (const v of vals) if (!folders.has(v)) return true;
+        return false;
+      }
+      return false;
+    }
+
+    if (prop === "type") {
+      const ok = typeMatches(ext, value);
+      if (method === "equal") return ok;
+      if (method === "unequal") return !ok;
+      if (method === "intersection" || method === "union") return ok;
+      if (method === "identity") return !ok;
+      return false;
+    }
+
+    if (prop === "name") {
+      const v = String(value || "").toLowerCase();
+      if (method === "contain") return name.includes(v);
+      if (method === "uncontain") return !name.includes(v);
+      if (method === "equal") return name === v;
+      if (method === "unequal") return name !== v;
+      return false;
+    }
+
+    if (prop === "rating") {
+      const star = item.star == null ? 0 : Number(item.star) || 0;
+      const target = parseInt(value, 10);
+      if (Number.isNaN(target)) return false;
+      if (method === "equal") return star === target;
+      if (method === "unequal") return star !== target;
+      if (method === "gt" || method === "greater") return star > target;
+      if (method === "lt" || method === "less") return star < target;
+      if (method === "gte" || method === "ge") return star >= target;
+      if (method === "lte" || method === "le") return star <= target;
+      return false;
+    }
+
+    if (prop === "annotation") {
+      const text = String(item.annotation || "").toLowerCase();
+      const v = String(value || "").toLowerCase();
+      if (method === "contain") return text.includes(v);
+      if (method === "uncontain") return !text.includes(v);
+      if (method === "equal") return text === v;
+      if (method === "unequal") return text !== v;
+      return false;
+    }
+
+    return false;
+  }
+
+  function evalGroup(item, group) {
+    const rules = group.rules || [];
+    const match = String(group.match || "AND").toUpperCase();
+    const boolean = String(group.boolean || "TRUE").toUpperCase();
+    let ok = true;
+    if (rules.length) {
+      const results = rules.map((r) =>
+        evalRule(item, r.property, r.method, r.value)
+      );
+      ok = match === "OR" ? results.some(Boolean) : results.every(Boolean);
+    }
+    if (boolean === "FALSE") ok = !ok;
+    return ok;
+  }
+
+  function evalSmartConditions(item, conditions) {
+    if (!conditions || !conditions.length) return true;
+    return conditions.every((g) => evalGroup(item, g));
+  }
+
+  function indexSmartFolders(nodes, prefix = []) {
+    for (const n of nodes || []) {
+      const path = prefix.concat(n.name);
+      state.smartById[n.id] = {
+        id: n.id,
+        name: n.name,
+        path: path.join(" / "),
+        inherited: n.inherited || n.conditions || [],
+        children: n.children || [],
+      };
+      indexSmartFolders(n.children, path);
+    }
+  }
+
+  function selectSmartFolder(id) {
+    if (!id) {
+      state.smartFolderId = null;
+      state.smartConditions = null;
+      state.smartFolderName = null;
+      return;
+    }
+    const node = state.smartById[id];
+    if (!node) return;
+    state.smartFolderId = id;
+    state.smartConditions = node.inherited;
+    state.smartFolderName = node.path;
+    // Smart folder is the primary Eagle-like view; drop competing scope filters
+    state.character = null;
+    state.folderId = null;
+    state.folderDescendants = null;
+  }
+
   function applyFilters() {
     if (!state.catalog) return;
     const q = state.search.trim().toLowerCase();
@@ -77,10 +256,14 @@
     const charFolder = state.character
       ? (state.catalog.characters || {})[state.character]
       : null;
-    const charTag = state.character; // eunbi / sofie tag match
+    const charTag = state.character;
 
     const out = [];
     for (const item of state.catalog.items) {
+      if (state.smartConditions) {
+        if (!evalSmartConditions(item, state.smartConditions)) continue;
+      }
+
       if (state.folderId && state.folderDescendants) {
         let hit = false;
         for (const f of item.folders || []) {
@@ -98,7 +281,6 @@
         const hasTag = (item.tags || []).some(
           (t) => String(t).toLowerCase() === charTag
         );
-        // Folder OR tag so filed-but-untagged and tagged-but-unfiled both show
         if (!inFolder && !hasTag) continue;
       }
 
@@ -110,11 +292,7 @@
       }
 
       if (tokens.length) {
-        const hay = [
-          item.name,
-          item.ext,
-          ...(item.tags || []),
-        ]
+        const hay = [item.name, item.ext, ...(item.tags || [])]
           .join(" ")
           .toLowerCase();
         if (!tokens.every((t) => hay.includes(t))) continue;
@@ -127,6 +305,7 @@
     state.shown = 0;
     el.grid.innerHTML = "";
     renderFilterChips();
+    highlightNav();
     appendPage();
     setStatus(
       `${out.length.toLocaleString()} items` +
@@ -136,6 +315,11 @@
 
   function renderFilterChips() {
     const bits = [];
+    if (state.smartFolderId) {
+      bits.push(
+        chipHtml(`◈ ${state.smartFolderName || "smart"}`, "smart")
+      );
+    }
     if (state.character) {
       bits.push(chipHtml(state.character, "character"));
     }
@@ -154,6 +338,7 @@
     el.activeFilters.querySelectorAll("[data-clear]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const kind = btn.getAttribute("data-clear");
+        if (kind === "smart") selectSmartFolder(null);
         if (kind === "character") state.character = null;
         if (kind === "folder") {
           state.folderId = null;
@@ -250,8 +435,6 @@
   function closeLightbox() {
     el.lightbox.classList.add("hidden");
     el.lbStage.innerHTML = "";
-    const v = el.lbStage.querySelector("video");
-    if (v) v.pause();
   }
 
   function formatBytes(n) {
@@ -268,7 +451,26 @@
     });
   }
 
+  function highlightNav() {
+    if (el.smartTree) {
+      el.smartTree.querySelectorAll(".folder-item").forEach((btn) => {
+        btn.classList.toggle(
+          "on",
+          btn.dataset.smartId === state.smartFolderId
+        );
+      });
+    }
+    if (el.folderTree) {
+      el.folderTree.querySelectorAll(".folder-item").forEach((btn) => {
+        btn.classList.toggle("on", btn.dataset.folderId === state.folderId);
+      });
+    }
+  }
+
   function renderChrome() {
+    state.smartById = {};
+    indexSmartFolders(state.catalog.smart_folders || []);
+
     const chars = state.catalog.characters || {};
     const order = ["eunbi", "sofie"];
     const make = (parent) => {
@@ -280,21 +482,24 @@
       all.textContent = "All";
       all.addEventListener("click", () => {
         state.character = null;
+        // keep smart folder if set
         syncCharChips();
         applyFilters();
       });
       parent.appendChild(all);
       for (const key of order) {
-        if (!chars[key] && key !== "eunbi" && key !== "sofie") continue;
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "chip";
         btn.dataset.character = key;
-        const label = key[0].toUpperCase() + key.slice(1);
-        btn.textContent = label;
-        if (!chars[key]) btn.title = "Folder id not in index; filtering by tag only";
+        btn.textContent = key[0].toUpperCase() + key.slice(1);
+        if (!chars[key]) {
+          btn.title = "Folder id not in index; filtering by tag only";
+        }
         btn.addEventListener("click", () => {
           state.character = key;
+          // character shortcut exits smart-folder mode
+          selectSmartFolder(null);
           syncCharChips();
           applyFilters();
         });
@@ -305,6 +510,40 @@
     make(el.drawerChars);
     syncCharChips();
 
+    // Smart folder tree
+    el.smartTree.innerHTML = "";
+    const clearSf = document.createElement("button");
+    clearSf.type = "button";
+    clearSf.className = "folder-item";
+    clearSf.textContent = "— none —";
+    clearSf.addEventListener("click", () => {
+      selectSmartFolder(null);
+      openDrawer(false);
+      syncCharChips();
+      applyFilters();
+    });
+    el.smartTree.appendChild(clearSf);
+
+    const addSmart = (node, depth) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "folder-item";
+      if (depth === 0) btn.classList.add("smart-root");
+      if ((node.children || []).length) btn.classList.add("has-kids");
+      btn.style.paddingLeft = `${8 + depth * 14}px`;
+      btn.dataset.smartId = node.id;
+      btn.textContent = node.name;
+      btn.addEventListener("click", () => {
+        selectSmartFolder(node.id);
+        openDrawer(false);
+        syncCharChips();
+        applyFilters();
+      });
+      el.smartTree.appendChild(btn);
+      for (const c of node.children || []) addSmart(c, depth + 1);
+    };
+    for (const n of state.catalog.smart_folders || []) addSmart(n, 0);
+
     // Folder tree
     el.folderTree.innerHTML = "";
     const addFolder = (node, depth) => {
@@ -312,11 +551,13 @@
       btn.type = "button";
       btn.className = "folder-item";
       btn.style.paddingLeft = `${8 + depth * 14}px`;
+      btn.dataset.folderId = node.id;
       btn.textContent = node.name;
       btn.addEventListener("click", () => {
         state.folderId = node.id;
         const fmap = folderMap(state.catalog.folders);
         state.folderDescendants = descendants(node.id, fmap);
+        selectSmartFolder(null);
         openDrawer(false);
         applyFilters();
       });
@@ -349,15 +590,19 @@
     if (!res.ok) throw new Error(`catalog ${res.status}`);
     state.catalog = await res.json();
     renderChrome();
-    // Default to Eunbi if that character folder exists
-    if ((state.catalog.characters || {}).eunbi) {
+    // Prefer smart folder "Eunbi" if present; else character chip
+    const eunbiSmart = Object.values(state.smartById).find(
+      (n) => n.name === "Eunbi" && n.path === "Eunbi"
+    );
+    if (eunbiSmart) {
+      selectSmartFolder(eunbiSmart.id);
+    } else if ((state.catalog.characters || {}).eunbi) {
       state.character = "eunbi";
     }
     syncCharChips();
     applyFilters();
   }
 
-  // Infinite scroll
   const io = new IntersectionObserver(
     (entries) => {
       for (const e of entries) {
@@ -370,7 +615,6 @@
   );
   io.observe(el.sentinel);
 
-  // Events
   $("btn-nav").addEventListener("click", () => openDrawer(true));
   $("btn-close-nav").addEventListener("click", () => openDrawer(false));
   el.scrim.addEventListener("click", () => openDrawer(false));
