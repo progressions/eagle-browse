@@ -35,6 +35,23 @@ eagle-browse /path/to/Something.library
 
 Default library: `~/Dropbox/ISAAC/GENNIE/Eunbi.library`
 
+### Auto-update on start
+
+`eagle-browse`, `phone-browse`, and `eagle-inbox-watch` check `origin` on start
+(`git fetch`, 8s timeout). If the remote branch is strictly ahead and the
+tracked working tree is clean, they `git pull --ff-only` and re-exec so the new
+code runs. Offline, timed out, dirty tree, or diverged history → keep the
+current checkout and start normally (no hang).
+
+| Opt-out | How |
+|---------|-----|
+| One shot | `eagle-browse --no-update` (flag is stripped before Python sees it) |
+| Env | `EAGLE_BROWSE_NO_UPDATE=1` |
+| Debug | `EAGLE_BROWSE_UPDATE_VERBOSE=1` prints fetch timeouts / skip reasons |
+
+Local uncommitted changes always block the pull (it will print a notice if the
+remote is ahead). Untracked files are ignored for that check.
+
 ### Omarchy install
 
 ```bash
@@ -143,7 +160,7 @@ Active filters show as chips under the buttons; click a chip to remove it.
 
 **Non-contiguous with keyboard:** Shift+arrows for a range → plain arrows to another asset (selection stays) → **Space** to add it.
 
-Selection applies to: **copy paths** (`y`/`Y`), **tags** (`t`), **folders** (`f`), **ratings** (`1`–`5`), **stage** (`s`).
+Selection applies to: **copy path** (`y`), **copy Eagle id** (`Y` / Shift+Y), **tags** (`t`), **folders** (`f`), **ratings** (`1`–`5`), **stage** (`s`).
 
 | `+` / `-` | Larger / smaller thumbnails |
 
@@ -240,8 +257,8 @@ eagle-inbox-watch --once -v
 | `--no-notify` / `--no-sound` | Quiet mode |
 
 The watcher and the GUI share the same write lock, so only one imports at a time.
-| `Y` | **Copy all marked paths** (newline-separated; if none marked, copies focused) |
-| `Ctrl+Y` | Copy marked as `file://` URIs |
+| `Y` / Shift+Y | **Copy Eagle id(s)** (newline-separated if multi-selected) — agent-CLI safe |
+| `Ctrl+Y` | Copy selection as `file://` URIs |
 | `y` / `c` | Copy **one** focused path |
 | `s` | **Stage** marked files → outbox folder (copy; library stays read-only) |
 | `Esc` | Clear marks (then clear search) |
@@ -249,7 +266,7 @@ The watcher and the GUI share the same write lock, so only one imports at a time
 ### Multi-file handoff (Lightroom / other apps)
 
 1. Browse smart folder, **`Space`** to mark several images  
-2. **`Y`** — paste paths into a tool, **or** **`s`** — copy files to staging  
+2. **`y`** — paste paths into a tool, **`Y`** — paste Eagle ids for an agent, **or** **`s`** — copy files to staging  
 3. Default stage dir: `~/Dropbox/ISAAC/GENNIE/Eunbi/outbox`  
    Override: `EAGLE_STAGE_DIR=/path/to/folder eagle-browse`  
 4. On another machine, import that Dropbox folder into Lightroom (or watch it)

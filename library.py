@@ -68,6 +68,9 @@ class Item:
     height: int
     annotation: str
     modification_time: int
+    # Eagle btime — when the item was added (or source birth at import in our writer).
+    # Stable across tag/folder edits; use for "Added · newest" sort.
+    btime: int = 0
     star: int | None = None  # Eagle UI "rating"; absent = unrated
     duration: float | None = None  # seconds (video/audio)
     item_dir: Path | None = None  # images/<id>.info for metadata writes
@@ -423,6 +426,7 @@ class EagleLibrary:
                     height=int(raw.get("height") or 0),
                     annotation=str(raw.get("annotation") or ""),
                     modification_time=int(raw.get("modificationTime") or 0),
+                    btime=int(raw.get("btime") or 0),
                     star=star,
                     duration=duration,
                     item_dir=item_dir.resolve(),
@@ -434,7 +438,8 @@ class EagleLibrary:
                 items.append(item)
                 items_by_id[item.id] = item
 
-        items.sort(key=lambda i: i.modification_time, reverse=True)
+        # Default in-memory order: added-to-library (btime), not modificationTime
+        items.sort(key=lambda i: i.btime or i.modification_time, reverse=True)
         self.items = items
         self.items_by_id = items_by_id
         # Invalidate query caches after reload

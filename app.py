@@ -44,6 +44,8 @@ _playing_media: list[Any] = []
 
 # Grid sort options: (id, label) — applied after folder/smart/search filters
 SORT_OPTIONS: list[tuple[str, str]] = [
+    ("added_desc", "Added · newest"),
+    ("added_asc", "Added · oldest"),
     ("mtime_desc", "Modified · newest"),
     ("mtime_asc", "Modified · oldest"),
     ("name_asc", "Name · A–Z"),
@@ -258,8 +260,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._known_inbox_names: set[str] = set()
         self._scope_text = "all"
         self._thumb_size = THUMB_SIZE_DEFAULT
-        # Sort key id from SORT_OPTIONS (default: newest modified first)
-        self._sort_key = "mtime_desc"
+        # Sort key id from SORT_OPTIONS (default: newest added first)
+        self._sort_key = "added_desc"
         # Smart-folder id → last known item count for sidebar "(N)" labels
         self._smart_counts: dict[str, int] = {}
         # While tag/folder/type pickers are open, ignore main-window hotkeys
@@ -277,6 +279,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._populate_sidebar()
         self.refresh_items()
         self._start_inbox_watcher()
+
 
     # ── UI ────────────────────────────────────────────────────────────
 
@@ -308,34 +311,25 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         body.set_vexpand(True)
         root.append(body)
 
-        # Left sidebar: folders (collapsible pane)
+        # Left sidebar: folders (collapsible pane).
+        # Pin width on a Box wrapper — GTK4 ScrolledWindow ignores max-width CSS,
+        # so a bare scrolled window can grow or shrink and clip children on HiDPI.
         LEFT_W = 280
         self.left_sidebar = Gtk.ScrolledWindow()
         self.left_sidebar.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.left_sidebar.set_size_request(LEFT_W, -1)
-        self.left_sidebar.set_hexpand(False)
+        self.left_sidebar.set_hexpand(True)
+        self.left_sidebar.set_vexpand(True)
         self.left_sidebar.add_css_class("sidebar")
         self.left_sidebar.add_css_class("left-sidebar")
-        css_left = Gtk.CssProvider()
-        css_left.load_from_data(
-            f"""
-            scrolledwindow.left-sidebar {{
-                min-width: {LEFT_W}px;
-                max-width: {LEFT_W}px;
-            }}
-            """.encode()
-        )
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(),
-            css_left,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-        )
 
         self.folder_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.folder_list.add_css_class("navigation-sidebar")
         self.folder_list.connect("row-selected", self._on_sidebar_selected)
         self.left_sidebar.set_child(self.folder_list)
-        body.append(self.left_sidebar)
+
+        left_wrap = self._fixed_width_pane(LEFT_W, "left-sidebar-wrap")
+        left_wrap.append(self.left_sidebar)
+        body.append(left_wrap)
 
         # Main: filter bar + grid + status
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -577,41 +571,68 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints.set_hexpand(True)
         root.append(hints)
 
-    def _build_inspector(self) -> Gtk.Widget:
-        """Right sidebar: preview + rating + tags + folders for selection."""
-        # Fixed width; children constrained so stars/paths don't expand the pane.
-        INSPECTOR_WIDTH = 220
-        SIDE_PAD = 16  # left/right padding around preview + content
-        CONTENT_W = INSPECTOR_WIDTH - (SIDE_PAD * 2)
-        PREVIEW = 172  # centered; side pad gives breathing room
-
-        outer = Gtk.ScrolledWindow()
-        outer.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        outer.set_size_request(INSPECTOR_WIDTH, -1)
-        outer.set_hexpand(False)
-        outer.set_vexpand(True)
-        # Don't grow to fit wide children (stars, long path labels)
+    def _fixed_width_pane(self, width: int, css_class: str) -> Gtk.Box:
+        """Box with a hard width. GTK4 ScrolledWindow does not honor max-width."""
+        wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        wrap.set_hexpand(False)
+        wrap.set_vexpand(True)
+        wrap.set_size_request(width, -1)
+        wrap.add_css_class(css_class)
         try:
-            outer.set_propagate_natural_width(False)
-        except AttributeError:
+            wrap.set_overflow(Gtk.Overflow.HIDDEN)
+        except (AttributeError, TypeError):
             pass
-        outer.add_css_class("inspector-sidebar")
         css = Gtk.CssProvider()
+        # GTK4 theme parser on this stack rejects max-width; pin via size_request.
         css.load_from_data(
             f"""
-            scrolledwindow.inspector-sidebar {{
-                min-width: {INSPECTOR_WIDTH}px;
-                max-width: {INSPECTOR_WIDTH}px;
-            }}
-            scrolledwindow.inspector-sidebar button {{
-                min-width: 0;
-                min-height: 0;
-                padding: 2px 4px;
-            }}
-            scrolledwindow.inspector-sidebar label {{
-                max-width: {CONTENT_W}px;
+            box.{css_class} {{
+                min-width: {width}px;
             }}
             """.encode()
+        )
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+        return wrap
+
+    def _build_inspector(self) -> Gtk.Widget:
+        """Right sidebar: preview + rating + tags + folders for selection."""
+        # Hard-pin the pane width on a Box (ScrolledWindow cannot take max-width).
+        # Keep the preview well under the pane width so HiDPI / fractional-scale
+        # clip on the window's right edge cannot hide Edit buttons.
+        # Keep pane + preview narrow enough that a ~45px right-edge clip from
+        # Hyprland fractional scaling (surface wider than client) still leaves
+        # Edit buttons and the thumbnail fully visible.
+        INSPECTOR_WIDTH = 260
+        SIDE_PAD = 10
+        PREVIEW = 180
+        self._insp_preview_px = PREVIEW
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_hexpand(True)
+        scroll.set_vexpand(True)
+        try:
+            scroll.set_overlay_scrolling(True)
+        except AttributeError:
+            pass
+        try:
+            scroll.set_propagate_natural_width(False)
+        except AttributeError:
+            pass
+        scroll.add_css_class("inspector-sidebar")
+        css = Gtk.CssProvider()
+        css.load_from_data(
+            b"""
+            scrolledwindow.inspector-sidebar button {
+                min-width: 0;
+                min-height: 0;
+                padding: 2px 6px;
+            }
+            """
         )
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(),
@@ -624,20 +645,41 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         box.set_margin_bottom(8)
         box.set_margin_start(SIDE_PAD)
         box.set_margin_end(SIDE_PAD)
-        box.set_hexpand(False)
-        box.set_size_request(CONTENT_W, -1)
-        outer.set_child(box)
+        box.set_hexpand(True)
+        box.set_halign(Gtk.Align.FILL)
+        scroll.set_child(box)
 
-        def _narrow_label(lbl: Gtk.Label, *, chars: int = 18) -> Gtk.Label:
+        def _narrow_label(lbl: Gtk.Label, *, chars: int = 20) -> Gtk.Label:
             lbl.set_wrap(True)
             lbl.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
             lbl.set_max_width_chars(chars)
             lbl.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
-            lbl.set_hexpand(False)
+            lbl.set_hexpand(True)
             lbl.set_xalign(0.0)
             return lbl
 
-        self.insp_title = _narrow_label(Gtk.Label(xalign=0), chars=16)
+        def _section_head(title: str, on_edit) -> Gtk.Box:
+            """Heading + Edit stacked on the left.
+
+            Edit is left-aligned on its own row so a right-edge window clip
+            (Hyprland fractional scale) cannot hide the button.
+            """
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            col.set_hexpand(True)
+            lbl = Gtk.Label(label=title, xalign=0)
+            lbl.add_css_class("heading")
+            lbl.set_hexpand(True)
+            lbl.set_ellipsize(3)
+            col.append(lbl)
+            edit = Gtk.Button(label="Edit")
+            edit.add_css_class("flat")
+            edit.set_hexpand(False)
+            edit.set_halign(Gtk.Align.START)
+            edit.connect("clicked", lambda *_: on_edit())
+            col.append(edit)
+            return col
+
+        self.insp_title = _narrow_label(Gtk.Label(xalign=0), chars=22)
         self.insp_title.add_css_class("heading")
         box.append(self.insp_title)
 
@@ -663,7 +705,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         box.append(self.insp_dims)
 
-        self.insp_subtitle = _narrow_label(Gtk.Label(xalign=0), chars=18)
+        self.insp_subtitle = _narrow_label(Gtk.Label(xalign=0), chars=24)
         self.insp_subtitle.add_css_class("dim-label")
         self.insp_subtitle.add_css_class("caption")
         box.append(self.insp_subtitle)
@@ -673,15 +715,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         self.insp_picture.set_can_shrink(True)
         self.insp_picture.set_hexpand(False)
-        frame = Gtk.Box()
-        frame.add_css_class("card")
-        frame.set_halign(Gtk.Align.CENTER)
-        frame.set_hexpand(False)
-        frame.set_size_request(PREVIEW, PREVIEW)
-        frame.append(self.insp_picture)
-        box.append(frame)
+        self.insp_picture.set_vexpand(False)
+        self.insp_picture.set_halign(Gtk.Align.START)
+        self.insp_picture.set_valign(Gtk.Align.START)
+        self.insp_preview_frame = Gtk.Box()
+        self.insp_preview_frame.add_css_class("card")
+        # Left-align: Hyprland fractional scale clips the window's right edge.
+        self.insp_preview_frame.set_halign(Gtk.Align.START)
+        self.insp_preview_frame.set_hexpand(False)
+        self.insp_preview_frame.set_vexpand(False)
+        self.insp_preview_frame.set_size_request(PREVIEW, PREVIEW)
+        try:
+            self.insp_preview_frame.set_overflow(Gtk.Overflow.HIDDEN)
+        except (AttributeError, TypeError):
+            pass
+        self.insp_preview_frame.append(self.insp_picture)
+        box.append(self.insp_preview_frame)
 
-        # Rating — compact stars only (Clear on next row; 5+Clear in one row was ~250px)
+        # Rating — compact stars only (Clear on next row)
         rate_lbl = Gtk.Label(label="Rating", xalign=0)
         rate_lbl.add_css_class("heading")
         box.append(rate_lbl)
@@ -705,41 +756,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         clear_r.set_halign(Gtk.Align.START)
         clear_r.connect("clicked", lambda *_: self.set_rating(0))
         box.append(clear_r)
-        self.insp_rating_note = _narrow_label(Gtk.Label(xalign=0), chars=18)
+        self.insp_rating_note = _narrow_label(Gtk.Label(xalign=0), chars=28)
         self.insp_rating_note.add_css_class("dim-label")
         self.insp_rating_note.add_css_class("caption")
         box.append(self.insp_rating_note)
 
         # Tags
-        tags_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        tags_head.set_hexpand(False)
-        tags_lbl = Gtk.Label(label="Tags", xalign=0, hexpand=True)
-        tags_lbl.add_css_class("heading")
-        tags_head.append(tags_lbl)
-        edit_t = Gtk.Button(label="Edit")
-        edit_t.add_css_class("flat")
-        edit_t.set_hexpand(False)
-        edit_t.connect("clicked", lambda *_: self.edit_tags_dialog())
-        tags_head.append(edit_t)
-        box.append(tags_head)
+        box.append(_section_head("Tags", self.edit_tags_dialog))
         self.insp_tags = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self.insp_tags.set_hexpand(False)
+        self.insp_tags.set_hexpand(True)
         box.append(self.insp_tags)
 
         # Folders
-        folders_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        folders_head.set_hexpand(False)
-        folders_lbl = Gtk.Label(label="Folders", xalign=0, hexpand=True)
-        folders_lbl.add_css_class("heading")
-        folders_head.append(folders_lbl)
-        edit_f = Gtk.Button(label="Edit")
-        edit_f.add_css_class("flat")
-        edit_f.set_hexpand(False)
-        edit_f.connect("clicked", lambda *_: self.edit_folders_dialog())
-        folders_head.append(edit_f)
-        box.append(folders_head)
+        box.append(_section_head("Folders", self.edit_folders_dialog))
         self.insp_folders = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self.insp_folders.set_hexpand(False)
+        self.insp_folders.set_hexpand(True)
         box.append(self.insp_folders)
 
         # Path
@@ -747,14 +778,43 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         path_lbl.add_css_class("heading")
         box.append(path_lbl)
         self.insp_path = _narrow_label(
-            Gtk.Label(xalign=0, selectable=True), chars=18
+            Gtk.Label(xalign=0, selectable=True), chars=28
         )
         self.insp_path.add_css_class("caption")
         self.insp_path.add_css_class("dim-label")
         box.append(self.insp_path)
 
         self._inspector_empty()
-        return outer
+
+        wrap = self._fixed_width_pane(INSPECTOR_WIDTH, "inspector-wrap")
+        wrap.append(scroll)
+        self.inspector_sidebar = wrap
+        return wrap
+
+    def _set_inspector_preview(self, path: str | None) -> None:
+        """Load inspector thumbnail scaled to the fixed preview box.
+
+        Full-resolution textures make Gtk.Picture report a huge natural size,
+        which expands the inspector and gets clipped on Hyprland fractional
+        scale (surface wider than the visible client).
+        """
+        if not path:
+            self.insp_picture.set_paintable(None)
+            return
+        size = int(getattr(self, "_insp_preview_px", 180) or 180)
+        try:
+            pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                path, size, size, True
+            )
+            if pix is None:
+                self.insp_picture.set_paintable(None)
+                return
+            self.insp_picture.set_paintable(Gdk.Texture.new_for_pixbuf(pix))
+        except GLib.Error:
+            try:
+                self.insp_picture.set_paintable(Gdk.Texture.new_from_filename(path))
+            except GLib.Error:
+                self.insp_picture.set_paintable(None)
 
     @staticmethod
     def _fmt_size(n: int) -> str:
@@ -824,16 +884,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 bits.append(self._fmt_size(it.size))
             self.insp_subtitle.set_text(" · ".join(bits))
             self.insp_path.set_text(str(it.path))
-            # Thumbnail
-            path = _thumb_path_for(it)
-            if path:
-                try:
-                    tex = Gdk.Texture.new_from_filename(path)
-                    self.insp_picture.set_paintable(tex)
-                except GLib.Error:
-                    self.insp_picture.set_paintable(None)
-            else:
-                self.insp_picture.set_paintable(None)
+            self._set_inspector_preview(_thumb_path_for(it))
             if hasattr(self, "crop_btn"):
                 self.crop_btn.set_sensitive(bool(it.is_image and it.path.is_file()))
         else:
@@ -849,15 +900,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.insp_dims.set_text("")
             self.insp_subtitle.set_text("Showing values shared by all")
             self.insp_path.set_text("")
-            # Preview first selected
-            path = _thumb_path_for(items[0])
-            if path:
-                try:
-                    self.insp_picture.set_paintable(Gdk.Texture.new_from_filename(path))
-                except GLib.Error:
-                    self.insp_picture.set_paintable(None)
-            else:
-                self.insp_picture.set_paintable(None)
+            self._set_inspector_preview(_thumb_path_for(items[0]))
             if hasattr(self, "crop_btn"):
                 self.crop_btn.set_sensitive(False)
 
@@ -1715,6 +1758,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         def duration_key(it: Item) -> float:
             return float(it.duration or 0.0)
 
+        def added_key(it: Item) -> int:
+            # Eagle btime = added-to-library (our importer uses source birth/mtime).
+            # Fall back to modificationTime when btime is missing.
+            return int(it.btime or it.modification_time or 0)
+
+        if key == "added_desc":
+            return sorted(items, key=added_key, reverse=True)
+        if key == "added_asc":
+            return sorted(items, key=added_key)
         if key == "mtime_desc":
             return sorted(items, key=lambda it: it.modification_time, reverse=True)
         if key == "mtime_asc":
@@ -2259,6 +2311,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         # Hint for GTK/Omarchy file pickers (website uploads, etc.)
         self._toast("Copied · Ctrl+L in file dialog, paste path, Enter")
+
+    def copy_selected_ids(self) -> None:
+        """Copy Eagle item id(s) — Shift+Y. Safe to paste into agent CLIs (not a file path)."""
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        if len(items) > 1:
+            text = "\n".join(it.id for it in items)
+            if not self._clipboard_set_text(text):
+                return
+            self._toast(f"Copied {len(items)} Eagle ids")
+            return
+        iid = items[0].id
+        if not self._clipboard_set_text(iid):
+            return
+        self._toast(f"Copied Eagle id · {iid}")
 
     def reveal_selected_in_files(self) -> None:
         """Open Nautilus with the focused (or first marked) file selected."""
@@ -4011,14 +4080,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if keyval in (Gdk.KEY_x, Gdk.KEY_X):
                 self.open_crop_dialog()
                 return True
-        # Y = all marked paths (or focused if none marked)
+        # y / c = path(s) for selection
+        # Shift+Y = Eagle id(s) — paste-safe for agent CLIs (not rewritten as image)
         # Ctrl+Y = file:// URI list
-        # y / c = single focused path
         if keyval in (Gdk.KEY_y, Gdk.KEY_Y) and ctrl:
             self.copy_marked_paths(as_file_uris=True)
             return True
         if keyval == Gdk.KEY_Y:
-            self.copy_marked_paths(as_file_uris=False)
+            self.copy_selected_ids()
             return True
         if keyval in (Gdk.KEY_y, Gdk.KEY_c, Gdk.KEY_C):
             self.copy_selected_path()

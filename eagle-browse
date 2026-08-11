@@ -9,5 +9,13 @@ while [[ -L "$SOURCE" ]]; do
   [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
 done
 DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+ROOT="$DIR"
+LAUNCHER="$ROOT/$(basename "$SOURCE")"
 export EAGLE_LIBRARY="${EAGLE_LIBRARY:-$HOME/Dropbox/ISAAC/GENNIE/Eunbi.library}"
-exec python3 "$DIR/app.py" "$@"
+
+# shellcheck source=self_update.sh
+source "$ROOT/self_update.sh"
+eagle_browse_self_update "$LAUNCHER" "$@"
+eagle_browse_filter_args "$@"
+
+exec python3 "$DIR/app.py" "${EAGLE_BROWSE_ARGS[@]}"

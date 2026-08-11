@@ -727,6 +727,7 @@ def save_crop_as_new_item(
         height=new_h,
         annotation="",
         modification_time=now,
+        btime=now,
         star=None,
         duration=None,
         item_dir=item_dir.resolve(),
