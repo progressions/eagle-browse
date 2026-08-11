@@ -641,6 +641,28 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_title.add_css_class("heading")
         box.append(self.insp_title)
 
+        # Dimensions — large and readable (main reason you glance at the inspector)
+        self.insp_dims = _narrow_label(Gtk.Label(xalign=0), chars=18)
+        self.insp_dims.add_css_class("insp-dims")
+        css_dims = Gtk.CssProvider()
+        css_dims.load_from_data(
+            b"""
+            label.insp-dims {
+                font-size: 18px;
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                margin-top: 2px;
+                margin-bottom: 2px;
+            }
+            """
+        )
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            css_dims,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+        box.append(self.insp_dims)
+
         self.insp_subtitle = _narrow_label(Gtk.Label(xalign=0), chars=18)
         self.insp_subtitle.add_css_class("dim-label")
         self.insp_subtitle.add_css_class("caption")
@@ -734,8 +756,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._inspector_empty()
         return outer
 
+    @staticmethod
+    def _fmt_size(n: int) -> str:
+        """Human-readable byte size for the inspector subtitle."""
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            return ""
+        if n < 1024:
+            return f"{n} B"
+        if n < 1024 * 1024:
+            return f"{n / 1024:.0f} KB"
+        if n < 1024 * 1024 * 1024:
+            return f"{n / (1024 * 1024):.1f} MB"
+        return f"{n / (1024 * 1024 * 1024):.2f} GB"
+
     def _inspector_empty(self) -> None:
         self.insp_title.set_text("No selection")
+        self.insp_dims.set_text("")
         self.insp_subtitle.set_text("Select an asset in the grid")
         if hasattr(self, "crop_btn"):
             self.crop_btn.set_sensitive(False)
@@ -775,11 +813,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if n == 1:
             it = items[0]
             self.insp_title.set_text(it.display_name)
-            bits = [it.ext_lower or "?"]
             if it.width and it.height:
-                bits.append(f"{it.width}×{it.height}")
+                self.insp_dims.set_text(f"{it.width} × {it.height}")
+            else:
+                self.insp_dims.set_text("")
+            bits = [it.ext_lower or "?"]
             if it.duration:
                 bits.append(f"{it.duration:.1f}s")
+            if it.size:
+                bits.append(self._fmt_size(it.size))
             self.insp_subtitle.set_text(" · ".join(bits))
             self.insp_path.set_text(str(it.path))
             # Thumbnail
@@ -796,6 +838,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.crop_btn.set_sensitive(bool(it.is_image and it.path.is_file()))
         else:
             self.insp_title.set_text(f"{n} assets selected")
+            # Show size range when multi-selected and dimensions differ
+            dims = {(it.width, it.height) for it in items if it.width and it.height}
+            if len(dims) == 1:
+                w, h = next(iter(dims))
+                self.insp_dims.set_text(f"{w} × {h}")
+            elif dims:
+                self.insp_dims.set_text("Mixed sizes")
+            else:
+                self.insp_dims.set_text("")
             self.insp_subtitle.set_text("Showing values shared by all")
             self.insp_path.set_text("")
             # Preview first selected
