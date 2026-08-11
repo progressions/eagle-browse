@@ -296,6 +296,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         reload_btn.connect("clicked", lambda *_: self.reload_library())
         header.pack_end(reload_btn)
 
+        self.crop_btn = Gtk.Button(
+            icon_name="image-crop-symbolic",
+            tooltip_text="Crop image (x) — ratios, drag overlay",
+        )
+        self.crop_btn.set_sensitive(False)
+        self.crop_btn.connect("clicked", lambda *_: self.open_crop_dialog())
+        header.pack_end(self.crop_btn)
+
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         body.set_vexpand(True)
         root.append(body)
@@ -680,13 +688,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_rating_note.add_css_class("caption")
         box.append(self.insp_rating_note)
 
-        # Crop (single image only)
-        self.insp_crop_btn = Gtk.Button(label="Crop")
-        self.insp_crop_btn.set_halign(Gtk.Align.START)
-        self.insp_crop_btn.set_tooltip_text("Crop image (x) — ratios, drag overlay")
-        self.insp_crop_btn.connect("clicked", lambda *_: self.open_crop_dialog())
-        box.append(self.insp_crop_btn)
-
         # Tags
         tags_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         tags_head.set_hexpand(False)
@@ -736,8 +737,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _inspector_empty(self) -> None:
         self.insp_title.set_text("No selection")
         self.insp_subtitle.set_text("Select an asset in the grid")
-        if hasattr(self, "insp_crop_btn"):
-            self.insp_crop_btn.set_sensitive(False)
+        if hasattr(self, "crop_btn"):
+            self.crop_btn.set_sensitive(False)
         self.insp_picture.set_paintable(None)
         self.insp_rating_note.set_text("")
         for b in self.insp_star_buttons:
@@ -791,8 +792,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self.insp_picture.set_paintable(None)
             else:
                 self.insp_picture.set_paintable(None)
-            if hasattr(self, "insp_crop_btn"):
-                self.insp_crop_btn.set_sensitive(bool(it.is_image and it.path.is_file()))
+            if hasattr(self, "crop_btn"):
+                self.crop_btn.set_sensitive(bool(it.is_image and it.path.is_file()))
         else:
             self.insp_title.set_text(f"{n} assets selected")
             self.insp_subtitle.set_text("Showing values shared by all")
@@ -806,8 +807,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self.insp_picture.set_paintable(None)
             else:
                 self.insp_picture.set_paintable(None)
-            if hasattr(self, "insp_crop_btn"):
-                self.insp_crop_btn.set_sensitive(False)
+            if hasattr(self, "crop_btn"):
+                self.crop_btn.set_sensitive(False)
 
         # Rating commonality
         stars = {it.star for it in items}
@@ -1244,15 +1245,33 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 target=recount, name="eagle-smart-count", daemon=True
             ).start()
 
+        # Leaving an inline preview via the sidebar: close it and drop selection
+        # so the previously previewed asset is not still selected/marked.
+        was_viewing = self.is_viewer_open()
+        if was_viewing:
+            self.close_inline_viewer()
+            self._marked.clear()
+            self.selected_item = None
+            self._viewer_item_id = None
+            try:
+                self.selection.set_selected(Gtk.INVALID_LIST_POSITION)
+            except Exception:  # noqa: BLE001
+                pass
+            self.update_inspector()
+            self._update_path_label()
+            self._refresh_status()
+
         # Same place as already shown (e.g. returning from grid via ←) — don't re-query
         # Except smart folders: re-click still refreshes the grid after a count refresh
-        if same_place and kind != "smart":
+        # And except when we just closed a preview — still refresh so selection resets
+        if same_place and kind != "smart" and not was_viewing:
             return
 
         self.current_smart_folder_id = new_smart
         self.current_folder_id = new_folder
         self._special_view = new_special
-        self.refresh_items(reset_selection=not same_place)
+        # Reset selection when changing scope, or after closing a preview from the sidebar
+        self.refresh_items(reset_selection=not same_place or was_viewing)
 
     def _restore_sidebar_selection(self) -> None:
         target_smart = self.current_smart_folder_id

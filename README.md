@@ -59,14 +59,14 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `Enter` / `o` | Open larger: **images → imv**, **video/audio → mpv** |
 | `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
-| `x` | **Crop** focused image (also inspector **Crop** button) |
+| `x` | **Crop** focused image (also header-bar crop icon) |
 | `Ctrl+A` | **Select all** assets in the current grid view |
 | `Delete` / `Backspace` | **Soft-delete** selection (Eagle trash — files stay on disk) |
 | `Ctrl+Z` | **Undo** last delete batch (restore items) |
 
 ### Crop
 
-Opens a modal editor for the focused **image** (hotkey **`x`**, or **Crop** in the right inspector):
+Opens a modal editor for the focused **image** (hotkey **`x`**, or the **crop icon** in the top header bar):
 
 - Enter **width × height** (source pixels) — the overlay updates to that size
 - **Aspect presets:** Free · Orig · 1:1 · **3:4** · 4:3 · **9:16** · 16:9 · 2:3 · 3:2  
@@ -90,11 +90,10 @@ Shows the focused asset (or **common** values when multi-selected):
 
 - Thumbnail preview  
 - **Rating** — click stars or use `1`–`5` / Clear  
-- **Crop** — single image only (`x`)  
 - **Tags** — `✓` shared by all; `±` only on some; **Edit** opens tag picker  
 - **Folders** — same commonality rules; **Edit** opens folder picker  
 - Path (single selection)
-| `t` | **Tags** picker (recent + autocomplete; Enter toggles; Esc closes) |
+| `t` | **Tags** picker (recent + autocomplete; Enter toggles and clears the filter; Esc closes) |
 | `f` | **Folders / categories** picker (same UX as tags) |
 | `A` (sidebar) | **Folder auto-tags** for the selected folder (or right-click the folder) |
 | `m` | **Filter by type** (or use the **Type** button on the filter bar) |
@@ -316,3 +315,27 @@ Add a desktop entry or Hyprland bind if you want Super+key access:
 # example Hyprland bind (edit ~/.config/hypr/bindings.conf yourself)
 bind = SUPER SHIFT, E, exec, /home/isaac/Work/tech/eagle-browse/eagle-browse
 ```
+
+## Phone browse (LAN)
+
+Browse the library on a phone **on the same Wi‑Fi** — no App Store, no deploy, no Dropbox OAuth.
+
+```bash
+# optional: build/refresh index (~few seconds, writes phone-index.json in the library)
+./build_phone_index.py
+
+# serve UI + media on all interfaces (port 8787)
+./phone-browse
+# or: python3 phone_server.py --port 8787
+```
+
+On the phone open **`http://eagle.local:8787/`** (mDNS via Avahi; printed at startup).
+IP fallback is also printed if `.local` fails. Override name with `--mdns-name other` or `EAGLE_PHONE_MDNS`.
+
+- Filter chips: **Eunbi** / **Sofie** (folder **or** tag)
+- Drawer: full folder tree + top tags
+- Thumbnails and full media served from the local `*.library` path
+- **Rebuild index** in the drawer after bulk tagging
+
+`phone-index.json` is also what a future Dropbox-hosted web app can download instead of scanning every item.
+

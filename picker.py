@@ -53,9 +53,9 @@ class TogglePicker(Gtk.Window):
     Filterable list where Enter toggles membership without closing.
 
     Keys:
-      type           — filter list (entry keeps full string)
+      type           — filter list
       Up/Down        — move highlight
-      Enter          — toggle include (✓)
+      Enter          — toggle include (✓); clears the filter so you can type again
       Shift+Enter    — toggle exclude (✗) when exclude mode enabled
       Right-click    — toggle exclude
       Esc            — close
@@ -371,6 +371,8 @@ class TogglePicker(Gtk.Window):
                 self._excluded.add(value)
                 self._active.discard(value)
                 self._partial.discard(value)
+                if value not in self._all:
+                    self._all.append(value)
                 push_recent(self._recent_kind, value)
                 self._recent = [value] + [x for x in self._recent if x != value]
             else:
@@ -386,16 +388,23 @@ class TogglePicker(Gtk.Window):
                 self._active.add(value)
                 self._partial.discard(value)
                 self._excluded.discard(value)
+                if value not in self._all:
+                    self._all.append(value)
                 push_recent(self._recent_kind, value)
                 self._recent = [value] + [x for x in self._recent if x != value]
             else:
                 self._active.discard(value)
                 self._partial.discard(value)
 
-        keep = self.entry.get_text() or ""
-        self._rebuild_list(preserve_entry_focus=True)
-        if (self.entry.get_text() or "") != keep:
-            self.entry.set_text(keep)
+        # Clear filter after assign so the next tag/folder can be typed immediately
+        # (type Eunbi → Enter → type inspo → Enter).
+        self._rebuilding = True
+        try:
+            self.entry.set_text("")
+        finally:
+            self._rebuilding = False
+        self._rebuild_list(preserve_entry_focus=False)
+        # Prefer selecting the value just toggled when the unfiltered list shows it
         for i, (v, _) in enumerate(self._rows):
             if v == value:
                 r = self.list.get_row_at_index(i)
@@ -403,7 +412,7 @@ class TogglePicker(Gtk.Window):
                     self.list.select_row(r)
                 break
         self.entry.grab_focus()
-        self.entry.set_position(len(self.entry.get_text() or ""))
+        self.entry.set_position(0)
 
     def _on_row_activated(self, _list: Gtk.ListBox, _row: Gtk.ListBoxRow) -> None:
         self._toggle_selected(exclude=False)

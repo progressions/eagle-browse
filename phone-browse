@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Launch the Eagle phone browser (LAN server).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$ROOT/phone_server.py" "$@"
