@@ -262,6 +262,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._sort_key = "added_desc"
         # Smart-folder id → last known item count for sidebar "(N)" labels
         self._smart_counts: dict[str, int] = {}
+        # "untagged" / "uncategorized" → last known item count for sidebar
+        self._special_counts: dict[str, int] = {}
         # While tag/folder/type pickers are open, ignore main-window hotkeys
         self._picker_blocking = False
         # Soft-delete undo: each entry is a batch of item ids (newest last)
@@ -1202,6 +1204,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._smart_counts[sf.id] = n
         return f"{sf.name} ({n})"
 
+    def _special_label(self, view: str, base: str) -> str:
+        """Sidebar label for Untagged / Uncategorized, e.g. 'Untagged (42)'."""
+        n = self._special_counts.get(view)
+        if n is None:
+            try:
+                n = self.library.count_special_view(view)
+            except Exception:  # noqa: BLE001
+                n = 0
+            self._special_counts[view] = n
+        return f"{base} ({n})"
+
     def _update_smart_count_label(self, smart_id: str, count: int) -> None:
         """Patch the sidebar row label for one smart folder without full rebuild."""
         self._smart_counts[smart_id] = count
@@ -1221,6 +1234,49 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     name_lbl.set_text(label_text)
                 break
             row = row.get_next_sibling()
+
+    def _update_special_count_label(self, view: str, count: int) -> None:
+        """Patch Untagged / Uncategorized sidebar label without full rebuild."""
+        self._special_counts[view] = count
+        base = "Untagged" if view == "untagged" else "Uncategorized"
+        label_text = f"{base} ({count})"
+        row = self.folder_list.get_first_child()
+        while row is not None:
+            if (
+                isinstance(row, Gtk.ListBoxRow)
+                and getattr(row, "row_kind", None) == "special"
+                and getattr(row, "special_view", None) == view
+            ):
+                name_lbl = getattr(row, "name_label", None)
+                if name_lbl is not None:
+                    name_lbl.set_text(label_text)
+                break
+            row = row.get_next_sibling()
+
+    def _refresh_special_counts(self) -> None:
+        """Recount Untagged / Uncategorized in the background and patch labels."""
+
+        def work() -> None:
+            try:
+                counts = {
+                    "untagged": self.library.count_special_view("untagged"),
+                    "uncategorized": self.library.count_special_view(
+                        "uncategorized"
+                    ),
+                }
+            except Exception:  # noqa: BLE001
+                return
+
+            def apply() -> bool:
+                for view, n in counts.items():
+                    self._update_special_count_label(view, n)
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(
+            target=work, name="eagle-special-count", daemon=True
+        ).start()
 
     def _append_smart_tree(self, nodes: list[SmartFolder], depth: int = 0) -> None:
         for sf in nodes:
@@ -1247,12 +1303,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.folder_list.append(all_row)
         self.folder_list.append(
             self._make_nav_row(
-                label="Untagged", kind="special", special_view="untagged"
+                label=self._special_label("untagged", "Untagged"),
+                kind="special",
+                special_view="untagged",
             )
         )
         self.folder_list.append(
             self._make_nav_row(
-                label="Uncategorized", kind="special", special_view="uncategorized"
+                label=self._special_label("uncategorized", "Uncategorized"),
+                kind="special",
+                special_view="uncategorized",
             )
         )
 
@@ -1331,6 +1391,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             # Count in background so large smart folders don't freeze the UI
             threading.Thread(
                 target=recount, name="eagle-smart-count", daemon=True
+            ).start()
+
+        # Untagged / Uncategorized: same — refresh the badge on click
+        if kind == "special" and new_special in ("untagged", "uncategorized"):
+            def recount_special(view: str = new_special) -> None:
+                try:
+                    n = self.library.count_special_view(view)
+                except Exception:  # noqa: BLE001
+                    return
+
+                def apply() -> bool:
+                    self._update_special_count_label(view, n)
+                    return False
+
+                GLib.idle_add(apply)
+
+            threading.Thread(
+                target=recount_special, name="eagle-special-count", daemon=True
             ).start()
 
         # Leaving an inline preview via the sidebar: close it and drop selection
@@ -1628,9 +1706,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 items = [it for it in items if item_matches_view_filters(it, vf)]
             items = self._sort_items(items)
             total = len(items)
-            # Keep smart-folder sidebar count in sync with this view (no filters)
+            # Keep smart-folder / special sidebar counts in sync with this view
+            # (no search or type filters — those shrink the grid but not the badge)
             if smart_id and not search and not vf.active() and special is None:
                 self._smart_counts[smart_id] = total
+            if (
+                special in ("untagged", "uncategorized")
+                and not search
+                and not vf.active()
+            ):
+                self._special_counts[special] = total
             truncated = total > PAGE_SOFT_CAP
             page = items[:PAGE_SOFT_CAP] if truncated else items
 
@@ -1639,6 +1724,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     return False  # stale
                 if smart_id and not search and not vf.active() and special is None:
                     self._update_smart_count_label(smart_id, total)
+                if (
+                    special in ("untagged", "uncategorized")
+                    and not search
+                    and not vf.active()
+                ):
+                    self._update_special_count_label(special, total)
                 self._items = page
                 self.store.remove_all()
                 for item in page:
@@ -2511,6 +2602,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 raise
             # Re-query so Untagged drops just-tagged items; keep multi-select
             self.refresh_items()
+            # Sidebar badge: keep Untagged (N) fresh even when not on that view
+            self._refresh_special_counts()
             self._toast(("+ " if turn_on else "− ") + tag)
 
         def on_close() -> None:
@@ -2661,6 +2754,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 raise
             # Re-query so Uncategorized drops just-filed items; keep multi-select
             self.refresh_items()
+            # Sidebar badge: keep Uncategorized (N) fresh even when not on that view
+            self._refresh_special_counts()
             msg = ("+ " if turn_on else "− ") + path_label
             if turn_on:
                 auto = self.library.auto_tags_for_folders([fid])
@@ -3754,6 +3849,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         # Counts are stale after a full reload
         self._smart_counts.clear()
+        self._special_counts.clear()
         # Keep expand state; show current selection path
         self._populate_sidebar(select_current=True)
         self.refresh_items()

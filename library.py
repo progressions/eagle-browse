@@ -616,6 +616,14 @@ class EagleLibrary:
             self.query(smart_folder_id=smart_folder_id, include_deleted=False)
         )
 
+    def count_special_view(self, view: str) -> int:
+        """Number of non-deleted items in Untagged / Uncategorized virtual views."""
+        if view == "untagged":
+            return sum(1 for it in self.items if not it.is_deleted and not it.tags)
+        if view == "uncategorized":
+            return sum(1 for it in self.items if not it.is_deleted and not it.folders)
+        raise ValueError(f"unknown special view: {view}")
+
     # ── Writes (tags, ratings) ────────────────────────────────────────
 
     def _invalidate_caches(self) -> None:
