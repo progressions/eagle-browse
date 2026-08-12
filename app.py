@@ -280,6 +280,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._special_counts: dict[str, int] = {}
         # While tag/folder/type pickers are open, ignore main-window hotkeys
         self._picker_blocking = False
+        # Ignore the row-selected that follows a viewer-open sidebar click
+        self._sidebar_nav_lock = False
         # Soft-delete undo: each entry is a batch of item ids (newest last)
         self._delete_undo_stack: list[list[str]] = []
         # Inbox signal: watcher writes this after each new import
@@ -349,6 +351,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.folder_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.folder_list.add_css_class("navigation-sidebar")
         self.folder_list.connect("row-selected", self._on_sidebar_selected)
+        sidebar_click = Gtk.GestureClick()
+        sidebar_click.set_button(1)
+        sidebar_click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        sidebar_click.connect("pressed", self._on_sidebar_pressed)
+        self.folder_list.add_controller(sidebar_click)
         self.left_sidebar.set_child(self.folder_list)
 
         left_wrap = self._fixed_width_pane(LEFT_W, "left-sidebar-wrap")
@@ -1390,9 +1397,44 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         else:
             self.folder_list.select_row(all_row)
 
-    def _on_sidebar_selected(self, _list: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
+    def _on_sidebar_pressed(
+        self, _gesture: Gtk.GestureClick, n_press: int, x: float, y: float
+    ) -> None:
+        """While the inline viewer is open, a sidebar click must close it and switch views.
+
+        ``row-selected`` does not fire when the clicked row is already selected,
+        which is the usual case (same smart folder / Uncategorized you opened from).
+        """
+        if n_press != 1 or not self.is_viewer_open():
+            return
+        widget = self.folder_list.pick(x, y, Gtk.PickFlags.DEFAULT)
+        w = widget
+        while w is not None and w is not self.folder_list:
+            if isinstance(w, Gtk.Button):
+                return
+            w = w.get_parent()
+        row = self.folder_list.get_row_at_y(int(y))
         if row is None:
             return
+        kind = getattr(row, "row_kind", None)
+        if kind in (None, "header", "section"):
+            return
+        self._sidebar_nav_lock = True
+        if self.folder_list.get_selected_row() is not row:
+            self.folder_list.select_row(row)
+        self._apply_sidebar_navigation(row)
+        GLib.idle_add(self._unlock_sidebar_nav)
+
+    def _unlock_sidebar_nav(self) -> bool:
+        self._sidebar_nav_lock = False
+        return False
+
+    def _on_sidebar_selected(self, _list: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
+        if row is None or self._sidebar_nav_lock:
+            return
+        self._apply_sidebar_navigation(row)
+
+    def _apply_sidebar_navigation(self, row: Gtk.ListBoxRow) -> None:
         kind = getattr(row, "row_kind", None)
         if kind in ("header", "section"):
             # Section headers don't change the grid filter
@@ -4008,7 +4050,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return False
 
     def is_viewer_open(self) -> bool:
-        return bool(getattr(self, "_viewer_open", False))
+        if bool(getattr(self, "_viewer_open", False)):
+            return True
+        stack = getattr(self, "center_stack", None)
+        if stack is None:
+            return False
+        try:
+            return stack.get_visible_child_name() == "viewer"
+        except Exception:  # noqa: BLE001
+            return False
 
     def _stop_inline_video(self) -> None:
         """Pause and detach any in-frame video stream."""
