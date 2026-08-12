@@ -255,9 +255,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._query_gen = 0  # bump to cancel stale background queries
         self._search_timeout_id = 0
         self._cols_sync_timeout_id = 0
-        self._inbox_poll_id = 0
         self._inbox_importing = False
-        self._known_inbox_names: set[str] = set()
         self._scope_text = "all"
         self._thumb_size = THUMB_SIZE_DEFAULT
         # Sort key id from SORT_OPTIONS (default: newest added first)
@@ -271,14 +269,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
         # Super+W (killactive) / window close must quit the process, not leave
-        # a headless instance polling the inbox with a ThreadPoolExecutor alive.
+        # a headless instance with a ThreadPoolExecutor alive.
         self.connect("close-request", self._on_window_close_request)
 
         self._build_ui()
         self._install_keybinds()
         self._populate_sidebar()
         self.refresh_items()
-        self._start_inbox_watcher()
+        # Do NOT start an inbox poller here. Auto-import is eagle-inbox-watch
+        # only (one machine). Opening the GUI on multiple hosts must not race
+        # the watcher or each other over PICS/Eunbi. Manual import: key `i`.
 
 
     # ── UI ────────────────────────────────────────────────────────────
@@ -959,12 +959,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _shutdown_background(self) -> None:
         """Stop timers / workers so the process can actually exit."""
-        if self._inbox_poll_id:
-            try:
-                GLib.source_remove(self._inbox_poll_id)
-            except Exception:  # noqa: BLE001
-                pass
-            self._inbox_poll_id = 0
         if self._search_timeout_id:
             try:
                 GLib.source_remove(self._search_timeout_id)
@@ -3076,65 +3070,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=work, name="eagle-stage", daemon=True).start()
 
-    # ── Inbox import / watcher ────────────────────────────────────────
-
-    def _start_inbox_watcher(self) -> None:
-        """Poll inbox every few seconds for new media (Dropbox-friendly)."""
-        if self._inbox_poll_id:
-            return
-        # name -> last seen size (stable size across polls ⇒ ready to import)
-        self._inbox_sizes: dict[str, int] = {}
-        self._inbox_stable: set[str] = set()
-
-        def tick() -> bool:
-            self._poll_inbox()
-            return True
-
-        self._inbox_poll_id = GLib.timeout_add_seconds(3, tick)
-        # First poll soon after open so files already in inbox get picked up
-        GLib.timeout_add_seconds(1, lambda: self._poll_inbox() or False)
-
-    def _poll_inbox(self) -> None:
-        if self._inbox_importing:
-            return
-        from import_media import list_inbox_files
-
-        try:
-            files = list_inbox_files(self._inbox_dir)
-        except OSError:
-            return
-
-        from import_media import check_media_complete
-
-        ready: set[str] = set()
-        current: dict[str, int] = {}
-        for p in files:
-            try:
-                sz = p.stat().st_size
-            except OSError:
-                continue
-            if sz <= 0:
-                continue
-            current[p.name] = sz
-            prev = self._inbox_sizes.get(p.name)
-            if prev is not None and prev == sz:
-                # Seen twice with same size → settled; also must be playable
-                # (Dropbox often parks a tiny ftyp stub before the real payload).
-                ok, _reason = check_media_complete(p)
-                if ok:
-                    ready.add(p.name)
-            # else first sighting, still growing, or incomplete stub — wait
-
-        self._inbox_sizes = current
-        # Forget stability for files that disappeared
-        self._inbox_stable &= set(current)
-
-        # Only import files not already processed this session
-        to_import = ready - self._known_inbox_names
-        if to_import:
-            # Mark as attempted so we don't re-queue every poll; cleared if still present after fail
-            self._known_inbox_names |= to_import
-            self.import_inbox(manual=False, only_names=set(to_import))
+    # ── Inbox import (manual only) ────────────────────────────────────
+    # Auto-import belongs exclusively to eagle-inbox-watch on one machine.
+    # The GUI must not poll PICS/Eunbi — open browsers on multiple hosts
+    # would race the watcher and each other (double library entries).
 
     def import_inbox(
         self,
@@ -3142,7 +3081,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         manual: bool = True,
         only_names: set[str] | None = None,
     ) -> None:
-        """Import media from the Dropbox Eunbi inbox into the Eagle library."""
+        """Import media from the Dropbox Eunbi inbox into the Eagle library.
+
+        Manual only (hotkey ``i``). Prefer the headless watcher for day-to-day
+        intake so the GUI can stay open without consuming the inbox.
+        """
         if self._inbox_importing:
             if manual:
                 self._toast("Import already running…")
@@ -3184,7 +3127,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     ready.append(f)
                 else:
                     deferred_names.append(f.name)
-                    # Auto-watch will retry; manual import gets a toast via results
 
             results = []
             unique: list[Path] = []
@@ -3282,9 +3224,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
             def done() -> bool:
                 self._inbox_importing = False
-                # Incomplete stubs: allow another poll once the file grows
-                for name in deferred_names:
-                    self._known_inbox_names.discard(name)
                 if ok:
                     play_sound("notification")
                     try:

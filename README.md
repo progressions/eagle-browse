@@ -181,15 +181,20 @@ Default inbox:
 
 `~/Dropbox/ISAAC/GENNIE/Eunbi/PICS/Eunbi`
 
+**Only one process should auto-consume the inbox** — the headless
+`eagle-inbox-watch` on a single machine (see below). The GUI does **not**
+poll or import on open. Opening Eagle Browse on Ginger, Jack, and Eric at
+once is safe; none of them will race the intake folder.
+
 | Action | How |
 |--------|-----|
-| **Auto** | App polls every ~3s; when a file’s size is stable, it imports |
-| **Manual** | Press **`i`** to import everything currently in the inbox |
-| Override path | `EAGLE_INBOX=/path/to/folder eagle-browse` |
+| **Auto** | `eagle-inbox-watch` only (one host; user systemd unit) |
+| **Manual (GUI)** | Press **`i`** — one-shot import; leave it to the watcher in normal use |
+| Override path | `EAGLE_INBOX=/path/to/folder` |
 
-Import:
+Import steps (watcher or manual `i`):
 
-1. Content-hash (MD5) check against the library — exact duplicates open a review dialog
+1. Content-hash (MD5) check against the library — exact duplicates: watcher uses `--dup` policy; GUI opens a review dialog
 2. Copies new items into `Eunbi.library/images/<ID>.info/`
 3. Writes Eagle `metadata.json` + thumbnail (ffmpeg for video)
 4. Leaves new items untagged / uncategorized (unless folder auto-tags apply when you file them)
@@ -256,7 +261,9 @@ eagle-inbox-watch --once -v
 | `--once` | Single scan then exit |
 | `--no-notify` / `--no-sound` | Quiet mode |
 
-The watcher and the GUI share the same write lock, so only one imports at a time.
+The watcher and the GUI share the same write lock for metadata writes. That
+does **not** make multi-consumer intake safe — do not run two watchers, and do
+not rely on the GUI for auto-import.
 | `Y` / Shift+Y | **Copy Eagle id(s)** (newline-separated if multi-selected) — agent-CLI safe |
 | `Ctrl+Y` | Copy selection as `file://` URIs |
 | `y` / `c` | Copy **one** focused path |
