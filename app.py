@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -26,14 +27,21 @@ from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk  # noqa: 
 
 from filters import ViewFilters, item_matches_view_filters  # noqa: E402
 from import_media import DEFAULT_INBOX  # noqa: E402
-from library import DEFAULT_LIBRARY, EagleLibrary, Item, SmartFolder  # noqa: E402
+from library import (  # noqa: E402
+    DEFAULT_LIBRARY,
+    EagleLibrary,
+    Item,
+    SmartFolder,
+    eval_smart_conditions,
+)
+from write import INBOX_SIGNAL_FILENAME  # noqa: E402
 
 APP_ID = "cool.eagle.Browse"
 THUMB_SIZE_DEFAULT = 160  # square cell edge (Eagle-style uniform tiles)
 THUMB_SIZE_MIN = 72
 THUMB_SIZE_MAX = 360
 THUMB_SIZE_STEP = 24
-PAGE_SOFT_CAP = 500  # smaller page = snappier folder switches
+PAGE_CHUNK = 500  # first page + each infinite-scroll increment
 SEARCH_DEBOUNCE_MS = 150
 # Staging handoff (copy out of library — never writes into .library)
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
@@ -227,7 +235,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._special_view: str | None = None
         self.include_descendants = True
         self.selected_item: Item | None = None
-        self._items: list[Item] = []
+        self._items: list[Item] = []  # prefix currently in the GridView store
+        self._all_items: list[Item] = []  # full sorted query result
+        self._loading_more = False
+        self._restoring_scroll = False
+        self._scroll_restore_gen = 0
+        self._scroll_restore_source = 0
+        self._saved_grid_scroll: dict[str, Any] | None = None
         self._filter_text = ""
         # View filters: tags/folders/types include+exclude, dimensions, duration
         self._view_filters = ViewFilters()
@@ -268,6 +282,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._picker_blocking = False
         # Soft-delete undo: each entry is a batch of item ids (newest last)
         self._delete_undo_stack: list[list[str]] = []
+        # Inbox signal: watcher writes this after each new import
+        self._inbox_signal_path = self.library.root / INBOX_SIGNAL_FILENAME
+        self._inbox_signal_ts = 0.0
+        self._pending_import_ids: set[str] = set()
+        self._inbox_poll_id = 0
+        self._inbox_monitor: Gio.FileMonitor | None = None
+        self._inbox_images_mtime = 0.0
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
         # Super+W (killactive) / window close must quit the process, not leave
@@ -278,6 +299,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._install_keybinds()
         self._populate_sidebar()
         self.refresh_items()
+        self._start_inbox_watch()
         # Do NOT start an inbox poller here. Auto-import is eagle-inbox-watch
         # only (one machine). Opening the GUI on multiple hosts must not race
         # the watcher or each other over PICS/Eunbi. Manual import: key `i`.
@@ -522,6 +544,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.grid.set_hexpand(True)
         self.grid.connect("activate", self._on_grid_activate)
         self.grid_scroll.set_child(self.grid)
+        vadj = self.grid_scroll.get_vadjustment()
+        if vadj is not None:
+            vadj.connect("value-changed", self._on_grid_scrolled)
+            vadj.connect("changed", self._on_grid_scrolled)
         # Debounced column sync only on real resize — never on every arrow key
         self.grid.connect("map", lambda *_: self._schedule_column_sync())
         self.connect("notify::default-width", lambda *_: self._schedule_column_sync())
@@ -973,6 +999,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except Exception:  # noqa: BLE001
                 pass
             self._cols_sync_timeout_id = 0
+        if self._inbox_poll_id:
+            try:
+                GLib.source_remove(self._inbox_poll_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._inbox_poll_id = 0
+        if self._inbox_monitor is not None:
+            try:
+                self._inbox_monitor.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+            self._inbox_monitor = None
+        if self._scroll_restore_source:
+            try:
+                GLib.source_remove(self._scroll_restore_source)
+            except Exception:  # noqa: BLE001
+                pass
+            self._scroll_restore_source = 0
         try:
             _thumb_executor.shutdown(wait=False, cancel_futures=True)
         except TypeError:
@@ -1415,7 +1459,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # so the previously previewed asset is not still selected/marked.
         was_viewing = self.is_viewer_open()
         if was_viewing:
-            self.close_inline_viewer()
+            self.close_inline_viewer(restore_scroll=False)
             self._marked.clear()
             self.selected_item = None
             self._viewer_item_id = None
@@ -1624,12 +1668,127 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         self._schedule_column_sync()
 
+    def _grid_scroll_value(self) -> float:
+        adj = self.grid_scroll.get_vadjustment()
+        return float(adj.get_value()) if adj is not None else 0.0
+
+    def _set_grid_scroll_value(self, value: float) -> None:
+        adj = self.grid_scroll.get_vadjustment()
+        if adj is None:
+            return
+        upper = max(0.0, adj.get_upper() - adj.get_page_size())
+        adj.set_value(min(max(0.0, value), upper))
+
+    def _cancel_scroll_restore(self) -> None:
+        self._scroll_restore_gen += 1
+        if self._scroll_restore_source:
+            try:
+                GLib.source_remove(self._scroll_restore_source)
+            except Exception:  # noqa: BLE001
+                pass
+            self._scroll_restore_source = 0
+
+    def _restore_grid_scroll(self, value: float) -> None:
+        """Re-apply a pixel offset after a store rebuild or the grid remaps."""
+        self._cancel_scroll_restore()
+        gen = self._scroll_restore_gen
+        attempts = {"n": 0}
+
+        def apply() -> bool:
+            if gen != self._scroll_restore_gen:
+                self._scroll_restore_source = 0
+                return False
+            adj = self.grid_scroll.get_vadjustment()
+            if adj is None:
+                self._scroll_restore_source = 0
+                return False
+            attempts["n"] += 1
+            upper = adj.get_upper()
+            page = adj.get_page_size()
+            # Store rebuild / stack remap: upper grows after layout. Wait until
+            # the saved offset is representable, or give up after ~200ms.
+            max_val = max(0.0, upper - page)
+            if value > 0 and max_val + 1.0 < value and attempts["n"] < 20:
+                return True
+            self._restoring_scroll = True
+            try:
+                self._set_grid_scroll_value(value)
+            finally:
+                self._restoring_scroll = False
+            self._scroll_restore_source = 0
+            # set_value was ignored by the scroll handler while restoring
+            self._maybe_load_more()
+            return False
+
+        self._scroll_restore_source = GLib.timeout_add(10, apply)
+
+    def _on_grid_scrolled(self, *_args: object) -> None:
+        if self._loading_more or self._restoring_scroll:
+            return
+        self._maybe_load_more()
+
+    def _maybe_load_more(self) -> None:
+        if self._loading_more or self._restoring_scroll:
+            return
+        if len(self._items) >= len(self._all_items):
+            return
+        adj = self.grid_scroll.get_vadjustment()
+        if adj is None:
+            return
+        page = adj.get_page_size() or 0.0
+        remaining = adj.get_upper() - adj.get_value() - page
+        if remaining > max(page * 1.5, 400.0):
+            return
+        if self._load_more_items():
+            GLib.idle_add(lambda: (self._maybe_load_more() or False))
+
+    def _load_more_items(self, extra: int = PAGE_CHUNK) -> bool:
+        """Append the next chunk of `_all_items` to the grid. True if anything added."""
+        have = len(self._items)
+        want = min(have + max(1, extra), len(self._all_items))
+        if want <= have:
+            return False
+        self._loading_more = True
+        try:
+            for it in self._all_items[have:want]:
+                self._items.append(it)
+                self.store.append(ItemObject(it))
+        finally:
+            self._loading_more = False
+        self._rebuild_scope_text()
+        self._refresh_status()
+        return True
+
+    def _ensure_loaded(self, count: int) -> None:
+        """Make sure at least `count` items (or the whole result) are in the store."""
+        want = min(max(0, count), len(self._all_items))
+        have = len(self._items)
+        if want > have:
+            self._load_more_items(want - have)
+
+    def _rebuild_scope_text(self) -> None:
+        total = len(self._all_items)
+        shown = len(self._items)
+        scope = self._scope_label()
+        note = f" · showing {shown} of {total}" if shown < total else ""
+        page_ids = {it.id for it in self._items}
+        in_view = len(self._marked & page_ids) if self._marked else 0
+        out_view = (len(self._marked) - in_view) if self._marked else 0
+        self._scope_text = f"{total} items · {scope}{note}"
+        if out_view > 0:
+            self._scope_text += (
+                f" · ✓ {len(self._marked)} selected ({out_view} off-view)"
+            )
+
     def _set_grid_focus(self, focused: bool) -> None:
         self._grid_has_focus = focused
+        # Clearing / restoring SingleSelection can jump GridView to the top.
+        scroll = self._grid_scroll_value()
         if focused:
             # Restore blue highlight on last focused asset
             n = self.store.get_n_items()
             if n == 0:
+                self._set_grid_scroll_value(scroll)
                 return
             idx = self._last_focus_idx if 0 <= self._last_focus_idx < n else 0
             cur = self.selection.get_selected()
@@ -1650,6 +1809,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.selection.set_selected(Gtk.INVALID_LIST_POSITION)
             except Exception:
                 pass
+        self._set_grid_scroll_value(scroll)
 
     def _on_grid_has_focus_notify(self, *_args) -> None:
         self._set_grid_focus(self.grid.has_focus())
@@ -1681,6 +1841,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if (not reset_selection and self.selected_item is not None)
             else None
         )
+        keep_scroll = 0.0 if reset_selection else self._grid_scroll_value()
+        keep_loaded = 0 if reset_selection else len(self._items)
+        if reset_selection:
+            self._cancel_scroll_restore()
 
         def work() -> None:
             if special in ("untagged", "uncategorized"):
@@ -1716,8 +1880,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 and not vf.active()
             ):
                 self._special_counts[special] = total
-            truncated = total > PAGE_SOFT_CAP
-            page = items[:PAGE_SOFT_CAP] if truncated else items
+            load_n = PAGE_CHUNK if reset_selection else max(PAGE_CHUNK, keep_loaded)
+            if keep_focus_id:
+                for i, it in enumerate(items):
+                    if it.id == keep_focus_id:
+                        load_n = max(load_n, i + 1)
+                        break
+            load_n = min(load_n, total)
+            page = items[:load_n]
 
             def apply() -> bool:
                 if gen != self._query_gen:
@@ -1730,12 +1900,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     and not vf.active()
                 ):
                     self._update_special_count_label(special, total)
+                self._all_items = items
                 self._items = page
                 self.store.remove_all()
                 for item in page:
                     self.store.append(ItemObject(item))
 
-                page_ids = {it.id for it in page}
                 id_to_idx = {it.id: i for i, it in enumerate(page)}
 
                 if reset_selection or not keep_marks:
@@ -1805,15 +1975,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                             pass
                         # keep_marks retained so handoff/delete still works
 
-                note = f" · showing first {PAGE_SOFT_CAP} of {total}" if truncated else ""
-                in_view = len(self._marked & page_ids) if self._marked else 0
-                out_view = len(self._marked) - in_view if self._marked else 0
-                self._scope_text = f"{total} items · {scope}{note}"
-                if out_view > 0:
-                    self._scope_text += f" · ✓ {len(self._marked)} selected ({out_view} off-view)"
+                self._rebuild_scope_text()
                 self._refresh_status()
                 self._update_path_label()
                 self._rebuild_filter_chips()
+                if not reset_selection:
+                    self._restore_grid_scroll(keep_scroll)
+                else:
+                    self._set_grid_scroll_value(0.0)
                 return False
 
             GLib.idle_add(apply)
@@ -2129,10 +2298,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.update_inspector()
 
     def _marked_items(self) -> list[Item]:
-        """Selected items in current grid order, then any ids not on this page."""
+        """Selected items in current view order, then any ids not in this result."""
         seen: set[str] = set()
         out: list[Item] = []
-        for it in self._items:
+        for it in self._all_items or self._items:
             if it.id in self._marked:
                 out.append(it)
                 seen.add(it.id)
@@ -2238,7 +2407,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return True
 
     def _rebind_grid_keep_selection(self) -> None:
-        """Rebuild ListStore so mark overlays rebind; keep cursor position."""
+        """Rebuild ListStore so mark overlays rebind; keep cursor and scroll."""
+        scroll = self._grid_scroll_value()
         idx = self.selection.get_selected()
         if idx == Gtk.INVALID_LIST_POSITION:
             idx = 0
@@ -2249,9 +2419,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         n = self.store.get_n_items()
         if n and int(idx) < n:
             self.selection.set_selected(int(idx))
-            self.grid.scroll_to(
-                int(idx), Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None
-            )
+        self._restore_grid_scroll(scroll)
 
     def adjust_thumb_size(self, direction: int) -> None:
         """direction +1 larger, -1 smaller (keyboard +/-)."""
@@ -2336,26 +2504,28 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._select_index(int(idx), ctrl=True, shift=False)
 
     def select_all_visible(self) -> None:
-        """Multi-select every asset in the current grid view (Ctrl+A)."""
-        if not self._items:
+        """Multi-select every asset in the current view (Ctrl+A), including not-yet-loaded."""
+        pool = self._all_items or self._items
+        if not pool:
             self._toast("Nothing to select")
             return
-        self._marked = {it.id for it in self._items}
+        self._marked = {it.id for it in pool}
         # Keep focus; anchor at first item for further Shift ranges
         self._sel_anchor = 0
         idx = self.selection.get_selected()
         if idx == Gtk.INVALID_LIST_POSITION or int(idx) >= len(self._items):
             self.selection.set_selected(0)
             idx = 0
-        self.selected_item = self._items[int(idx)]
-        self._last_focus_idx = int(idx)
-        self._rebind_grid_keep_selection()
+        if self._items:
+            self.selected_item = self._items[int(idx)]
+            self._last_focus_idx = int(idx)
+        self._sync_mark_overlays()
+        self._rebuild_scope_text()
         self._refresh_status()
         self._update_path_label()
         self.update_inspector()
         self.grid.grab_focus()
         n = len(self._marked)
-        # View may be soft-capped (PAGE_SOFT_CAP)
         scope = getattr(self, "_scope_text", "") or ""
         self._toast(f"Selected all {n} in view" + (f" · {scope}" if scope else ""))
 
@@ -2511,9 +2681,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         def on_done(mode: str, it: Item) -> None:
             if mode == "new":
                 # Fresh item: no tags/folders — inject into in-memory library
-                self.library.items_by_id[it.id] = it
-                self.library.items.insert(0, it)
-                self.library._invalidate_caches()  # noqa: SLF001
+                self.library.upsert_item(it)
                 # Aim selection at the new item after re-query (if visible)
                 self.selected_item = it
                 self._marked = {it.id}
@@ -2536,7 +2704,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         def on_close() -> None:
             self._picker_blocking = False
             self.grid.grab_focus()
+            self._restore_grid_scroll(scroll)
 
+        scroll = self._grid_scroll_value()
         open_crop_dialog(
             self,
             item,
@@ -2608,7 +2778,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         def on_close() -> None:
             self.grid.grab_focus()
+            self._restore_grid_scroll(scroll)
 
+        scroll = self._grid_scroll_value()
         picker = TogglePicker(
             self,
             title="Tags",
@@ -2765,7 +2937,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         def on_close() -> None:
             self.grid.grab_focus()
+            self._restore_grid_scroll(scroll)
 
+        scroll = self._grid_scroll_value()
         picker = TogglePicker(
             self,
             title="Folders / categories",
@@ -2869,7 +3043,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             recent_kind="filter_tags",
             on_toggle=on_include,
             on_exclude=on_exclude,
-            on_close=lambda: self.grid.grab_focus(),
+            on_close=lambda s=self._grid_scroll_value(): (
+                self.grid.grab_focus(),
+                self._restore_grid_scroll(s),
+            ),
         ).present()
 
     def open_view_folder_filter(self) -> None:
@@ -2921,7 +3098,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             recent_kind="filter_folders",
             on_toggle=on_include,
             on_exclude=on_exclude,
-            on_close=lambda: self.grid.grab_focus(),
+            on_close=lambda s=self._grid_scroll_value(): (
+                self.grid.grab_focus(),
+                self._restore_grid_scroll(s),
+            ),
         ).present()
 
     def open_view_type_filter(self) -> None:
@@ -2983,7 +3163,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             recent_kind="types",
             on_toggle=on_include,
             on_exclude=on_exclude,
-            on_close=lambda: self.grid.grab_focus(),
+            on_close=lambda s=self._grid_scroll_value(): (
+                self.grid.grab_focus(),
+                self._restore_grid_scroll(s),
+            ),
         ).present()
 
     def open_dimension_filter(self) -> None:
@@ -3016,6 +3199,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         as_int: bool,
     ) -> None:
         vf = self._view_filters
+        scroll = self._grid_scroll_value()
         win = Gtk.Window(
             title=title,
             transient_for=self,
@@ -3063,6 +3247,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._picker_blocking = False
             win.destroy()
             self.grid.grab_focus()
+            self._restore_grid_scroll(scroll)
 
         def apply(*_a) -> None:
             for attr, ent in entries.items():
@@ -3164,6 +3349,199 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             GLib.idle_add(done)
 
         threading.Thread(target=work, name="eagle-stage", daemon=True).start()
+
+    # ── Live ingest of watcher imports ────────────────────────────────
+    # The GUI never consumes PICS/Eunbi. It only watches a signal file
+    # the watcher writes after each successful library item, then loads
+    # that one folder instead of rescanning 25k items.
+
+    def _start_inbox_watch(self) -> None:
+        try:
+            images = self.library.root / "images"
+            if images.is_dir():
+                self._inbox_images_mtime = images.stat().st_mtime
+        except OSError:
+            pass
+        try:
+            if self._inbox_signal_path.is_file():
+                raw = json.loads(
+                    self._inbox_signal_path.read_text(encoding="utf-8")
+                )
+                self._inbox_signal_ts = float(raw.get("ts") or 0)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+        try:
+            gfile = Gio.File.new_for_path(str(self._inbox_signal_path))
+            self._inbox_monitor = gfile.monitor_file(
+                Gio.FileMonitorFlags.NONE, None
+            )
+            self._inbox_monitor.connect("changed", self._on_inbox_signal_changed)
+        except Exception:  # noqa: BLE001
+            self._inbox_monitor = None
+
+        self._inbox_poll_id = GLib.timeout_add(1000, self._poll_inbox_signal)
+
+    def _on_inbox_signal_changed(self, *_args: object) -> None:
+        self._ingest_from_signal()
+
+    def _poll_inbox_signal(self) -> bool:
+        self._ingest_from_signal()
+        self._retry_pending_imports()
+        self._scan_images_if_changed()
+        return True
+
+    def _scan_images_if_changed(self) -> None:
+        """If images/ gained a folder, queue unknown ids (signal-file backup)."""
+        images = self.library.root / "images"
+        try:
+            mt = images.stat().st_mtime
+        except OSError:
+            return
+        if mt == self._inbox_images_mtime:
+            return
+        self._inbox_images_mtime = mt
+
+        def work() -> None:
+            unknown: list[str] = []
+            try:
+                for p in images.iterdir():
+                    if not p.is_dir() or not p.name.endswith(".info"):
+                        continue
+                    iid = p.name.removesuffix(".info")
+                    if iid not in self.library.items_by_id:
+                        unknown.append(iid)
+            except OSError:
+                return
+            if unknown:
+                GLib.idle_add(lambda: self._ingest_item_ids(unknown) or False)
+
+        threading.Thread(target=work, name="eagle-scan-new", daemon=True).start()
+
+    def _ingest_from_signal(self) -> None:
+        path = self._inbox_signal_path
+        if not path.is_file():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(raw, dict):
+            return
+        try:
+            ts = float(raw.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if ts and ts <= self._inbox_signal_ts:
+            return
+        ids = [str(i) for i in (raw.get("ids") or []) if i]
+        if not ids:
+            if ts:
+                self._inbox_signal_ts = ts
+            return
+        if ts:
+            self._inbox_signal_ts = ts
+        self._ingest_item_ids(ids)
+
+    def _retry_pending_imports(self) -> None:
+        if not self._pending_import_ids:
+            return
+        pending = list(self._pending_import_ids)
+        self._ingest_item_ids(pending)
+
+    def _ingest_item_ids(self, item_ids: list[str]) -> None:
+        new_items: list[Item] = []
+        for iid in item_ids:
+            if iid in self.library.items_by_id:
+                self._pending_import_ids.discard(iid)
+                continue
+            item = self.library.load_item(iid)
+            if item is None:
+                self._pending_import_ids.add(iid)
+                continue
+            self._pending_import_ids.discard(iid)
+            new_items.append(item)
+        if new_items:
+            self._apply_new_items(new_items, toast=True)
+
+    def _item_matches_current_view(self, item: Item) -> bool:
+        if item.is_deleted:
+            return False
+        search = self._filter_text.strip().lower()
+        if search:
+            tokens = [t for t in search.split() if t]
+            hay = " ".join(
+                [
+                    item.name_lower,
+                    item.ext_lower,
+                    (item.annotation or "").lower(),
+                    " ".join(item.tags).lower(),
+                ]
+            )
+            if not all(tok in hay for tok in tokens):
+                return False
+        if self._view_filters.active() and not item_matches_view_filters(
+            item, self._view_filters
+        ):
+            return False
+        if self._special_view == "untagged":
+            return not item.tags
+        if self._special_view == "uncategorized":
+            return not item.folders
+        if self.current_folder_id:
+            folder_ids = (
+                self.library.folder_and_descendants(self.current_folder_id)
+                if self.include_descendants
+                else {self.current_folder_id}
+            )
+            return not item.folder_set.isdisjoint(folder_ids)
+        if self.current_smart_folder_id:
+            sf = self.library.smart_folders_by_id.get(self.current_smart_folder_id)
+            if sf is None:
+                return False
+            return eval_smart_conditions(item, sf.inherited_conditions)
+        return True
+
+    def _apply_new_items(self, items: list[Item], *, toast: bool = False) -> None:
+        """Show newly ingested items without rebuilding the whole grid."""
+        if not items:
+            return
+        visible = [it for it in items if self._item_matches_current_view(it)]
+        can_prepend = (
+            bool(visible)
+            and self._sort_key == "added_desc"
+            and not self._filter_text.strip()
+        )
+        if can_prepend:
+            newest_first = sorted(
+                visible,
+                key=lambda it: it.btime or it.modification_time,
+                reverse=True,
+            )
+            existing = {it.id for it in self._all_items}
+            to_add = [it for it in newest_first if it.id not in existing]
+            for i, it in enumerate(to_add):
+                self._all_items.insert(i, it)
+                self._items.insert(i, it)
+                self.store.insert(i, ItemObject(it))
+            if to_add and len(self._marked) <= 1:
+                self.selected_item = to_add[0]
+                self._marked = {to_add[0].id}
+                self._sel_anchor = 0
+                self._last_focus_idx = 0
+                if self._grid_has_focus:
+                    try:
+                        self.selection.set_selected(0)
+                    except Exception:
+                        pass
+            self._rebuild_scope_text()
+            self._refresh_status()
+            self._update_path_label()
+        elif visible:
+            self.refresh_items()
+        self._refresh_special_counts()
+        if toast and items:
+            self._toast(f"{len(items)} new")
 
     # ── Inbox import (manual only) ────────────────────────────────────
     # Auto-import belongs exclusively to eagle-inbox-watch on one machine.
@@ -3321,13 +3699,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._inbox_importing = False
                 if ok:
                     play_sound("notification")
-                    try:
-                        self.library.load()
-                    except Exception as exc:  # noqa: BLE001
-                        self._toast(f"Imported {ok} but reload failed: {exc}")
-                        return False
-                    self._populate_sidebar(select_current=True)
-                    self.refresh_items()
+                    new_items: list[Item] = []
+                    for r in results:
+                        if (
+                            getattr(r, "ok", False)
+                            and getattr(r, "item_id", None)
+                            and not getattr(r, "reused", False)
+                        ):
+                            item = self.library.load_item(r.item_id)
+                            if item is not None:
+                                new_items.append(item)
+                    if new_items:
+                        self._apply_new_items(new_items, toast=False)
+                    else:
+                        self.refresh_items()
                 elif fail_n:
                     play_sound("error")
                 parts: list[str] = []
@@ -3647,6 +4032,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if item is None:
             self._toast("Nothing selected")
             return
+        # Capture grid offset before the stack unmaps it (that resets scroll).
+        if not self.is_viewer_open():
+            self._saved_grid_scroll = {
+                "value": self._grid_scroll_value(),
+                "loaded": len(self._items),
+                "focus_id": item.id,
+            }
         if item.is_video:
             self._open_inline_video(item)
             return
@@ -3721,7 +4113,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.update_inspector()
         self._update_path_label()
 
-    def close_inline_viewer(self) -> bool:
+    def close_inline_viewer(self, *, restore_scroll: bool = True) -> bool:
         """Leave detail view; return True if a viewer was closed."""
         if not self.is_viewer_open():
             return False
@@ -3731,7 +4123,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._stop_inline_video()
         self.viewer_picture.set_paintable(None)
         self.center_stack.set_visible_child_name("grid")
+        snap = self._saved_grid_scroll
+        self._saved_grid_scroll = None
         self.grid.grab_focus()
+        if restore_scroll and snap is not None:
+            loaded = int(snap.get("loaded") or 0)
+            if loaded > len(self._items):
+                self._ensure_loaded(loaded)
+            self._restore_grid_scroll(float(snap.get("value") or 0.0))
+        else:
+            self._cancel_scroll_restore()
         return True
 
     def viewer_toggle_play(self) -> None:
@@ -3754,6 +4155,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 if it.id == self._viewer_item_id:
                     cur = i
                     break
+        if delta > 0 and cur >= len(self._items) - 2:
+            self._load_more_items()
         new = max(0, min(len(self._items) - 1, cur + delta))
         # Prefer images and videos (skip audio / unknown)
         step = 1 if delta >= 0 else -1
@@ -3842,21 +4245,32 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._open_external_media(item)
 
     def reload_library(self) -> None:
-        try:
-            self.library.load()
-        except Exception as exc:  # noqa: BLE001
-            self._toast(f"Reload failed: {exc}")
-            return
-        # Counts are stale after a full reload
-        self._smart_counts.clear()
-        self._special_counts.clear()
-        # Keep expand state; show current selection path
-        self._populate_sidebar(select_current=True)
-        self.refresh_items()
-        n_smart = len(self.library.smart_folders_by_id)
-        self._toast(
-            f"Reloaded · {len(self.library.items)} items · {n_smart} smart folders"
-        )
+        self._toast("Reloading library…")
+
+        def work() -> None:
+            try:
+                self.library.load()
+                err = None
+            except Exception as exc:  # noqa: BLE001
+                err = exc
+
+            def apply() -> bool:
+                if err is not None:
+                    self._toast(f"Reload failed: {err}")
+                    return False
+                self._smart_counts.clear()
+                self._special_counts.clear()
+                self._populate_sidebar(select_current=True)
+                self.refresh_items()
+                n_smart = len(self.library.smart_folders_by_id)
+                self._toast(
+                    f"Reloaded · {len(self.library.items)} items · {n_smart} smart folders"
+                )
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(target=work, name="eagle-reload", daemon=True).start()
 
     def focus_search(self) -> None:
         self.search.grab_focus()
@@ -3915,6 +4329,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         idx = self.selection.get_selected()
         if idx == Gtk.INVALID_LIST_POSITION:
             idx = 0
+        if delta > 0 and int(idx) >= n - max(self._cols * 4, 8):
+            self._load_more_items()
+            n = self.store.get_n_items()
         new = max(0, min(n - 1, int(idx) + delta))
         # Preserve multi-select when navigating without Shift after building one
         if not extend and (keep_selection or len(self._marked) > 1):
