@@ -317,7 +317,6 @@ Browsers open the system file picker (GTK portal). It does **not** auto-jump to 
 | click ▶ / ▼ | Expand / collapse |
 
 The **Folders** heading starts **collapsed** (same idea as top-level smart folders).
-| `a` | All items |
 | `d` | Toggle “include subfolders” (regular folders only) |
 
 Smart folders start **collapsed** at the top level. Expand only the category you’re working in.

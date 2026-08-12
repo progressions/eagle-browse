@@ -3892,12 +3892,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def focus_grid(self) -> None:
         self.grid.grab_focus()
 
-    def select_all_folder(self) -> None:
-        row = self.folder_list.get_row_at_index(0)
-        if row:
-            self.folder_list.select_row(row)
-            self.focus_grid()
-
     def toggle_descendants(self) -> None:
         self.include_descendants = not self.include_descendants
         state = "including subfolders" if self.include_descendants else "folder only"
@@ -3991,8 +3985,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         in_sidebar = self._focus_is_sidebar(focus)
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         super_mod = bool(state & Gdk.ModifierType.SUPER_MASK)
-        # Alt+letter must not fire single-letter hotkeys (Alt+A was switching
-        # to "All items" because plain `a` ignored the Alt modifier).
+        # Alt+letter must not fire single-letter hotkeys (mnemonics / OS binds).
         alt = bool(state & Gdk.ModifierType.ALT_MASK)
 
         # Undo soft-delete — Ctrl+Z (standard Omarchy / Linux app undo)
@@ -4194,10 +4187,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_b, Gdk.KEY_B) and not ctrl and not alt and not super_mod:
             self.focus_folders()
             return True
-        # Plain `a` only — Alt+A must not jump to All items
-        if keyval in (Gdk.KEY_a, Gdk.KEY_A) and not ctrl and not alt and not super_mod:
-            self.select_all_folder()
-            return True
+        # No hotkey for "All items" — only click the sidebar row.
         if keyval in (Gdk.KEY_d, Gdk.KEY_D) and not alt and not ctrl and not super_mod:
             self.toggle_descendants()
             return True
