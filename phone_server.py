@@ -38,7 +38,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from library import DEFAULT_LIBRARY, EagleLibrary, _resolve_media_paths  # noqa: E402
+from library import DEFAULT_LIBRARY, _item_from_dir, _resolve_media_paths  # noqa: E402
+from write import INBOX_SIGNAL_FILENAME  # noqa: E402
 
 PHONE_WEB = Path(__file__).resolve().parent / "phone_web"
 INDEX_NAME = "phone-index.json"
@@ -146,6 +147,8 @@ class PhoneBrowseHandler(SimpleHTTPRequestHandler):
     catalog: dict | None = None
     items_by_id: dict = {}
     lock = threading.Lock()
+    recent_imports: list = []  # (ts, row)
+    updates_ts: float = 0.0
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(PHONE_WEB), **kwargs)
@@ -184,14 +187,28 @@ class PhoneBrowseHandler(SimpleHTTPRequestHandler):
                     "library": str(self.library_root),
                     "item_count": (self.catalog or {}).get("item_count"),
                     "built_at": (self.catalog or {}).get("built_at"),
+                    "updated_at": self.updates_ts,
                 }
             )
+
+        if path == "/api/updates":
+            try:
+                since = float((qs.get("since") or ["0"])[0])
+            except (TypeError, ValueError):
+                since = 0.0
+            with self.lock:
+                items = [row for ts, row in self.recent_imports if ts > since]
+                ts = self.updates_ts or time.time()
+            return self._json({"ts": ts, "items": items})
 
         if path == "/api/catalog":
             if not self.catalog:
                 return self._error(HTTPStatus.SERVICE_UNAVAILABLE, "index not loaded")
             # Full catalog (folders + items). ~few MB; fine on LAN.
-            return self._json(self.catalog)
+            with self.lock:
+                catalog = dict(self.catalog)
+                catalog["items"] = list(self.catalog.get("items") or [])
+            return self._json(catalog)
 
         if path == "/api/meta":
             # Lightweight: folders, tags, characters — no items
@@ -355,11 +372,78 @@ class PhoneBrowseHandler(SimpleHTTPRequestHandler):
 
             cls.catalog = catalog
             cls.items_by_id = {row["id"]: row for row in catalog.get("items") or []}
+            cls.recent_imports = []
+            cls.updates_ts = time.time()
             print(
                 f"Catalog ready: {catalog.get('item_count')} items "
                 f"(built {catalog.get('built_at')})",
                 flush=True,
             )
+
+    @classmethod
+    def ingest_item_ids(cls, item_ids: list[str]) -> int:
+        """Add newly imported items to the in-memory catalog. Returns count added."""
+        from build_phone_index import item_to_row
+
+        added = 0
+        now = time.time()
+        for iid in item_ids:
+            if not iid or iid in cls.items_by_id:
+                continue
+            item_dir = cls.library_root / "images" / f"{iid}.info"
+            item = _item_from_dir(item_dir)
+            if item is None or item.is_deleted:
+                continue
+            row = item_to_row(item)
+            with cls.lock:
+                if item.id in cls.items_by_id:
+                    continue
+                cls.items_by_id[item.id] = row
+                if cls.catalog is not None:
+                    items = cls.catalog.setdefault("items", [])
+                    items.insert(0, row)
+                    cls.catalog["item_count"] = len(items)
+                cls.recent_imports.append((now, row))
+                if len(cls.recent_imports) > 200:
+                    cls.recent_imports = cls.recent_imports[-200:]
+                cls.updates_ts = now
+            added += 1
+        return added
+
+
+def _watch_inbox_signal(handler: type[PhoneBrowseHandler]) -> None:
+    """Poll the inbox signal file and ingest new item ids into the catalog."""
+    path = handler.library_root / INBOX_SIGNAL_FILENAME
+    last_ts = 0.0
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            last_ts = float(raw.get("ts") or 0)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            last_ts = 0.0
+    while True:
+        time.sleep(1.0)
+        if not path.is_file():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        try:
+            ts = float(raw.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ts <= last_ts:
+            continue
+        last_ts = ts
+        ids = [str(i) for i in (raw.get("ids") or []) if i]
+        if not ids:
+            continue
+        n = handler.ingest_item_ids(ids)
+        if n:
+            print(f"Ingested {n} new item(s) into phone catalog", flush=True)
 
 
 def main() -> int:
@@ -409,6 +493,12 @@ def main() -> int:
         else library_root / INDEX_NAME
     )
     PhoneBrowseHandler.load_catalog(rebuild=args.rebuild)
+    threading.Thread(
+        target=_watch_inbox_signal,
+        args=(PhoneBrowseHandler,),
+        name="phone-inbox-watch",
+        daemon=True,
+    ).start()
 
     server = ThreadingHTTPServer((args.host, args.port), PhoneBrowseHandler)
     ips = _lan_ips()

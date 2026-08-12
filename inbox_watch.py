@@ -189,6 +189,8 @@ def process_ready(
     reused_n = 0
     fail_n = 0
 
+    t0 = time.perf_counter()
+    new_ids: list[str] = []
     try:
         with write_session(library.root):
             for f in unique:
@@ -201,6 +203,8 @@ def process_ready(
                 )
                 if r.ok:
                     new_n += 1
+                    if r.item_id:
+                        new_ids.append(r.item_id)
                     LOG.info("imported new %s → %s", f.name, r.item_id)
                 elif r.skipped and r.error and str(r.error).startswith("not-ready:"):
                     # Incomplete download; leave in inbox for a later poll.
@@ -238,6 +242,8 @@ def process_ready(
                     )
                     if r.ok:
                         new_n += 1
+                        if r.item_id:
+                            new_ids.append(r.item_id)
                         LOG.info("imported dup-as-new %s → %s", match.source.name, r.item_id)
                     else:
                         fail_n += 1
@@ -254,12 +260,21 @@ def process_ready(
         LOG.warning("library locked / write error: %s", exc)
         return new_n, reused_n, fail_n + 1
 
-    # Refresh in-memory model after successful writes
-    if new_n or reused_n:
+    # Incremental: only the new items, not a 25k-item rescan.
+    for iid in new_ids:
         try:
-            library.load()
+            library.load_item(iid)
         except Exception as exc:  # noqa: BLE001
-            LOG.warning("reload after import failed: %s", exc)
+            LOG.warning("ingest %s after import failed: %s", iid, exc)
+
+    elapsed = time.perf_counter() - t0
+    LOG.info(
+        "batch done in %.2fs · %d new · %d reused · %d failed",
+        elapsed,
+        new_n,
+        reused_n,
+        fail_n,
+    )
 
     total_ok = new_n + reused_n
     if total_ok and notify:

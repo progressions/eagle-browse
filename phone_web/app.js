@@ -659,7 +659,41 @@
     await loadCatalog();
   });
 
-  loadCatalog().catch((err) => {
+  let updatesSince = 0;
+  async function pollUpdates() {
+    if (!state.catalog) return;
+    try {
+      const res = await fetch(`/api/updates?since=${updatesSince}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (typeof data.ts === "number") updatesSince = data.ts;
+      const incoming = Array.isArray(data.items) ? data.items : [];
+      if (!incoming.length) return;
+      const have = new Set((state.catalog.items || []).map((it) => it.id));
+      const fresh = incoming.filter((it) => it && it.id && !have.has(it.id));
+      if (!fresh.length) return;
+      state.catalog.items.unshift(...fresh.reverse());
+      state.catalog.item_count = (state.catalog.item_count || 0) + fresh.length;
+      applyFilters();
+    } catch (_err) {
+      /* LAN blip — try again next tick */
+    }
+  }
+
+  loadCatalog()
+    .then(async () => {
+      try {
+        const res = await fetch("/api/updates?since=0");
+        if (res.ok) {
+          const data = await res.json();
+          if (typeof data.ts === "number") updatesSince = data.ts;
+        }
+      } catch (_err) {
+        updatesSince = Date.now() / 1000;
+      }
+      setInterval(pollUpdates, 1000);
+    })
+    .catch((err) => {
     console.error(err);
     setStatus("Failed to load catalog — is the server running?");
     el.grid.innerHTML = `<div class="empty">Could not load /api/catalog.<br>${escapeHtml(

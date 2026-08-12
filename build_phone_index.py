@@ -87,6 +87,30 @@ def _character_folder_ids(lib: EagleLibrary) -> dict[str, str]:
     return found
 
 
+def item_to_row(item) -> dict:
+    """One catalog row — used by full index builds and incremental ingest."""
+    row = {
+        "id": item.id,
+        "name": item.name,
+        "ext": item.ext,
+        "tags": item.tags,
+        "folders": item.folders,
+        "mtime": item.modification_time,
+        "btime": item.btime,
+        "w": item.width,
+        "h": item.height,
+        "size": item.size,
+        "has_thumb": item.thumb is not None,
+    }
+    if item.star is not None:
+        row["star"] = item.star
+    if item.duration is not None:
+        row["duration"] = item.duration
+    if item.annotation:
+        row["annotation"] = item.annotation
+    return row
+
+
 def build_index(library_path: Path) -> dict:
     lib = EagleLibrary(library_path)
     t0 = time.perf_counter()
@@ -97,25 +121,7 @@ def build_index(library_path: Path) -> dict:
     for item in lib.items:
         if item.is_deleted:
             continue
-        row = {
-            "id": item.id,
-            "name": item.name,
-            "ext": item.ext,
-            "tags": item.tags,
-            "folders": item.folders,
-            "mtime": item.modification_time,
-            "w": item.width,
-            "h": item.height,
-            "size": item.size,
-            "has_thumb": item.thumb is not None,
-        }
-        if item.star is not None:
-            row["star"] = item.star
-        if item.duration is not None:
-            row["duration"] = item.duration
-        if item.annotation:
-            row["annotation"] = item.annotation
-        items.append(row)
+        items.append(item_to_row(item))
 
     # Newest first (same as EagleLibrary.load)
     items.sort(key=lambda r: r.get("mtime") or 0, reverse=True)

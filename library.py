@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -155,33 +156,36 @@ def _parse_smart_folders(
     return roots, by_id
 
 
+def _first_existing(paths: list[Path]) -> Path | None:
+    for p in paths:
+        if p.is_file():
+            return p
+    return None
+
+
 def _resolve_media_paths(item_dir: Path, name: str, ext: str) -> tuple[Path | None, Path | None]:
     """Find original file and thumbnail inside an Eagle item folder."""
-    original: Path | None = None
-    thumb: Path | None = None
-
-    candidates = [
-        item_dir / f"{name}.{ext}",
-        item_dir / f"{name}.{ext.lower()}",
-        item_dir / f"{name}.{ext.upper()}",
-    ]
-    for c in candidates:
-        if c.is_file():
-            original = c
-            break
-
-    thumb_candidates = [
-        item_dir / f"{name}_thumbnail.png",
-        item_dir / f"{name}_thumbnail.jpg",
-        item_dir / f"{name}_thumbnail.webp",
-    ]
-    for c in thumb_candidates:
-        if c.is_file():
-            thumb = c
-            break
+    original = _first_existing(
+        [
+            item_dir / f"{name}.{ext}",
+            item_dir / f"{name}.{ext.lower()}",
+            item_dir / f"{name}.{ext.upper()}",
+        ]
+    )
+    thumb = _first_existing(
+        [
+            item_dir / f"{name}_thumbnail.png",
+            item_dir / f"{name}_thumbnail.jpg",
+            item_dir / f"{name}_thumbnail.webp",
+        ]
+    )
 
     if original is None or thumb is None:
-        for entry in item_dir.iterdir():
+        try:
+            entries = list(item_dir.iterdir())
+        except OSError:
+            entries = []
+        for entry in entries:
             if not entry.is_file() or entry.name == "metadata.json":
                 continue
             lower = entry.name.lower()
@@ -194,6 +198,58 @@ def _resolve_media_paths(item_dir: Path, name: str, ext: str) -> tuple[Path | No
                     original = entry
 
     return original, thumb
+
+
+def _item_from_dir(item_dir: Path) -> Item | None:
+    """Parse one images/<id>.info folder. None if metadata or media is missing."""
+    if not item_dir.name.endswith(".info"):
+        return None
+    raw = _load_json(item_dir / "metadata.json")
+    if not isinstance(raw, dict):
+        return None
+
+    name = raw.get("name") or item_dir.name
+    ext = (raw.get("ext") or "").lstrip(".")
+    original, thumb = _resolve_media_paths(item_dir, name, ext)
+    if original is None:
+        return None
+
+    star_raw = raw.get("star")
+    try:
+        star = int(star_raw) if star_raw is not None else None
+    except (TypeError, ValueError):
+        star = None
+
+    try:
+        duration = float(raw["duration"]) if raw.get("duration") is not None else None
+    except (TypeError, ValueError):
+        duration = None
+
+    tags = list(raw.get("tags") or [])
+    folders = list(raw.get("folders") or [])
+    return Item(
+        id=raw.get("id") or item_dir.name.removesuffix(".info"),
+        name=name,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        path=original,
+        thumb=thumb,
+        is_deleted=bool(raw.get("isDeleted")),
+        size=int(raw.get("size") or 0),
+        width=int(raw.get("width") or 0),
+        height=int(raw.get("height") or 0),
+        annotation=str(raw.get("annotation") or ""),
+        modification_time=int(raw.get("modificationTime") or 0),
+        btime=int(raw.get("btime") or 0),
+        star=star,
+        duration=duration,
+        item_dir=item_dir,
+        tag_set=frozenset(tags),
+        folder_set=frozenset(folders),
+        name_lower=name.lower(),
+        ext_lower=ext.lower(),
+    )
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -357,6 +413,7 @@ class EagleLibrary:
         self.folder_paths: dict[str, str] = {}  # id -> "Parent / Child"
         self.smart_folder_paths: dict[str, str] = {}
         self._query_cache: dict[tuple, list[Item]] = {}
+        self._lock = threading.Lock()
 
     def load(self) -> None:
         if not self.root.is_dir():
@@ -383,70 +440,72 @@ class EagleLibrary:
 
         if images_dir.is_dir():
             for item_dir in images_dir.iterdir():
-                if not item_dir.is_dir() or not item_dir.name.endswith(".info"):
+                if not item_dir.is_dir():
                     continue
-                raw = _load_json(item_dir / "metadata.json")
-                if not isinstance(raw, dict):
+                item = _item_from_dir(item_dir)
+                if item is None:
                     continue
-
-                name = raw.get("name") or item_dir.name
-                ext = (raw.get("ext") or "").lstrip(".")
-                original, thumb = _resolve_media_paths(item_dir, name, ext)
-                if original is None:
-                    continue
-
-                star_raw = raw.get("star")
-                star: int | None
-                try:
-                    star = int(star_raw) if star_raw is not None else None
-                except (TypeError, ValueError):
-                    star = None
-
-                duration: float | None
-                try:
-                    duration = (
-                        float(raw["duration"]) if raw.get("duration") is not None else None
-                    )
-                except (TypeError, ValueError):
-                    duration = None
-
-                tags = list(raw.get("tags") or [])
-                folders = list(raw.get("folders") or [])
-                item = Item(
-                    id=raw.get("id") or item_dir.name.removesuffix(".info"),
-                    name=name,
-                    ext=ext,
-                    tags=tags,
-                    folders=folders,
-                    path=original.resolve(),
-                    thumb=thumb.resolve() if thumb else None,
-                    is_deleted=bool(raw.get("isDeleted")),
-                    size=int(raw.get("size") or 0),
-                    width=int(raw.get("width") or 0),
-                    height=int(raw.get("height") or 0),
-                    annotation=str(raw.get("annotation") or ""),
-                    modification_time=int(raw.get("modificationTime") or 0),
-                    btime=int(raw.get("btime") or 0),
-                    star=star,
-                    duration=duration,
-                    item_dir=item_dir.resolve(),
-                    tag_set=frozenset(tags),
-                    folder_set=frozenset(folders),
-                    name_lower=name.lower(),
-                    ext_lower=ext.lower(),
-                )
                 items.append(item)
                 items_by_id[item.id] = item
 
         # Default in-memory order: added-to-library (btime), not modificationTime
         items.sort(key=lambda i: i.btime or i.modification_time, reverse=True)
-        self.items = items
-        self.items_by_id = items_by_id
-        # Invalidate query caches after reload
-        self._query_cache = {}
-        # Warm top-level smart folders so first click is instant
-        for sf in self.smart_folders:
-            self.query(smart_folder_id=sf.id)
+        with self._lock:
+            self.items = items
+            self.items_by_id = items_by_id
+            self._query_cache = {}
+
+    def upsert_item(self, item: Item) -> Item:
+        """Insert or replace one item in the in-memory model. No disk scan."""
+        with self._lock:
+            existing = self.items_by_id.get(item.id)
+            if existing is not None:
+                try:
+                    idx = self.items.index(existing)
+                    self.items[idx] = item
+                except ValueError:
+                    self.items.insert(0, item)
+            else:
+                self.items.insert(0, item)
+            self.items_by_id[item.id] = item
+            self._query_cache = {}
+        return item
+
+    def load_item(self, item_id: str) -> Item | None:
+        """Read one images/<id>.info folder and upsert it. None if not ready."""
+        item_dir = self.root / "images" / f"{item_id}.info"
+        if not item_dir.is_dir():
+            return None
+        item = _item_from_dir(item_dir)
+        if item is None:
+            return None
+        return self.upsert_item(item)
+
+    def scan_new_items(self) -> list[Item]:
+        """Load any .info folders that are not already in memory."""
+        images_dir = self.root / "images"
+        if not images_dir.is_dir():
+            return []
+        with self._lock:
+            known = set(self.items_by_id)
+        new: list[Item] = []
+        try:
+            dirs = images_dir.iterdir()
+        except OSError:
+            return []
+        for item_dir in dirs:
+            if not item_dir.is_dir() or not item_dir.name.endswith(".info"):
+                continue
+            iid = item_dir.name.removesuffix(".info")
+            if iid in known:
+                continue
+            item = _item_from_dir(item_dir)
+            if item is None:
+                continue
+            self.upsert_item(item)
+            known.add(item.id)
+            new.append(item)
+        return new
 
     def _build_folder_paths(self, folders: list[Folder], prefix: list[str]) -> None:
         for folder in folders:
@@ -500,9 +559,11 @@ class EagleLibrary:
             images_only,
             limit,
         )
-        cached = self._query_cache.get(cache_key)
-        if cached is not None:
-            return cached
+        with self._lock:
+            cached = self._query_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            items_snapshot = self.items[:]
 
         folder_ids: set[str] | None = None
         if folder_id:
@@ -532,12 +593,13 @@ class EagleLibrary:
                 ]
                 if limit is not None:
                     pool = pool[:limit]
-                if len(self._query_cache) < 256:
-                    self._query_cache[cache_key] = pool
+                with self._lock:
+                    if len(self._query_cache) < 256:
+                        self._query_cache[cache_key] = pool
                 return pool
-            pool = self.items
+            pool = items_snapshot
         else:
-            pool = self.items
+            pool = items_snapshot
 
         results: list[Item] = []
         for item in pool:
@@ -567,8 +629,10 @@ class EagleLibrary:
                 break
 
         # Only cache unbounded smart/folder views (search changes too often)
-        if not tokens and len(self._query_cache) < 256:
-            self._query_cache[cache_key] = results
+        if not tokens:
+            with self._lock:
+                if len(self._query_cache) < 256:
+                    self._query_cache[cache_key] = results
         return results
 
     def flatten_folders(self) -> list[tuple[Folder, int]]:
@@ -888,9 +952,9 @@ class EagleLibrary:
             tags=tags,
             move_source=move_source,
         )
-        # Reload library so new items appear (simple + correct)
-        if any(r.ok for r in results):
-            self.load()
+        for r in results:
+            if getattr(r, "ok", False) and getattr(r, "item_id", None) and not getattr(r, "reused", False):
+                self.load_item(r.item_id)
         return results
 
     def import_path(
@@ -910,8 +974,8 @@ class EagleLibrary:
             tags=tags,
             move_source=move_source,
         )
-        if result.ok:
-            self.load()
+        if result.ok and result.item_id and not result.reused:
+            self.load_item(result.item_id)
         return result
 
     def _update_item_unlocked(

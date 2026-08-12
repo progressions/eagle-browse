@@ -12,6 +12,24 @@ from typing import Any, Iterator
 
 LOCK_FILENAME = ".eagle-browse.write.lock"
 BACKUP_DIRNAME = "backup/eagle-browse-writes"
+# Written after each successful new import so open browsers can ingest
+# that one item instead of rescanning the whole library.
+INBOX_SIGNAL_FILENAME = ".eagle-browse.inbox-signal"
+
+
+def announce_imported_ids(library_root: Path, item_ids: list[str]) -> None:
+    """Atomically record newly imported item ids for the GUI watcher."""
+    ids = [i for i in item_ids if i]
+    if not ids:
+        return
+    path = library_root / INBOX_SIGNAL_FILENAME
+    try:
+        atomic_write_json(
+            path,
+            {"ids": ids, "ts": time.time()},
+        )
+    except OSError:
+        pass
 
 
 class WriteError(Exception):

@@ -15,6 +15,7 @@ from typing import Any, Iterable
 
 from write import (
     WriteError,
+    announce_imported_ids,
     atomic_write_json,
     backup_file,
     load_item_metadata,
@@ -442,10 +443,12 @@ def _image_size(path: Path) -> tuple[int, int]:
         import gi
 
         gi.require_version("GdkPixbuf", "2.0")
-        from gi.repository import GdkPixbuf, GLib
+        from gi.repository import GdkPixbuf
 
-        pb = GdkPixbuf.Pixbuf.new_from_file(str(path))
-        return int(pb.get_width()), int(pb.get_height())
+        # Header-only: do not decode the full bitmap just for width/height.
+        _fmt, w, h = GdkPixbuf.Pixbuf.get_file_info(str(path))
+        if w and h:
+            return int(w), int(h)
     except Exception:
         pass
     # ImageMagick identify
@@ -751,6 +754,7 @@ def import_file(
                 try:
                     source.unlink(missing_ok=True)
                 except OSError as exc:
+                    announce_imported_ids(library_root, [iid])
                     return ImportResult(
                         source=source,
                         item_id=iid,
@@ -758,6 +762,7 @@ def import_file(
                         error=f"imported but could not remove source: {exc}",
                     )
 
+            announce_imported_ids(library_root, [iid])
             return ImportResult(source=source, item_id=iid, ok=True)
         except Exception as exc:  # noqa: BLE001
             # Cleanup partial item dir
