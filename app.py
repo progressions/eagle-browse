@@ -2398,7 +2398,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._toast("Copied · Ctrl+L in file dialog, paste path, Enter")
 
     def copy_selected_ids(self) -> None:
-        """Copy Eagle item id(s) — Shift+Y. Safe to paste into agent CLIs (not a file path)."""
+        """Copy Eagle item id(s) — plain `y`. Safe to paste into agent CLIs (not a file path)."""
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing selected")
@@ -4112,21 +4112,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if keyval in (Gdk.KEY_x, Gdk.KEY_X):
                 self.open_crop_dialog()
                 return True
-        # y / c = path(s) for selection
-        # Shift+Y = Eagle id(s) — paste-safe for agent CLIs (not rewritten as image)
+        # y = Eagle id(s) — paste-safe for agent CLIs (not rewritten as image)
+        # Shift+Y / c = path(s)
         # Ctrl+Y = file:// URI list
         if keyval in (Gdk.KEY_y, Gdk.KEY_Y) and ctrl:
             self.copy_marked_paths(as_file_uris=True)
             return True
         if keyval == Gdk.KEY_Y and not alt and not ctrl and not super_mod:
+            self.copy_selected_path()
+            return True
+        if keyval == Gdk.KEY_y and not alt and not ctrl and not super_mod:
             self.copy_selected_ids()
             return True
-        if (
-            keyval in (Gdk.KEY_y, Gdk.KEY_c, Gdk.KEY_C)
-            and not alt
-            and not ctrl
-            and not super_mod
-        ):
+        if keyval in (Gdk.KEY_c, Gdk.KEY_C) and not alt and not ctrl and not super_mod:
             self.copy_selected_path()
             return True
         if keyval in (Gdk.KEY_s, Gdk.KEY_S) and not ctrl and not alt and not super_mod:

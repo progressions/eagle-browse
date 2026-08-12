@@ -160,7 +160,7 @@ Active filters show as chips under the buttons; click a chip to remove it.
 
 **Non-contiguous with keyboard:** Shift+arrows for a range → plain arrows to another asset (selection stays) → **Space** to add it.
 
-Selection applies to: **copy path** (`y`), **copy Eagle id** (`Y` / Shift+Y), **tags** (`t`), **folders** (`f`), **ratings** (`1`–`5`), **stage** (`s`).
+Selection applies to: **copy Eagle id** (`y`), **copy path** (`Y` / Shift+Y or `c`), **tags** (`t`), **folders** (`f`), **ratings** (`1`–`5`), **stage** (`s`).
 
 | `+` / `-` | Larger / smaller thumbnails |
 
@@ -264,16 +264,16 @@ eagle-inbox-watch --once -v
 The watcher and the GUI share the same write lock for metadata writes. That
 does **not** make multi-consumer intake safe — do not run two watchers, and do
 not rely on the GUI for auto-import.
-| `Y` / Shift+Y | **Copy Eagle id(s)** (newline-separated if multi-selected) — agent-CLI safe |
+| `y` | **Copy Eagle id(s)** (newline-separated if multi-selected) — agent-CLI safe |
+| `Y` / Shift+Y / `c` | **Copy path(s)** (absolute filesystem path) |
 | `Ctrl+Y` | Copy selection as `file://` URIs |
-| `y` / `c` | Copy **one** focused path |
 | `s` | **Stage** marked files → outbox folder (copy; library stays read-only) |
 | `Esc` | Clear marks (then clear search) |
 
 ### Multi-file handoff (Lightroom / other apps)
 
 1. Browse smart folder, **`Space`** to mark several images  
-2. **`y`** — paste paths into a tool, **`Y`** — paste Eagle ids for an agent, **or** **`s`** — copy files to staging  
+2. **`y`** — paste Eagle ids for an agent, **`Y`** / **`c`** — paste paths into a tool, **or** **`s`** — copy files to staging  
 3. Default stage dir: `~/Dropbox/ISAAC/GENNIE/Eunbi/outbox`  
    Override: `EAGLE_STAGE_DIR=/path/to/folder eagle-browse`  
 4. On another machine, import that Dropbox folder into Lightroom (or watch it)
@@ -282,10 +282,10 @@ not rely on the GUI for auto-import.
 
 Browsers open the system file picker (GTK portal). It does **not** auto-jump to a copied path — you paste into the location bar:
 
-1. In Eagle Browse: select image → **`y`** (copy absolute path)  
+1. In Eagle Browse: select image → **`Y`** or **`c`** (copy absolute path)  
 2. In the file dialog: **`Ctrl+L`** (open location / path bar)  
 3. **`Ctrl+V`** paste the path → **Enter**  
-   - Paste the **full file path** (what `y` copies), not only the folder  
+   - Paste the **full file path** (what `Y` / `c` copies), not only the folder  
 
 **Alternative:** **`e`** in Eagle Browse opens **Files (Nautilus)** with that image selected — then drag it into the upload dialog if the site accepts drag-and-drop.
 
