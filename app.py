@@ -3991,6 +3991,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         in_sidebar = self._focus_is_sidebar(focus)
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         super_mod = bool(state & Gdk.ModifierType.SUPER_MASK)
+        # Alt+letter must not fire single-letter hotkeys (Alt+A was switching
+        # to "All items" because plain `a` ignored the Alt modifier).
+        alt = bool(state & Gdk.ModifierType.ALT_MASK)
 
         # Undo soft-delete — Ctrl+Z (standard Omarchy / Linux app undo)
         if keyval in (Gdk.KEY_z, Gdk.KEY_Z) and ctrl and not super_mod and not in_search:
@@ -4037,7 +4040,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         # Sidebar: ↑↓ move list; ←→ / Enter collapse-expand smart folders
         if in_sidebar:
-            if keyval in (Gdk.KEY_a, Gdk.KEY_A) and not ctrl:
+            if keyval in (Gdk.KEY_a, Gdk.KEY_A) and not ctrl and not alt and not super_mod:
                 # Auto-tags for the selected library folder
                 row = self.folder_list.get_selected_row()
                 fid = getattr(row, "folder_id", None) if row else None
@@ -4085,7 +4088,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.select_all_visible()
             return True
         # Ratings 1–5 / 0 clear (not while typing search; not in sidebar)
-        if not in_sidebar and not in_search and not ctrl:
+        # Ignore Alt so Alt+letter never collides with these (Hyprland, mnemonics).
+        if not in_sidebar and not in_search and not ctrl and not alt and not super_mod:
             rating_keys = {
                 Gdk.KEY_0: 0,
                 Gdk.KEY_1: 1,
@@ -4121,19 +4125,36 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_y, Gdk.KEY_Y) and ctrl:
             self.copy_marked_paths(as_file_uris=True)
             return True
-        if keyval == Gdk.KEY_Y:
+        if keyval == Gdk.KEY_Y and not alt and not ctrl and not super_mod:
             self.copy_selected_ids()
             return True
-        if keyval in (Gdk.KEY_y, Gdk.KEY_c, Gdk.KEY_C):
+        if (
+            keyval in (Gdk.KEY_y, Gdk.KEY_c, Gdk.KEY_C)
+            and not alt
+            and not ctrl
+            and not super_mod
+        ):
             self.copy_selected_path()
             return True
-        if keyval in (Gdk.KEY_s, Gdk.KEY_S) and not ctrl:
+        if keyval in (Gdk.KEY_s, Gdk.KEY_S) and not ctrl and not alt and not super_mod:
             self.stage_marked()
             return True
-        if keyval in (Gdk.KEY_i, Gdk.KEY_I) and not ctrl and not in_sidebar:
+        if (
+            keyval in (Gdk.KEY_i, Gdk.KEY_I)
+            and not ctrl
+            and not alt
+            and not super_mod
+            and not in_sidebar
+        ):
             self.import_inbox(manual=True)
             return True
-        if keyval in (Gdk.KEY_e, Gdk.KEY_E) and not ctrl and not in_sidebar:
+        if (
+            keyval in (Gdk.KEY_e, Gdk.KEY_E)
+            and not ctrl
+            and not alt
+            and not super_mod
+            and not in_sidebar
+        ):
             self.reveal_selected_in_files()
             return True
         # In viewer: +/- toggle fit/actual; grid: thumb size
@@ -4160,32 +4181,33 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             else:
                 self.open_selected()
             return True
-        if keyval in (Gdk.KEY_o, Gdk.KEY_O):
+        if keyval in (Gdk.KEY_o, Gdk.KEY_O) and not alt and not ctrl and not super_mod:
             if self.is_viewer_open():
                 self.close_inline_viewer()
             else:
                 self.open_selected()
             return True
-        if keyval in (Gdk.KEY_r, Gdk.KEY_R):
+        if keyval in (Gdk.KEY_r, Gdk.KEY_R) and not alt and not ctrl and not super_mod:
             self.reload_library()
             return True
         # Sidebar focus was f (Eagle-style); now b — f is folders/categories
-        if keyval in (Gdk.KEY_b, Gdk.KEY_B) and not ctrl:
+        if keyval in (Gdk.KEY_b, Gdk.KEY_B) and not ctrl and not alt and not super_mod:
             self.focus_folders()
             return True
-        if keyval in (Gdk.KEY_a, Gdk.KEY_A):
+        # Plain `a` only — Alt+A must not jump to All items
+        if keyval in (Gdk.KEY_a, Gdk.KEY_A) and not ctrl and not alt and not super_mod:
             self.select_all_folder()
             return True
-        if keyval in (Gdk.KEY_d, Gdk.KEY_D):
+        if keyval in (Gdk.KEY_d, Gdk.KEY_D) and not alt and not ctrl and not super_mod:
             self.toggle_descendants()
             return True
-        if keyval in (Gdk.KEY_g,):
+        if keyval in (Gdk.KEY_g,) and not alt and not ctrl and not super_mod:
             if self.store.get_n_items():
                 self._select_index(
                     0, shift=bool(state & Gdk.ModifierType.SHIFT_MASK)
                 )
             return True
-        if keyval in (Gdk.KEY_G,):
+        if keyval in (Gdk.KEY_G,) and not alt and not ctrl and not super_mod:
             n = self.store.get_n_items()
             if n:
                 self._select_index(
