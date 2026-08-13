@@ -25,7 +25,15 @@ gi.require_version("GdkPixbuf", "2.0")
 
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk  # noqa: E402
 
-from filters import ViewFilters, item_matches_view_filters  # noqa: E402
+from filters import (  # noqa: E402
+    RATING_OP_EQ,
+    RATING_OP_GTE,
+    RATING_OP_LTE,
+    RATING_OP_SYMBOLS,
+    ViewFilters,
+    item_matches_view_filters,
+    rating_chip_label,
+)
 from import_media import DEFAULT_INBOX  # noqa: E402
 from library import (  # noqa: E402
     DEFAULT_LIBRARY,
@@ -243,7 +251,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._scroll_restore_source = 0
         self._saved_grid_scroll: dict[str, Any] | None = None
         self._filter_text = ""
-        # View filters: tags/folders/types include+exclude, dimensions, duration
+        # View filters: tags/folders/types include+exclude, dimensions, duration, stars
         self._view_filters = ViewFilters()
         # Multi-selection (item ids) — Shift range / Ctrl add / Space toggle
         # Used for path copy, tags, folders, rate, stage
@@ -387,6 +395,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ("Tags", self.open_view_tag_filter),
             ("Folders", self.open_view_folder_filter),
             ("Type", self.open_view_type_filter),
+            ("Stars", self.open_star_filter),
             ("Size", self.open_dimension_filter),
             ("Duration", self.open_duration_filter),
         ):
@@ -3043,6 +3052,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             chip(f"dur≥{vf.duration_min:g}s", lambda: setattr(vf, "duration_min", None))
         if vf.duration_max is not None:
             chip(f"dur≤{vf.duration_max:g}s", lambda: setattr(vf, "duration_max", None))
+        if vf.rating is not None:
+            chip(
+                rating_chip_label(vf.rating_op, vf.rating),
+                lambda: setattr(vf, "rating", None),
+            )
 
     def clear_view_filters(self) -> None:
         self._view_filters.clear()
@@ -3232,6 +3246,173 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ),
             as_int=False,
         )
+
+    def open_star_filter(self) -> None:
+        """Filter the grid by star rating: 1–5 with =, ≥, or ≤."""
+        vf = self._view_filters
+        scroll = self._grid_scroll_value()
+        win = Gtk.Window(
+            title="Filter · stars",
+            transient_for=self,
+            modal=False,
+            default_width=360,
+        )
+        self._picker_blocking = True
+        closing = {"v": False}
+        outside: dict[str, Gtk.GestureClick | None] = {"g": None}
+        chosen = {
+            "op": vf.rating_op if vf.rating_op in RATING_OP_SYMBOLS else RATING_OP_EQ,
+            "n": vf.rating if vf.rating and 1 <= vf.rating <= 5 else 3,
+        }
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        win.set_child(box)
+        title_lbl = Gtk.Label(label="Filter · stars", xalign=0)
+        title_lbl.add_css_class("title-3")
+        box.append(title_lbl)
+        hint = Gtk.Label(
+            label="Match items whose rating is equal, at least, or at most the stars you pick. Unrated counts as 0.",
+            xalign=0,
+            wrap=True,
+        )
+        hint.add_css_class("dim-label")
+        hint.add_css_class("caption")
+        box.append(hint)
+
+        op_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        op_row.append(Gtk.Label(label="Match", xalign=0, hexpand=True))
+        op_btns: dict[str, Gtk.ToggleButton] = {}
+        group: Gtk.ToggleButton | None = None
+        for op, tooltip in (
+            (RATING_OP_EQ, "Equal"),
+            (RATING_OP_GTE, "Greater than or equal"),
+            (RATING_OP_LTE, "Less than or equal"),
+        ):
+            btn = Gtk.ToggleButton(label=RATING_OP_SYMBOLS[op])
+            btn.set_tooltip_text(tooltip)
+            if group is None:
+                group = btn
+            else:
+                btn.set_group(group)
+            if op == chosen["op"]:
+                btn.set_active(True)
+            op_btns[op] = btn
+            op_row.append(btn)
+        box.append(op_row)
+
+        star_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        star_row.append(Gtk.Label(label="Stars", xalign=0, hexpand=True))
+        star_btns: list[Gtk.Button] = []
+
+        def paint_stars(n: int) -> None:
+            chosen["n"] = n
+            for i, b in enumerate(star_btns, start=1):
+                b.set_label("★" if i <= n else "☆")
+
+        for n in range(1, 6):
+            btn = Gtk.Button(label="☆")
+            btn.add_css_class("flat")
+            btn.set_tooltip_text(f"{n} star{'s' if n != 1 else ''}")
+            btn.connect("clicked", lambda _b, s=n: paint_stars(s))
+            star_btns.append(btn)
+            star_row.append(btn)
+        paint_stars(chosen["n"])
+        box.append(star_row)
+
+        def close_win(*_a) -> None:
+            if closing["v"]:
+                return
+            closing["v"] = True
+            if outside["g"] is not None:
+                try:
+                    self.remove_controller(outside["g"])
+                except Exception:  # noqa: BLE001
+                    pass
+                outside["g"] = None
+            self._picker_blocking = False
+            win.destroy()
+            self.grid.grab_focus()
+            self._restore_grid_scroll(scroll)
+
+        def current_op() -> str:
+            for op, btn in op_btns.items():
+                if btn.get_active():
+                    return op
+            return RATING_OP_EQ
+
+        def apply(*_a) -> None:
+            vf.rating_op = current_op()
+            vf.rating = int(chosen["n"])
+            self.refresh_items()
+            close_win()
+
+        def clear_rating(*_a) -> None:
+            vf.rating = None
+            vf.rating_op = RATING_OP_EQ
+            self.refresh_items()
+            close_win()
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btns.set_halign(Gtk.Align.END)
+        clear = Gtk.Button(label="Clear")
+        clear.connect("clicked", clear_rating)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", close_win)
+        ok = Gtk.Button(label="Apply")
+        ok.add_css_class("suggested-action")
+        ok.connect("clicked", apply)
+        btns.append(clear)
+        btns.append(cancel)
+        btns.append(ok)
+        box.append(btns)
+
+        key = Gtk.EventControllerKey()
+
+        def on_key(_c, keyval, _kc, state):
+            if keyval == Gdk.KEY_Escape:
+                close_win()
+                return True
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                apply()
+                return True
+            rating_keys = {
+                Gdk.KEY_1: 1,
+                Gdk.KEY_2: 2,
+                Gdk.KEY_3: 3,
+                Gdk.KEY_4: 4,
+                Gdk.KEY_5: 5,
+                Gdk.KEY_KP_1: 1,
+                Gdk.KEY_KP_2: 2,
+                Gdk.KEY_KP_3: 3,
+                Gdk.KEY_KP_4: 4,
+                Gdk.KEY_KP_5: 5,
+            }
+            if keyval in rating_keys:
+                paint_stars(rating_keys[keyval])
+                return True
+            return False
+
+        key.connect("key-pressed", on_key)
+        win.add_controller(key)
+        win.connect("close-request", lambda *_: (close_win() or True))
+
+        def arm_outside() -> bool:
+            if closing["v"]:
+                return False
+            click = Gtk.GestureClick()
+            click.set_button(1)
+            click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            click.connect("pressed", lambda *_: close_win())
+            self.add_controller(click)
+            outside["g"] = click
+            return False
+
+        GLib.timeout_add(200, arm_outside)
+        win.present()
 
     def _open_range_dialog(
         self,

@@ -134,11 +134,12 @@ Same as Eagle’s **Auto tagging** on a folder: each folder stores a `tags` list
 
 ### View filter bar (top of grid)
 
-Buttons: **Tags · Folders · Type · Size · Duration · Clear filters**
+Buttons: **Tags · Folders · Type · Stars · Size · Duration · Clear filters**
 
 | Filter | Include | Exclude |
 |--------|---------|---------|
 | Tags / Folders / Type | **Enter** (✓) | **Shift+Enter** or **right-click** (✗) |
+| Stars | 1–5 with **=** / **≥** / **≤** (unrated counts as 0) | — |
 | Size | min/max width & height (px) | — |
 | Duration | min/max seconds (video/audio) | — |
 
