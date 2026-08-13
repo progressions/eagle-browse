@@ -17,6 +17,8 @@ On Omarchy these are typically already present.
 
 ## Run
 
+The window chrome opens immediately. The library scan (tens of thousands of items) runs in the background; the grid says **Loading library…** until it finishes.
+
 ```bash
 # From source
 ~/Work/tech/eagle-browse/eagle-browse

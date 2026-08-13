@@ -304,6 +304,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._inbox_images_mtime = 0.0
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
+        self._library_ready = False
         # Super+W (killactive) / window close must quit the process, not leave
         # a headless instance with a ThreadPoolExecutor alive.
         self.connect("close-request", self._on_window_close_request)
@@ -311,11 +312,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._build_ui()
         self._install_keybinds()
         self._populate_sidebar()
-        self.refresh_items()
-        self._start_inbox_watch()
         # Do NOT start an inbox poller here. Auto-import is eagle-inbox-watch
         # only (one machine). Opening the GUI on multiple hosts must not race
         # the watcher or each other over PICS/Eunbi. Manual import: key `i`.
+        self._start_library_load()
 
 
     # ── UI ────────────────────────────────────────────────────────────
@@ -329,6 +329,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         self.search = Gtk.SearchEntry(placeholder_text="Search name, tags, folders…  (/)")
         self.search.set_hexpand(True)
+        self.search.set_sensitive(False)
         self.search.connect("search-changed", self._on_search_changed)
         header.set_title_widget(self.search)
 
@@ -537,7 +538,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.viewer_picture.add_controller(vclick)
 
         self.center_stack.add_named(viewer, "viewer")
-        self.center_stack.set_visible_child_name("grid")
+
+        load_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        load_box.set_halign(Gtk.Align.CENTER)
+        load_box.set_valign(Gtk.Align.CENTER)
+        load_box.set_hexpand(True)
+        load_box.set_vexpand(True)
+        load_spin = Gtk.Spinner()
+        load_spin.set_spinning(True)
+        load_spin.set_size_request(36, 36)
+        load_title = Gtk.Label(label="Loading library…")
+        load_title.add_css_class("title-4")
+        load_hint = Gtk.Label(label="Reading items from disk")
+        load_hint.add_css_class("dim-label")
+        load_box.append(load_spin)
+        load_box.append(load_title)
+        load_box.append(load_hint)
+        self.center_stack.add_named(load_box, "loading")
+        self.center_stack.set_visible_child_name("loading")
 
         self.store = Gio.ListStore(item_type=ItemObject)
         self.selection = Gtk.SingleSelection(model=self.store)
@@ -618,6 +636,47 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints.set_wrap(True)
         hints.set_hexpand(True)
         root.append(hints)
+        self.status_left.set_text("Loading library…")
+
+    def _start_library_load(self) -> None:
+        """Scan the library off the UI thread so the window can appear first."""
+
+        def work() -> None:
+            try:
+                self.library.load()
+                err = None
+            except Exception as exc:  # noqa: BLE001
+                err = exc
+
+            def apply() -> bool:
+                if err is not None:
+                    self._on_library_load_failed(err)
+                    return False
+                self._library_ready = True
+                self.search.set_sensitive(True)
+                if self.center_stack.get_visible_child_name() == "loading":
+                    self.center_stack.set_visible_child_name("grid")
+                self._populate_sidebar()
+                self.refresh_items()
+                self._start_inbox_watch()
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(target=work, name="eagle-library-load", daemon=True).start()
+
+    def _on_library_load_failed(self, exc: BaseException) -> None:
+        self.status_left.set_text("Library failed to load")
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Could not open Eagle library",
+            body=str(exc),
+        )
+        dialog.add_response("ok", "OK")
+        dialog.set_default_response("ok")
+        dialog.set_close_response("ok")
+        dialog.connect("response", lambda d, *_: d.close())
+        dialog.present()
 
     def _fixed_width_pane(self, width: int, css_class: str) -> Gtk.Box:
         """Box with a hard width. GTK4 ScrolledWindow does not honor max-width."""
@@ -5443,24 +5502,8 @@ class EagleBrowseApp(Adw.Application):
             win.present()
             return
         # No active window: either first launch, or a zombie process after a
-        # compositor kill left us running. Create a fresh main window.
-        try:
-            self.library.load()
-        except Exception as exc:  # noqa: BLE001
-            dialog = Adw.MessageDialog(
-                heading="Could not open Eagle library",
-                body=str(exc),
-            )
-            dialog.add_response("ok", "OK")
-            dialog.set_default_response("ok")
-            dialog.connect("response", lambda d, *_: d.close())
-            # Need a transient parent; create a bare window
-            bare = Adw.ApplicationWindow(application=app, title="Eagle Browse")
-            bare.present()
-            dialog.set_transient_for(bare)
-            dialog.present()
-            return
-
+        # compositor kill left us running. Show chrome immediately; the
+        # library scan runs in a background thread (see _start_library_load).
         window = EagleBrowseWindow(app, self.library)
         window.present()
 
