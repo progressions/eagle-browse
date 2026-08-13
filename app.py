@@ -292,6 +292,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._sidebar_nav_lock = False
         # Soft-delete undo: each entry is a batch of item ids (newest last)
         self._delete_undo_stack: list[list[str]] = []
+        self._sf_menu: Gtk.Popover | None = None
+        self._sf_editor = None
         # Inbox signal: watcher writes this after each new import
         self._inbox_signal_path = self.library.root / INBOX_SIGNAL_FILENAME
         self._inbox_signal_ts = 0.0
@@ -1062,6 +1064,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         collapsible: bool = False,
         section_id: str | None = None,
         expanded: bool = True,
+        on_add=None,
     ) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow()
         row.row_kind = "section" if collapsible else "header"  # type: ignore[attr-defined]
@@ -1105,7 +1108,29 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         label = Gtk.Label(label=title, xalign=0, hexpand=True)
         label.add_css_class("heading")
         box.append(label)
+        if on_add is not None:
+            add_btn = Gtk.Button()
+            add_btn.add_css_class("flat")
+            add_btn.add_css_class("circular")
+            add_btn.set_icon_name("list-add-symbolic")
+            add_btn.set_tooltip_text("New smart folder")
+            add_btn.set_valign(Gtk.Align.CENTER)
+            add_btn.set_focus_on_click(False)
+            add_btn.connect("clicked", lambda *_: on_add())
+            box.append(add_btn)
         row.set_child(box)
+        if section_id == "smart":
+            click = Gtk.GestureClick()
+            click.set_button(3)
+
+            def on_header_right(
+                _g: Gtk.GestureClick, _n: int, x: float, y: float
+            ) -> None:
+                self._open_smart_header_menu(row, x, y)
+
+            click.connect("pressed", on_header_right)
+            row.add_controller(click)
+            row.set_tooltip_text("Right-click · new smart folder")
         return row
 
     def _toggle_section(self, section_id: str) -> None:
@@ -1203,6 +1228,25 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
             click.connect("pressed", on_right)
             row.add_controller(click)
+
+        if kind == "smart" and smart_folder_id:
+            row.set_tooltip_text(
+                f"{label}\nRight-click · edit / new child / delete · e edits"
+            )
+            sf_click = Gtk.GestureClick()
+            sf_click.set_button(3)
+
+            def on_sf_right(
+                _g: Gtk.GestureClick,
+                _n: int,
+                x: float,
+                y: float,
+                sid: str = smart_folder_id,
+            ) -> None:
+                self._open_smart_folder_menu(row, x, y, sid)
+
+            sf_click.connect("pressed", on_sf_right)
+            row.add_controller(sf_click)
 
         row.set_child(box)
         return row
@@ -1377,8 +1421,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
 
         # Smart folders first — primary navigation; top levels collapsed by default
+        self.folder_list.append(
+            self._make_header_row(
+                "Smart folders",
+                section_id="smart",
+                on_add=lambda: self.open_smart_folder_editor(),
+            )
+        )
         if self.library.smart_folders:
-            self.folder_list.append(self._make_header_row("Smart folders"))
             self._append_smart_tree(self.library.smart_folders, 0)
 
         if self.library.folders:
@@ -2918,6 +2968,201 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             on_close=on_close,
         )
         picker.present()
+
+    def _dismiss_sf_menu(self) -> None:
+        if self._sf_menu is not None:
+            try:
+                self._sf_menu.popdown()
+                self._sf_menu.unparent()
+            except Exception:  # noqa: BLE001
+                pass
+            self._sf_menu = None
+
+    def _popover_menu(
+        self, widget: Gtk.Widget, x: float, y: float, items: list[tuple[str, object]]
+    ) -> None:
+        self._dismiss_sf_menu()
+        pop = Gtk.Popover()
+        pop.set_parent(widget)
+        pop.set_has_arrow(True)
+        pop.set_autohide(True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
+        box.set_margin_start(4)
+        box.set_margin_end(4)
+        for label, cb in items:
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            btn.set_halign(Gtk.Align.FILL)
+
+            def on_click(_b: Gtk.Button, action=cb) -> None:
+                self._dismiss_sf_menu()
+                action()
+
+            btn.connect("clicked", on_click)
+            box.append(btn)
+        pop.set_child(box)
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        pop.set_pointing_to(rect)
+        self._sf_menu = pop
+        pop.popup()
+
+    def _open_smart_header_menu(
+        self, widget: Gtk.Widget, x: float, y: float
+    ) -> None:
+        self._popover_menu(
+            widget,
+            x,
+            y,
+            [("New smart folder", self.open_smart_folder_editor)],
+        )
+
+    def _open_smart_folder_menu(
+        self, widget: Gtk.Widget, x: float, y: float, smart_id: str
+    ) -> None:
+        self._popover_menu(
+            widget,
+            x,
+            y,
+            [
+                ("Edit rules", lambda: self.open_smart_folder_editor(smart_id)),
+                (
+                    "New child",
+                    lambda: self.open_smart_folder_editor(parent_id=smart_id),
+                ),
+                ("Delete", lambda: self.confirm_delete_smart_folder(smart_id)),
+            ],
+        )
+
+    def open_smart_folder_editor(
+        self,
+        folder_id: str | None = None,
+        *,
+        parent_id: str | None = None,
+    ) -> None:
+        from smart_folder_editor import SmartFolderEditor
+        from write import WriteError
+
+        if self._sf_editor is not None:
+            try:
+                self._sf_editor.present()
+            except Exception:  # noqa: BLE001
+                self._sf_editor = None
+            if self._sf_editor is not None:
+                return
+        try:
+            editor = SmartFolderEditor(
+                self,
+                self.library,
+                folder_id=folder_id,
+                default_parent_id=parent_id,
+                on_saved=self._after_smart_folder_saved,
+                on_closed=lambda: setattr(self, "_sf_editor", None),
+            )
+        except WriteError as exc:
+            self._toast(str(exc))
+            return
+        self._sf_editor = editor
+        editor.present()
+
+    def _after_smart_folder_saved(self, smart_id: str) -> None:
+        self._smart_counts.clear()
+        if smart_id in self.library.smart_folders_by_id:
+            self.current_smart_folder_id = smart_id
+            self.current_folder_id = None
+            self._special_view = None
+            self._ensure_smart_expanded_path(smart_id)
+            parent = self.library.smart_folders_by_id[smart_id].parent_id
+            if parent:
+                self._smart_expanded.add(parent)
+        self._populate_sidebar(select_current=True)
+        self.refresh_items()
+        path = self.library.smart_folder_paths.get(smart_id, smart_id)
+        self._toast(f"Smart folder · {path}")
+
+    def confirm_delete_smart_folder(self, smart_id: str) -> None:
+        sf = self.library.smart_folders_by_id.get(smart_id)
+        if sf is None:
+            self._toast("Unknown smart folder")
+            return
+        n_children = 0
+
+        def walk(node) -> None:
+            nonlocal n_children
+            for child in node.children:
+                n_children += 1
+                walk(child)
+
+        walk(sf)
+        path = self.library.smart_folder_paths.get(smart_id, sf.name)
+        if n_children:
+            body = (
+                f"Remove “{path}” and {n_children} nested smart folder"
+                f"{'s' if n_children != 1 else ''}? Items stay in the library."
+            )
+        else:
+            body = f"Remove “{path}”? Items stay in the library."
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Delete smart folder?",
+            body=body,
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("delete", "Delete")
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+
+        def on_resp(_d: Adw.MessageDialog, response: str) -> None:
+            _d.close()
+            if response == "delete":
+                self._delete_smart_folder(smart_id)
+
+        dialog.connect("response", on_resp)
+        dialog.present()
+
+    def _delete_smart_folder(self, smart_id: str) -> None:
+        from write import WriteError, delete_smart_folder_node, write_session
+
+        sf = self.library.smart_folders_by_id.get(smart_id)
+        parent_id = sf.parent_id if sf else None
+        name = self.library.smart_folder_paths.get(smart_id, smart_id)
+        current = self.current_smart_folder_id
+        leaving = False
+        if current:
+            if current == smart_id:
+                leaving = True
+            else:
+                chain = self._smart_ancestors(current)
+                if smart_id in chain:
+                    leaving = True
+        try:
+            with write_session(self.library.root):
+                delete_smart_folder_node(self.library.root, smart_id)
+            self.library.reload_metadata_trees()
+        except WriteError as exc:
+            self._toast(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._toast(str(exc))
+            return
+        self._smart_counts.clear()
+        self._smart_expanded.discard(smart_id)
+        if leaving:
+            self.current_smart_folder_id = (
+                parent_id if parent_id in self.library.smart_folders_by_id else None
+            )
+            if self.current_smart_folder_id is None:
+                self._special_view = None
+                self.current_folder_id = None
+        self._populate_sidebar(select_current=True)
+        self.refresh_items()
+        self._toast(f"Deleted · {name}")
 
     def edit_folders_dialog(self) -> None:
         """Keyboard folder/category picker (same UX as tags)."""
@@ -4705,6 +4950,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 fid = getattr(row, "folder_id", None) if row else None
                 if fid or self.current_folder_id:
                     self.edit_folder_auto_tags(fid or self.current_folder_id)
+                    return True
+            if keyval in (Gdk.KEY_e, Gdk.KEY_E) and not ctrl and not alt and not super_mod:
+                row = self.folder_list.get_selected_row()
+                sid = getattr(row, "smart_folder_id", None) if row else None
+                if sid:
+                    self.open_smart_folder_editor(sid)
+                    return True
+            if (
+                keyval in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete, Gdk.KEY_BackSpace)
+                and not ctrl
+                and not alt
+                and not super_mod
+            ):
+                row = self.folder_list.get_selected_row()
+                sid = getattr(row, "smart_folder_id", None) if row else None
+                if sid:
+                    self.confirm_delete_smart_folder(sid)
                     return True
             if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
                 if self._sidebar_toggle_selected():

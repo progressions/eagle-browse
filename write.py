@@ -399,6 +399,7 @@ def create_smart_folder_node(
     }
 
     if parent_id:
+        node["parent"] = parent_id
         found = False
 
         def walk(nodes: list[Any]) -> bool:
@@ -426,6 +427,164 @@ def create_smart_folder_node(
 
     save_library_metadata(library_root, meta)
     return node
+
+
+def _smart_folder_roots(meta: dict[str, Any]) -> list[Any]:
+    roots = meta.get("smartFolders")
+    if roots is None:
+        roots = []
+        meta["smartFolders"] = roots
+    if not isinstance(roots, list):
+        raise WriteError("smartFolders must be a list")
+    return roots
+
+
+def _find_smart_in_tree(
+    roots: list[Any], folder_id: str
+) -> tuple[dict[str, Any], list[Any], int] | None:
+    for i, node in enumerate(roots):
+        if not isinstance(node, dict):
+            continue
+        if node.get("id") == folder_id:
+            return node, roots, i
+        children = node.get("children")
+        if isinstance(children, list):
+            found = _find_smart_in_tree(children, folder_id)
+            if found is not None:
+                return found
+    return None
+
+
+def _smart_descendant_ids(node: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+
+    def walk(n: Any) -> None:
+        if not isinstance(n, dict):
+            return
+        nid = n.get("id")
+        if nid:
+            ids.add(str(nid))
+        for child in n.get("children") or []:
+            walk(child)
+
+    for child in node.get("children") or []:
+        walk(child)
+    return ids
+
+
+def _count_smart_subtree(node: dict[str, Any]) -> int:
+    n = 1
+    for child in node.get("children") or []:
+        if isinstance(child, dict):
+            n += _count_smart_subtree(child)
+    return n
+
+
+def update_smart_folder_node(
+    library_root: Path,
+    folder_id: str,
+    *,
+    name: str | None = None,
+    conditions: list[dict[str, Any]] | None = None,
+    parent_id: str | None | object = ...,  # Ellipsis = leave parent unchanged
+    description: str | None = None,
+) -> dict[str, Any]:
+    """
+    Patch a smart folder in metadata.json.
+
+    *parent_id* ``...`` (default) leaves the parent unchanged. ``None`` moves
+    the node to the root. A string moves it under that smart folder.
+
+    Caller should hold write_session.
+    """
+    if not folder_id:
+        raise WriteError("Smart folder id is required")
+    meta = load_library_metadata(library_root)
+    roots = _smart_folder_roots(meta)
+    found = _find_smart_in_tree(roots, folder_id)
+    if found is None:
+        raise WriteError(f"Smart folder not found: {folder_id}")
+    node, parent_list, idx = found
+
+    if name is not None:
+        cleaned = name.strip()
+        if not cleaned:
+            raise WriteError("Smart folder name is required")
+        node["name"] = cleaned
+    if description is not None:
+        node["description"] = description
+    if conditions is not None:
+        node["conditions"] = conditions
+    node["modificationTime"] = _now_ms()
+
+    if parent_id is not ...:
+        new_parent: str | None = parent_id or None
+
+        def find_parent(
+            nodes: list[Any], pid: str | None
+        ) -> tuple[bool, str | None]:
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                if n.get("id") == folder_id:
+                    return True, pid
+                ch = n.get("children")
+                if isinstance(ch, list):
+                    found, got = find_parent(ch, str(n.get("id") or "") or None)
+                    if found:
+                        return True, got
+            return False, None
+
+        _ok, current_parent = find_parent(roots, None)
+        if current_parent != new_parent:
+            if new_parent == folder_id or (
+                new_parent and new_parent in _smart_descendant_ids(node)
+            ):
+                raise WriteError("Cannot move a smart folder under itself")
+            dest_list: list[Any]
+            if new_parent:
+                dest = _find_smart_in_tree(roots, new_parent)
+                if dest is None:
+                    raise WriteError(f"Parent smart folder not found: {new_parent}")
+                dest_node = dest[0]
+                children = dest_node.get("children")
+                if not isinstance(children, list):
+                    children = []
+                    dest_node["children"] = children
+                dest_list = children
+            else:
+                dest_list = roots
+            moved = parent_list.pop(idx)
+            dest_list.append(moved)
+            if new_parent:
+                moved["parent"] = new_parent
+            else:
+                moved.pop("parent", None)
+
+    save_library_metadata(library_root, meta)
+    return node
+
+
+def delete_smart_folder_node(
+    library_root: Path,
+    folder_id: str,
+) -> dict[str, Any]:
+    """
+    Remove a smart folder (and its children) from metadata.json.
+
+    Returns the removed node. Caller should hold write_session.
+    """
+    if not folder_id:
+        raise WriteError("Smart folder id is required")
+    meta = load_library_metadata(library_root)
+    roots = _smart_folder_roots(meta)
+    found = _find_smart_in_tree(roots, folder_id)
+    if found is None:
+        raise WriteError(f"Smart folder not found: {folder_id}")
+    node, parent_list, idx = found
+    removed = parent_list.pop(idx)
+    save_library_metadata(library_root, meta)
+    return removed
 
 
 def set_folder_auto_tags(

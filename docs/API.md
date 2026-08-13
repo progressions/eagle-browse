@@ -47,13 +47,16 @@ eagle-api folders
 eagle-api smart-folder list
 eagle-api smart-folder show "Eunbi/images"
 
-# Create smart folder: Sofie videos with 3+ stars
+# Create / update / delete
 eagle-api smart-folder create \
   --name "Sofie videos 3+" \
   --parent Sofie \
   --tag sofie \
   --type video \
   --rating-min 3
+eagle-api smart-folder update "Sofie videos 3+" --rating-min 4
+eagle-api smart-folder delete "Sofie videos 3+"
+eagle-api smart-folder delete "Sofie videos 3+" --force   # also remove children
 ```
 
 ### JSON mode (agents)
@@ -89,7 +92,7 @@ api.crop(item_id, aspect="3:4", mode="overwrite")     # replace original
 api.crop(item_id, width=1080, height=1440, anchor="top")
 api.crop(item_id, x=100, y=50, width=800, height=1200, mode="new")
 
-# Create smart folder under Sofie
+# Create / update / delete smart folders
 api.create_smart_folder(
     "Sofie videos 3+",
     parent="Sofie",
@@ -97,6 +100,8 @@ api.create_smart_folder(
     media_type="video",
     rating_min=3,
 )
+api.update_smart_folder("Sofie videos 3+", rating_min=4)
+api.delete_smart_folder("Sofie videos 3+", force=True)
 ```
 
 ### Crop details
@@ -116,6 +121,7 @@ api.create_smart_folder(
 ## Notes
 
 - Writes use the same lock as Eagle Browse / inbox-watch (`.eagle-browse.write.lock`).
-- Smart folder create updates `metadata.json` (backed up under `backup/eagle-browse-writes/`). Reload the GUI with **`r`** to see new smart folders.
-- `rating_min` uses method `gte` in our evaluator (works in Eagle Browse; desktop Eagle may only show equal/unequal in its UI).
+- Smart folder create/update/delete rewrite `metadata.json` (backed up under `backup/eagle-browse-writes/`). The GUI editor reloads the tree; after a CLI change press **`r`**.
+- `rating_min` uses method `gte`. Tags/folders “all present” uses method `subset`.
+- `delete` refuses a folder that has children unless `force=True` (the GUI always confirms and then deletes the subtree).
 - Soft-deleted items are excluded from search by default.

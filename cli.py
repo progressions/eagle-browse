@@ -19,7 +19,7 @@ import os
 import sys
 from typing import Any
 
-from api import EagleAPI, build_parser as _api_build_parser
+from api import EagleAPI, _UNSET, build_parser as _api_build_parser
 from library import DEFAULT_LIBRARY
 from write import WriteError
 
@@ -177,6 +177,24 @@ def _fmt_smart_create(data: dict[str, Any]) -> None:
     print("reload Eagle Browse (r) to see it in the sidebar")
 
 
+def _fmt_smart_update(data: dict[str, Any]) -> None:
+    if not data.get("ok"):
+        _err(data.get("error") or "failed")
+        return
+    sf = data["smart_folder"]
+    print(f"updated · {sf.get('path')}  [{sf.get('id')}]")
+
+
+def _fmt_smart_delete(data: dict[str, Any]) -> None:
+    if not data.get("ok"):
+        _err(data.get("error") or "failed")
+        return
+    n = data.get("deleted_count") or 1
+    name = data.get("deleted_name") or data.get("deleted_id")
+    extra = f" · {n} folders" if n > 1 else ""
+    print(f"deleted · {name}{extra}")
+
+
 def _fmt_crop(data: dict[str, Any]) -> None:
     if not data.get("ok"):
         _err(data.get("error") or "crop failed")
@@ -230,6 +248,8 @@ examples:
   eagle-api smart-folder list
   eagle-api smart-folder show Eunbi/images
   eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
+  eagle-api smart-folder update "Sofie videos 3+" --rating-min 4
+  eagle-api smart-folder delete "Sofie videos 3+"
 
 environment:
   EAGLE_LIBRARY   default library path
@@ -356,6 +376,36 @@ environment:
         "--conditions-json",
         default="",
         help="Raw conditions JSON (overrides filters)",
+    )
+    sfs_u = sfs.add_parser("update", parents=[shared], help="Update smart folder")
+    sfs_u.add_argument("path", help="Name, path, or id to update")
+    sfs_u.add_argument("--name", default="", help="New name")
+    sfs_u.add_argument(
+        "--parent",
+        default=None,
+        help="New parent (name/path/id). Empty string moves to root",
+    )
+    sfs_u.add_argument("--tag", action="append", default=[], dest="tags")
+    sfs_u.add_argument("--tags", default="", dest="tags_csv")
+    sfs_u.add_argument("--exclude-tag", action="append", default=[], dest="exclude_tags")
+    sfs_u.add_argument("--folder", default="")
+    sfs_u.add_argument("--type", default="", dest="media_type")
+    sfs_u.add_argument("--rating", type=int, default=None)
+    sfs_u.add_argument("--rating-min", type=int, default=None)
+    sfs_u.add_argument("--name-contains", default="")
+    sfs_u.add_argument("--match", default="AND", choices=("AND", "OR"))
+    sfs_u.add_argument("--description", default=None)
+    sfs_u.add_argument(
+        "--conditions-json",
+        default="",
+        help="Raw conditions JSON (replaces existing conditions)",
+    )
+    sfs_d = sfs.add_parser("delete", parents=[shared], help="Delete smart folder")
+    sfs_d.add_argument("path", help="Name, path, or id")
+    sfs_d.add_argument(
+        "--force",
+        action="store_true",
+        help="Delete even if the folder has children",
     )
 
     return p
@@ -491,6 +541,33 @@ def main(argv: list[str] | None = None) -> int:
                     conditions=conditions,
                 )
                 return out(result, _fmt_smart_create)
+            if args.sf_cmd == "update":
+                conditions = None
+                if args.conditions_json:
+                    conditions = json.loads(args.conditions_json)
+                tags = list(args.tags) + _split_csv(args.tags_csv)
+                parent = _UNSET
+                if args.parent is not None:
+                    parent = args.parent or None
+                result = api.update_smart_folder(
+                    args.path,
+                    name=args.name or None,
+                    parent=parent,
+                    tags=tags or None,
+                    tags_exclude=list(args.exclude_tags) or None,
+                    folder=args.folder or None,
+                    media_type=args.media_type or None,
+                    rating=args.rating,
+                    rating_min=args.rating_min,
+                    name_contains=args.name_contains or None,
+                    match=args.match,
+                    description=args.description,
+                    conditions=conditions,
+                )
+                return out(result, _fmt_smart_update)
+            if args.sf_cmd == "delete":
+                result = api.delete_smart_folder(args.path, force=bool(args.force))
+                return out(result, _fmt_smart_delete)
 
         if as_json:
             _emit_json({"ok": False, "error": f"Unknown command: {args.cmd}"}, compact=compact)

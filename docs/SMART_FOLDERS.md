@@ -1,10 +1,34 @@
-# Eagle smart folders (agent-editable)
+# Eagle smart folders
 
 Smart folders live in the library root file:
 
 `Eunbi.library/metadata.json` → key **`smartFolders`**
 
-Eagle Browse **evaluates** these rules read-only. Until an in-app editor exists, change rules by editing this JSON (or asking an agent), then press **`r`** in Eagle Browse to reload.
+Edit them in Eagle Browse (sidebar **+**, right-click a folder → **Edit rules**, or **`e`** with the sidebar focused on a smart folder). Agents can also use `eagle-api smart-folder create|update|delete`.
+
+Nested children **inherit** parent conditions (AND together). The editor shows inherited parent rules as read-only.
+
+## In-app editor
+
+A smart folder is a name, optional parent, and one or more **groups**. Groups are ANDed. Each group has a mode and a list of rules.
+
+| Group mode | Stored |
+|------------|--------|
+| All are true | `match: AND`, `boolean: TRUE` |
+| Any are true | `match: OR`, `boolean: TRUE` |
+| None are true | `match: OR`, `boolean: FALSE` |
+
+| Rule | Stored |
+|------|--------|
+| Rating `=` / `≥` / `≤` and 1–5 stars | `property: rating`, `method: equal\|gte\|lte` |
+| Tags, any present | `property: tags`, `method: union` |
+| Tags, all present | `property: tags`, `method: subset` |
+| Categories, any present | `property: folders`, `method: intersection` |
+| Categories, all present | `property: folders`, `method: subset` |
+
+Type, name, `identity` (exclude), and other existing Eagle methods stay in the folder when you save. The editor lists them as “kept as-is” and does not offer an editor for them in this pass.
+
+Unrated items count as 0 stars.
 
 ## Shape
 
@@ -27,8 +51,6 @@ Eagle Browse **evaluates** these rules read-only. Until an in-app editor exists,
 }
 ```
 
-Nested children **inherit** parent conditions (AND together).
-
 ## Rule semantics (as implemented in Eagle Browse)
 
 | property | field on item | notes |
@@ -42,9 +64,12 @@ Nested children **inherit** parent conditions (AND together).
 | method | meaning |
 |--------|---------|
 | `intersection` / `union` | has **any** of the listed values |
+| `subset` / `all` | has **all** of the listed values (tags and folders) |
+| `contain` | tags/folders: same as `subset`. `name`: substring |
 | `identity` | has **none** of the listed values (exclude) |
 | `equal` / `unequal` | exact match / not |
-| `contain` / `uncontain` | substring on `name` |
+| `uncontain` | substring absent on `name` |
+| `gte` / `lte` | rating at least / at most |
 
 | group | meaning |
 |-------|---------|
@@ -54,6 +79,6 @@ Nested children **inherit** parent conditions (AND together).
 
 ## Safety
 
-- Back up `metadata.json` before large edits.
-- Do not edit smart folders while Eagle desktop is also rewriting the library.
-- After edit: reload Eagle Browse (`r`) or reopen the app.
+- Writes use the library lock and a backup under `backup/eagle-browse-writes/`.
+- One writer at a time — do not edit `metadata.json` from two machines at once.
+- After a CLI edit: press **`r`** in Eagle Browse, or the in-app editor reloads the tree itself.

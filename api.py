@@ -25,7 +25,17 @@ from pathlib import Path
 from typing import Any
 
 from library import DEFAULT_LIBRARY, EagleLibrary, Item, SmartFolder
-from write import WriteError, create_smart_folder_node, write_session
+from write import (
+    WriteError,
+    _count_smart_subtree,
+    create_smart_folder_node,
+    delete_smart_folder_node,
+    update_smart_folder_node,
+    write_session,
+)
+
+# Same sentinel write.update_smart_folder_node uses for “leave parent as-is”.
+_UNSET = ...
 
 
 def _item_to_dict(it: Item, *, library: EagleLibrary | None = None) -> dict[str, Any]:
@@ -561,67 +571,19 @@ class EagleAPI:
                 return {"ok": False, "error": f"Unknown parent smart folder: {parent}"}
 
         if conditions is None:
-            rules: list[dict[str, Any]] = []
-            if tags:
-                rules.append(
-                    {"property": "tags", "method": "union", "value": list(tags)}
-                )
-            if tags_exclude:
-                rules.append(
-                    {
-                        "property": "tags",
-                        "method": "identity",
-                        "value": list(tags_exclude),
-                    }
-                )
-            if folder:
-                fid = self.resolve_folder(folder)
-                if not fid:
-                    return {"ok": False, "error": f"Unknown folder: {folder}"}
-                rules.append(
-                    {"property": "folders", "method": "intersection", "value": [fid]}
-                )
-            if media_type:
-                rules.append(
-                    {
-                        "property": "type",
-                        "method": "equal",
-                        "value": media_type.lower().lstrip("."),
-                    }
-                )
-            if rating is not None:
-                rules.append(
-                    {"property": "rating", "method": "equal", "value": str(int(rating))}
-                )
-            if rating_min is not None:
-                # Eagle uses equal/unequal commonly; we support gte in our evaluator
-                rules.append(
-                    {
-                        "property": "rating",
-                        "method": "gte",
-                        "value": str(int(rating_min)),
-                    }
-                )
-            if name_contains:
-                rules.append(
-                    {
-                        "property": "name",
-                        "method": "contain",
-                        "value": name_contains,
-                    }
-                )
-            if not rules:
-                return {
-                    "ok": False,
-                    "error": "Provide filters (tags, type, rating_min, …) or raw conditions",
-                }
-            conditions = [
-                {
-                    "rules": rules,
-                    "match": (match or "AND").upper(),
-                    "boolean": "TRUE",
-                }
-            ]
+            built = self._conditions_from_filters(
+                tags=tags,
+                tags_exclude=tags_exclude,
+                folder=folder,
+                media_type=media_type,
+                rating=rating,
+                rating_min=rating_min,
+                name_contains=name_contains,
+                match=match,
+            )
+            if not built.get("ok"):
+                return built
+            conditions = built["conditions"]
 
         try:
             with write_session(self.library.root):
@@ -635,8 +597,7 @@ class EagleAPI:
         except WriteError as exc:
             return {"ok": False, "error": str(exc)}
 
-        # Reload so paths resolve
-        self.library.load()
+        self.library.reload_metadata_trees()
         return {
             "ok": True,
             "smart_folder": {
@@ -646,6 +607,204 @@ class EagleAPI:
                 "parent_id": parent_id,
                 "conditions": node["conditions"],
             },
+        }
+
+    def _conditions_from_filters(
+        self,
+        *,
+        tags: list[str] | None = None,
+        tags_exclude: list[str] | None = None,
+        folder: str | None = None,
+        media_type: str | None = None,
+        rating: int | None = None,
+        rating_min: int | None = None,
+        name_contains: str | None = None,
+        match: str = "AND",
+    ) -> dict[str, Any]:
+        rules: list[dict[str, Any]] = []
+        if tags:
+            rules.append({"property": "tags", "method": "union", "value": list(tags)})
+        if tags_exclude:
+            rules.append(
+                {
+                    "property": "tags",
+                    "method": "identity",
+                    "value": list(tags_exclude),
+                }
+            )
+        if folder:
+            fid = self.resolve_folder(folder)
+            if not fid:
+                return {"ok": False, "error": f"Unknown folder: {folder}"}
+            rules.append(
+                {"property": "folders", "method": "intersection", "value": [fid]}
+            )
+        if media_type:
+            rules.append(
+                {
+                    "property": "type",
+                    "method": "equal",
+                    "value": media_type.lower().lstrip("."),
+                }
+            )
+        if rating is not None:
+            rules.append(
+                {"property": "rating", "method": "equal", "value": str(int(rating))}
+            )
+        if rating_min is not None:
+            rules.append(
+                {
+                    "property": "rating",
+                    "method": "gte",
+                    "value": str(int(rating_min)),
+                }
+            )
+        if name_contains:
+            rules.append(
+                {
+                    "property": "name",
+                    "method": "contain",
+                    "value": name_contains,
+                }
+            )
+        if not rules:
+            return {
+                "ok": False,
+                "error": "Provide filters (tags, type, rating_min, …) or raw conditions",
+            }
+        return {
+            "ok": True,
+            "conditions": [
+                {
+                    "rules": rules,
+                    "match": (match or "AND").upper(),
+                    "boolean": "TRUE",
+                }
+            ],
+        }
+
+    def update_smart_folder(
+        self,
+        name_or_path_or_id: str,
+        *,
+        name: str | None = None,
+        parent: str | None | object = _UNSET,
+        tags: list[str] | None = None,
+        tags_exclude: list[str] | None = None,
+        folder: str | None = None,
+        media_type: str | None = None,
+        rating: int | None = None,
+        rating_min: int | None = None,
+        name_contains: str | None = None,
+        match: str = "AND",
+        description: str | None = None,
+        conditions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Update name, parent, and/or conditions of an existing smart folder."""
+        sid = self.resolve_smart_folder(name_or_path_or_id)
+        if not sid:
+            return {"ok": False, "error": f"Unknown smart folder: {name_or_path_or_id}"}
+
+        new_conditions = conditions
+        has_filters = any(
+            [
+                tags,
+                tags_exclude,
+                folder,
+                media_type,
+                rating is not None,
+                rating_min is not None,
+                name_contains,
+            ]
+        )
+        if new_conditions is None and has_filters:
+            built = self._conditions_from_filters(
+                tags=tags,
+                tags_exclude=tags_exclude,
+                folder=folder,
+                media_type=media_type,
+                rating=rating,
+                rating_min=rating_min,
+                name_contains=name_contains,
+                match=match,
+            )
+            if not built.get("ok"):
+                return built
+            new_conditions = built["conditions"]
+
+        parent_id: str | None | object = _UNSET
+        if parent is not _UNSET:
+            if parent:
+                parent_id = self.resolve_smart_folder(str(parent))
+                if not parent_id:
+                    return {"ok": False, "error": f"Unknown parent smart folder: {parent}"}
+            else:
+                parent_id = None
+
+        if (
+            name is None
+            and parent is _UNSET
+            and description is None
+            and new_conditions is None
+        ):
+            return {"ok": False, "error": "Nothing to update"}
+
+        try:
+            with write_session(self.library.root):
+                node = update_smart_folder_node(
+                    self.library.root,
+                    sid,
+                    name=name,
+                    conditions=new_conditions,
+                    parent_id=parent_id,
+                    description=description,
+                )
+        except WriteError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        self.library.reload_metadata_trees()
+        return {
+            "ok": True,
+            "smart_folder": {
+                "id": node["id"],
+                "name": node["name"],
+                "path": self.library.smart_folder_paths.get(node["id"], node["name"]),
+                "parent_id": self.library.smart_folders_by_id[node["id"]].parent_id
+                if node["id"] in self.library.smart_folders_by_id
+                else None,
+                "conditions": node.get("conditions") or [],
+            },
+        }
+
+    def delete_smart_folder(
+        self, name_or_path_or_id: str, *, force: bool = False
+    ) -> dict[str, Any]:
+        sid = self.resolve_smart_folder(name_or_path_or_id)
+        if not sid:
+            return {"ok": False, "error": f"Unknown smart folder: {name_or_path_or_id}"}
+        sf = self.library.smart_folders_by_id.get(sid)
+        child_count = len(sf.children) if sf else 0
+        if child_count and not force:
+            return {
+                "ok": False,
+                "error": f"Smart folder has {child_count} child folder(s); pass force=True to delete the subtree",
+                "child_count": child_count,
+            }
+        try:
+            with write_session(self.library.root):
+                removed = delete_smart_folder_node(self.library.root, sid)
+        except WriteError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        removed_n = _count_smart_subtree(removed) if isinstance(removed, dict) else 1
+        parent_id = sf.parent_id if sf else None
+        self.library.reload_metadata_trees()
+        return {
+            "ok": True,
+            "deleted_id": sid,
+            "deleted_name": removed.get("name") if isinstance(removed, dict) else sid,
+            "deleted_count": removed_n,
+            "parent_id": parent_id,
         }
 
 
@@ -771,6 +930,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--conditions-json",
         default="",
         help="Raw conditions JSON array (overrides convenience filters)",
+    )
+    sfs_u = sfs.add_parser("update", parents=[shared], help="Update smart folder")
+    sfs_u.add_argument("path", help="Name, path, or id to update")
+    sfs_u.add_argument("--name", default="", help="New name")
+    sfs_u.add_argument(
+        "--parent",
+        default=None,
+        help="New parent (name/path/id). Empty string moves to root",
+    )
+    sfs_u.add_argument("--tag", action="append", default=[], dest="tags")
+    sfs_u.add_argument("--tags", default="", dest="tags_csv")
+    sfs_u.add_argument("--exclude-tag", action="append", default=[], dest="exclude_tags")
+    sfs_u.add_argument("--folder", default="")
+    sfs_u.add_argument("--type", default="", dest="media_type")
+    sfs_u.add_argument("--rating", type=int, default=None)
+    sfs_u.add_argument("--rating-min", type=int, default=None)
+    sfs_u.add_argument("--name-contains", default="")
+    sfs_u.add_argument("--match", default="AND", choices=("AND", "OR"))
+    sfs_u.add_argument("--description", default=None)
+    sfs_u.add_argument(
+        "--conditions-json",
+        default="",
+        help="Raw conditions JSON array (replaces existing conditions)",
+    )
+    sfs_d = sfs.add_parser("delete", parents=[shared], help="Delete smart folder")
+    sfs_d.add_argument("path", help="Name, path, or id")
+    sfs_d.add_argument(
+        "--force",
+        action="store_true",
+        help="Delete even if the folder has children",
     )
 
     return p
@@ -905,6 +1094,35 @@ def main(argv: list[str] | None = None) -> int:
                     description=args.description,
                     conditions=conditions,
                 )
+                _json_out(result, pretty=pretty)
+                return 0 if result.get("ok") else 2
+            if args.sf_cmd == "update":
+                conditions = None
+                if args.conditions_json:
+                    conditions = json.loads(args.conditions_json)
+                tags = list(args.tags) + _split_csv(args.tags_csv)
+                parent = _UNSET
+                if args.parent is not None:
+                    parent = args.parent or None
+                result = api.update_smart_folder(
+                    args.path,
+                    name=args.name or None,
+                    parent=parent,
+                    tags=tags or None,
+                    tags_exclude=list(args.exclude_tags) or None,
+                    folder=args.folder or None,
+                    media_type=args.media_type or None,
+                    rating=args.rating,
+                    rating_min=args.rating_min,
+                    name_contains=args.name_contains or None,
+                    match=args.match,
+                    description=args.description,
+                    conditions=conditions,
+                )
+                _json_out(result, pretty=pretty)
+                return 0 if result.get("ok") else 2
+            if args.sf_cmd == "delete":
+                result = api.delete_smart_folder(args.path, force=bool(args.force))
                 _json_out(result, pretty=pretty)
                 return 0 if result.get("ok") else 2
 

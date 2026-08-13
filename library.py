@@ -279,6 +279,7 @@ def _eval_rule(item: Item, property_name: str, method: str, value: Any) -> bool:
     Empirically calibrated against this library's metadata:
 
     - tags/folders + intersection | union → has any of the listed values
+    - tags/folders + subset | contain | all → has all of the listed values
     - tags/folders + identity           → has none of the listed values (exclude)
     - type/name/rating use equal/unequal/contain/uncontain
     - property "rating" maps to item.star (missing star treated as 0)
@@ -291,6 +292,8 @@ def _eval_rule(item: Item, property_name: str, method: str, value: Any) -> bool:
         tags = item.tag_set
         if method in ("intersection", "union"):
             return not tags.isdisjoint(vals)
+        if method in ("subset", "contain", "all"):
+            return bool(vals) and vals.issubset(tags)
         if method == "identity":
             return tags.isdisjoint(vals)
         if method == "equal":
@@ -304,6 +307,8 @@ def _eval_rule(item: Item, property_name: str, method: str, value: Any) -> bool:
         folders = item.folder_set
         if method in ("intersection", "union"):
             return not folders.isdisjoint(vals)
+        if method in ("subset", "contain", "all"):
+            return bool(vals) and vals.issubset(folders)
         if method == "identity":
             return folders.isdisjoint(vals)
         if method == "equal":
@@ -454,6 +459,39 @@ class EagleLibrary:
             self.items = items
             self.items_by_id = items_by_id
             self._query_cache = {}
+
+    def reload_metadata_trees(self) -> None:
+        """Re-read folders + smart folders from metadata.json. Does not rescan items."""
+        meta_path = self.root / "metadata.json"
+        meta = _load_json(meta_path)
+        if not isinstance(meta, dict):
+            raise RuntimeError(f"Invalid library metadata: {meta_path}")
+        self.folders, self.folders_by_id = _parse_folders(meta.get("folders") or [])
+        self.folder_paths = {}
+        self._build_folder_paths(self.folders, [])
+        self.smart_folders, self.smart_folders_by_id = _parse_smart_folders(
+            meta.get("smartFolders") or []
+        )
+        self.smart_folder_paths = {}
+        self._build_smart_folder_paths(self.smart_folders, [])
+        with self._lock:
+            self._query_cache = {}
+
+    def count_conditions(
+        self,
+        conditions: list[dict[str, Any]],
+        *,
+        inherited: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """How many non-deleted items match inherited + own conditions."""
+        all_c = list(inherited or []) + list(conditions or [])
+        n = 0
+        for item in self.items:
+            if item.is_deleted:
+                continue
+            if eval_smart_conditions(item, all_c):
+                n += 1
+        return n
 
     def upsert_item(self, item: Item) -> Item:
         """Insert or replace one item in the in-memory model. No disk scan."""

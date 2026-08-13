@@ -1,10 +1,10 @@
 # Eagle Browse
 
-Keyboard-first, **read-only** browser for an [Eagle.cool](https://eagle.cool) library on Omarchy/Linux.
+Keyboard-first browser for an [Eagle.cool](https://eagle.cool) library on Omarchy/Linux.
 
 Browse **smart folders** and regular folders, search tags/names, and **copy the absolute path** of an image so you can paste it into upload dialogs or other tools.
 
-Smart folders are evaluated read-only from Eagle’s `metadata.json` rules (nested filters inherit parents — e.g. `Eunbi` → `images`).
+Smart folders are evaluated from Eagle’s `metadata.json` rules (nested filters inherit parents — e.g. `Eunbi` → `images`). Create and edit them in the sidebar.
 
 ## Requirements
 
@@ -113,6 +113,8 @@ Shows the focused asset (or **common** values when multi-selected):
 | `t` | **Tags** picker (recent + autocomplete; Enter toggles and clears the filter; Esc closes) |
 | `f` | **Folders / categories** picker (same UX as tags) |
 | `A` (sidebar) | **Folder auto-tags** for the selected folder (or right-click the folder) |
+| `e` (sidebar on a smart folder) | **Edit** that smart folder’s rules |
+| `Delete` (sidebar on a smart folder) | **Delete** that smart folder (confirm) |
 | `m` | **Filter by type** (or use the **Type** button on the filter bar) |
 | `Esc` | Clear marks → clear view filters → clear search |
 | `b` | Focus **sidebar** |
@@ -165,16 +167,16 @@ Selection applies to: **copy Eagle id** (`y`), **copy path** (`Y` / Shift+Y or `
 
 | `+` / `-` | Larger / smaller thumbnails |
 
-### Library writes (tags, ratings, crop)
+### Library writes (tags, ratings, crop, smart folders)
 
-Eagle Browse can **write** item metadata (and crop media) into the library:
+Eagle Browse can **write** item metadata, crop media, and edit smart folders:
 
 - Uses a lock file `.eagle-browse.write.lock`
 - Atomic JSON writes + backups under `backup/eagle-browse-writes/`
 - **Crop** also backs up the media file before overwrite and rewrites the thumbnail
-- Prefer **one writer** (don’t run official Eagle edits at the same time)
+- Prefer **one writer** (don’t edit `metadata.json` from two machines at once)
 
-Smart folder **rules** are not edited in-app yet — see [docs/SMART_FOLDERS.md](docs/SMART_FOLDERS.md) for agent/JSON editing.
+**Smart folders:** **+** on the Smart folders header creates one. Right-click a folder for Edit rules / New child / Delete. Groups are “all / any / none are true”; rules are rating (`=` / `≥` / `≤`), tags (all or any present), and categories (all or any present). See [docs/SMART_FOLDERS.md](docs/SMART_FOLDERS.md).
 
 ### Inbox import (consume new media)
 
@@ -230,6 +232,8 @@ eagle-api crop <id> --aspect 9:16 --mode new
 eagle-api crop <id> --width 1080 --height 1440 --mode overwrite
 eagle-api smart-folder show "Eunbi/images"
 eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
+eagle-api smart-folder update "Sofie videos 3+" --rating-min 4
+eagle-api smart-folder delete "Sofie videos 3+"
 ```
 
 ### Headless inbox watcher (no UI)
@@ -328,8 +332,8 @@ Smart folders start **collapsed** at the top level. Expand only the category you
 
 ## Safety
 
-- **Read-only** — never writes into the Eagle library or Dropbox folder.
-- Safe to use while the same library is synced; still best practice is one Eagle writer at a time on Mac/Windows.
+- Metadata writes (tags, ratings, folders, smart folders, crop) use a lock file and backups under `backup/eagle-browse-writes/`.
+- One writer at a time. The official Eagle desktop app is retired; do not edit `metadata.json` from two machines at once.
 
 ## Omarchy launcher (optional)
 
