@@ -57,6 +57,8 @@ eagle-api smart-folder create \
 eagle-api smart-folder update "Sofie videos 3+" --rating-min 4
 eagle-api smart-folder delete "Sofie videos 3+"
 eagle-api smart-folder delete "Sofie videos 3+" --force   # also remove children
+eagle-api smart-folder move "Sofie videos 3+" --after Sofie
+eagle-api smart-folder move "Sofie videos 3+" --first
 ```
 
 ### JSON mode (agents)
@@ -102,6 +104,7 @@ api.create_smart_folder(
 )
 api.update_smart_folder("Sofie videos 3+", rating_min=4)
 api.delete_smart_folder("Sofie videos 3+", force=True)
+api.move_smart_folder("Sofie videos 3+", after="Sofie")
 ```
 
 ### Crop details

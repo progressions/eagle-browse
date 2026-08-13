@@ -4,7 +4,7 @@ Smart folders live in the library root file:
 
 `Eunbi.library/metadata.json` → key **`smartFolders`**
 
-Edit them in Eagle Browse (sidebar **+**, right-click a folder → **Edit rules**, or **`e`** with the sidebar focused on a smart folder). Agents can also use `eagle-api smart-folder create|update|delete`.
+Edit them in Eagle Browse (sidebar **+**, right-click a folder → **Edit rules**, or **`e`** with the sidebar focused on a smart folder). Drag a folder up or down to reorder it (`Shift+↑↓` does the same among siblings). Agents can also use `eagle-api smart-folder create|update|delete|move`.
 
 Nested children **inherit** parent conditions (AND together). The editor shows inherited parent rules as read-only.
 

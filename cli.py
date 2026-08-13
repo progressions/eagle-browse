@@ -195,6 +195,14 @@ def _fmt_smart_delete(data: dict[str, Any]) -> None:
     print(f"deleted · {name}{extra}")
 
 
+def _fmt_smart_move(data: dict[str, Any]) -> None:
+    if not data.get("ok"):
+        _err(data.get("error") or "failed")
+        return
+    sf = data["smart_folder"]
+    print(f"moved · {sf.get('path')}  [{sf.get('id')}]")
+
+
 def _fmt_crop(data: dict[str, Any]) -> None:
     if not data.get("ok"):
         _err(data.get("error") or "crop failed")
@@ -407,6 +415,15 @@ environment:
         action="store_true",
         help="Delete even if the folder has children",
     )
+    sfs_m = sfs.add_parser("move", parents=[shared], help="Reorder a smart folder")
+    sfs_m.add_argument("path", help="Name, path, or id to move")
+    sfs_m.add_argument("--before", default="", help="Place immediately before this folder")
+    sfs_m.add_argument("--after", default="", help="Place immediately after this folder")
+    sfs_m.add_argument(
+        "--first",
+        action="store_true",
+        help="Move to the start of the root list",
+    )
 
     return p
 
@@ -568,6 +585,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.sf_cmd == "delete":
                 result = api.delete_smart_folder(args.path, force=bool(args.force))
                 return out(result, _fmt_smart_delete)
+            if args.sf_cmd == "move":
+                result = api.move_smart_folder(
+                    args.path,
+                    before=args.before or None,
+                    after=args.after or None,
+                    first=bool(args.first),
+                )
+                return out(result, _fmt_smart_move)
 
         if as_json:
             _emit_json({"ok": False, "error": f"Unknown command: {args.cmd}"}, compact=compact)

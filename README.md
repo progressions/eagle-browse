@@ -115,6 +115,7 @@ Shows the focused asset (or **common** values when multi-selected):
 | `A` (sidebar) | **Folder auto-tags** for the selected folder (or right-click the folder) |
 | `e` (sidebar on a smart folder) | **Edit** that smart folder’s rules |
 | `Delete` (sidebar on a smart folder) | **Delete** that smart folder (confirm) |
+| Drag a smart folder / `Shift+↑↓` | **Reorder** it (drop on the header to move to the top) |
 | `m` | **Filter by type** (or use the **Type** button on the filter bar) |
 | `Esc` | Clear marks → clear view filters → clear search |
 | `b` | Focus **sidebar** |
@@ -234,6 +235,7 @@ eagle-api smart-folder show "Eunbi/images"
 eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
 eagle-api smart-folder update "Sofie videos 3+" --rating-min 4
 eagle-api smart-folder delete "Sofie videos 3+"
+eagle-api smart-folder move "Sofie videos 3+" --after Sofie
 ```
 
 ### Headless inbox watcher (no UI)

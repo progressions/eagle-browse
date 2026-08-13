@@ -30,6 +30,7 @@ from write import (
     _count_smart_subtree,
     create_smart_folder_node,
     delete_smart_folder_node,
+    move_smart_folder_node,
     update_smart_folder_node,
     write_session,
 )
@@ -807,6 +808,58 @@ class EagleAPI:
             "parent_id": parent_id,
         }
 
+    def move_smart_folder(
+        self,
+        name_or_path_or_id: str,
+        *,
+        before: str | None = None,
+        after: str | None = None,
+        first: bool = False,
+    ) -> dict[str, Any]:
+        """Reorder a smart folder. Exactly one of *before*, *after*, *first*."""
+        sid = self.resolve_smart_folder(name_or_path_or_id)
+        if not sid:
+            return {"ok": False, "error": f"Unknown smart folder: {name_or_path_or_id}"}
+        flags = sum(bool(x) for x in (before, after, first))
+        if flags != 1:
+            return {
+                "ok": False,
+                "error": "Pass exactly one of before, after, or first",
+            }
+        target_id = None
+        place = "first"
+        if before:
+            target_id = self.resolve_smart_folder(before)
+            if not target_id:
+                return {"ok": False, "error": f"Unknown target smart folder: {before}"}
+            place = "before"
+        elif after:
+            target_id = self.resolve_smart_folder(after)
+            if not target_id:
+                return {"ok": False, "error": f"Unknown target smart folder: {after}"}
+            place = "after"
+        try:
+            with write_session(self.library.root):
+                node = move_smart_folder_node(
+                    self.library.root,
+                    sid,
+                    target_id=target_id,
+                    place=place,
+                )
+        except WriteError as exc:
+            return {"ok": False, "error": str(exc)}
+        self.library.reload_metadata_trees()
+        moved = self.library.smart_folders_by_id.get(sid)
+        return {
+            "ok": True,
+            "smart_folder": {
+                "id": sid,
+                "name": node.get("name"),
+                "path": self.library.smart_folder_paths.get(sid, node.get("name")),
+                "parent_id": moved.parent_id if moved else None,
+            },
+        }
+
 
 # ── CLI ───────────────────────────────────────────────────────────────
 
@@ -960,6 +1013,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Delete even if the folder has children",
+    )
+    sfs_m = sfs.add_parser("move", parents=[shared], help="Reorder a smart folder")
+    sfs_m.add_argument("path", help="Name, path, or id to move")
+    sfs_m.add_argument("--before", default="", help="Place immediately before this folder")
+    sfs_m.add_argument("--after", default="", help="Place immediately after this folder")
+    sfs_m.add_argument(
+        "--first",
+        action="store_true",
+        help="Move to the start of the root list",
     )
 
     return p
@@ -1123,6 +1185,15 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if result.get("ok") else 2
             if args.sf_cmd == "delete":
                 result = api.delete_smart_folder(args.path, force=bool(args.force))
+                _json_out(result, pretty=pretty)
+                return 0 if result.get("ok") else 2
+            if args.sf_cmd == "move":
+                result = api.move_smart_folder(
+                    args.path,
+                    before=args.before or None,
+                    after=args.after or None,
+                    first=bool(args.first),
+                )
                 _json_out(result, pretty=pretty)
                 return 0 if result.get("ok") else 2
 

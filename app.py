@@ -294,6 +294,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._delete_undo_stack: list[list[str]] = []
         self._sf_menu: Gtk.Popover | None = None
         self._sf_editor = None
+        self._sf_drop_row: Gtk.ListBoxRow | None = None
         # Inbox signal: watcher writes this after each new import
         self._inbox_signal_path = self.library.root / INBOX_SIGNAL_FILENAME
         self._inbox_signal_ts = 0.0
@@ -361,6 +362,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.folder_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.folder_list.add_css_class("navigation-sidebar")
         self.folder_list.connect("row-selected", self._on_sidebar_selected)
+        self._install_sidebar_dnd_css()
         sidebar_click = Gtk.GestureClick()
         sidebar_click.set_button(1)
         sidebar_click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
@@ -643,6 +645,26 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
         return wrap
+
+    def _install_sidebar_dnd_css(self) -> None:
+        css = Gtk.CssProvider()
+        css.load_from_data(
+            b"""
+            row.drop-before {
+                box-shadow: inset 0 2px 0 @accent_bg_color;
+            }
+            row.drop-after {
+                box-shadow: inset 0 -2px 0 @accent_bg_color;
+            }
+            """
+        )
+        display = Gdk.Display.get_default()
+        if display is not None:
+            Gtk.StyleContext.add_provider_for_display(
+                display,
+                css,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
 
     def _build_inspector(self) -> Gtk.Widget:
         """Right sidebar: preview + rating + tags + folders for selection."""
@@ -1130,7 +1152,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
             click.connect("pressed", on_header_right)
             row.add_controller(click)
-            row.set_tooltip_text("Right-click · new smart folder")
+            row.set_tooltip_text("Right-click · new smart folder · drop here to move to top")
+            self._attach_smart_drop_target(row, dest_id=None, first=True)
         return row
 
     def _toggle_section(self, section_id: str) -> None:
@@ -1231,7 +1254,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         if kind == "smart" and smart_folder_id:
             row.set_tooltip_text(
-                f"{label}\nRight-click · edit / new child / delete · e edits"
+                f"{label}\nDrag to reorder · right-click · e edits · Shift+↑↓"
             )
             sf_click = Gtk.GestureClick()
             sf_click.set_button(3)
@@ -1247,9 +1270,148 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
             sf_click.connect("pressed", on_sf_right)
             row.add_controller(sf_click)
+            self._attach_smart_drag_source(row, smart_folder_id)
+            self._attach_smart_drop_target(row, dest_id=smart_folder_id)
 
         row.set_child(box)
         return row
+
+    def _attach_smart_drag_source(self, row: Gtk.ListBoxRow, smart_id: str) -> None:
+        source = Gtk.DragSource()
+        source.set_actions(Gdk.DragAction.MOVE)
+
+        def prepare(_src: Gtk.DragSource, _x: float, _y: float) -> Gdk.ContentProvider:
+            return Gdk.ContentProvider.new_for_value(
+                GObject.Value(GObject.TYPE_STRING, smart_id)
+            )
+
+        def on_end(_src: Gtk.DragSource, _drag: Gdk.Drag, _delete: bool) -> None:
+            self._set_sf_drop_hint(None, None)
+
+        source.connect("prepare", prepare)
+        source.connect("drag-end", on_end)
+        row.add_controller(source)
+
+    def _attach_smart_drop_target(
+        self,
+        row: Gtk.ListBoxRow,
+        *,
+        dest_id: str | None,
+        first: bool = False,
+    ) -> None:
+        target = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE)
+
+        def place_for_y(y: float) -> str:
+            if first:
+                return "first"
+            h = row.get_height() or 1
+            return "before" if y < h / 2 else "after"
+
+        def on_motion(_t: Gtk.DropTarget, _x: float, y: float) -> Gdk.DragAction:
+            self._set_sf_drop_hint(row, place_for_y(y))
+            return Gdk.DragAction.MOVE
+
+        def on_leave(_t: Gtk.DropTarget) -> None:
+            self._set_sf_drop_hint(None, None)
+
+        def on_drop(_t: Gtk.DropTarget, value: object, _x: float, y: float) -> bool:
+            src_id = str(value or "")
+            self._set_sf_drop_hint(None, None)
+            if not src_id:
+                return False
+            if first:
+                self._move_smart_folder(src_id, None, "first")
+                return True
+            if not dest_id or src_id == dest_id:
+                return False
+            self._move_smart_folder(src_id, dest_id, place_for_y(y))
+            return True
+
+        target.connect("motion", on_motion)
+        target.connect("leave", on_leave)
+        target.connect("drop", on_drop)
+        row.add_controller(target)
+
+    def _set_sf_drop_hint(
+        self, row: Gtk.ListBoxRow | None, place: str | None
+    ) -> None:
+        prev = self._sf_drop_row
+        if prev is not None and prev is not row:
+            prev.remove_css_class("drop-before")
+            prev.remove_css_class("drop-after")
+        if row is None or place is None:
+            if prev is not None:
+                prev.remove_css_class("drop-before")
+                prev.remove_css_class("drop-after")
+            self._sf_drop_row = None
+            return
+        row.remove_css_class("drop-before")
+        row.remove_css_class("drop-after")
+        if place == "after":
+            row.add_css_class("drop-after")
+        else:
+            # first / before share the top-edge marker
+            row.add_css_class("drop-before")
+        self._sf_drop_row = row
+
+    def _smart_siblings(self, smart_id: str) -> list[str]:
+        sf = self.library.smart_folders_by_id.get(smart_id)
+        if sf is None:
+            return []
+        if sf.parent_id:
+            parent = self.library.smart_folders_by_id.get(sf.parent_id)
+            kids = parent.children if parent else []
+        else:
+            kids = self.library.smart_folders
+        return [c.id for c in kids]
+
+    def _nudge_smart_folder(self, smart_id: str, delta: int) -> None:
+        siblings = self._smart_siblings(smart_id)
+        try:
+            idx = siblings.index(smart_id)
+        except ValueError:
+            return
+        dest_idx = idx + delta
+        if dest_idx < 0 or dest_idx >= len(siblings):
+            return
+        dest = siblings[dest_idx]
+        place = "before" if delta < 0 else "after"
+        self._move_smart_folder(smart_id, dest, place)
+
+    def _move_smart_folder(
+        self, src_id: str, dest_id: str | None, place: str
+    ) -> None:
+        from write import WriteError, move_smart_folder_node, write_session
+
+        before = self.library.smart_folders_by_id.get(src_id)
+        old_parent = before.parent_id if before else None
+        try:
+            with write_session(self.library.root):
+                move_smart_folder_node(
+                    self.library.root,
+                    src_id,
+                    target_id=dest_id,
+                    place=place,
+                )
+            self.library.reload_metadata_trees()
+        except WriteError as exc:
+            self._toast(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._toast(str(exc))
+            return
+        after = self.library.smart_folders_by_id.get(src_id)
+        new_parent = after.parent_id if after else None
+        if old_parent != new_parent:
+            self._smart_counts.clear()
+        if src_id in self.library.smart_folders_by_id:
+            self.current_smart_folder_id = src_id
+            self.current_folder_id = None
+            self._special_view = None
+            self._ensure_smart_expanded_path(src_id)
+        self._populate_sidebar(select_current=True)
+        if old_parent != new_parent:
+            self.refresh_items()
 
     def _smart_ancestors(self, smart_id: str) -> list[str]:
         """Parent chain from root → immediate parent (not including smart_id)."""
@@ -4956,6 +5118,30 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 sid = getattr(row, "smart_folder_id", None) if row else None
                 if sid:
                     self.open_smart_folder_editor(sid)
+                    return True
+            shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+            if (
+                shift
+                and not ctrl
+                and not alt
+                and not super_mod
+                and keyval
+                in (
+                    Gdk.KEY_Up,
+                    Gdk.KEY_Down,
+                    Gdk.KEY_KP_Up,
+                    Gdk.KEY_KP_Down,
+                )
+            ):
+                row = self.folder_list.get_selected_row()
+                sid = getattr(row, "smart_folder_id", None) if row else None
+                if sid:
+                    delta = (
+                        -1
+                        if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up)
+                        else 1
+                    )
+                    self._nudge_smart_folder(sid, delta)
                     return True
             if (
                 keyval in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete, Gdk.KEY_BackSpace)

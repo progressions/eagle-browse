@@ -472,6 +472,28 @@ def _smart_descendant_ids(node: dict[str, Any]) -> set[str]:
     return ids
 
 
+def _smart_parent_id(roots: list[Any], folder_id: str) -> str | None | object:
+    """Parent id of *folder_id*, or None if it is a root. ``False`` if missing."""
+
+    def walk(nodes: list[Any], pid: str | None) -> tuple[bool, str | None]:
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            if n.get("id") == folder_id:
+                return True, pid
+            ch = n.get("children")
+            if isinstance(ch, list):
+                found, got = walk(ch, str(n.get("id") or "") or None)
+                if found:
+                    return True, got
+        return False, None
+
+    found, pid = walk(roots, None)
+    if not found:
+        return False
+    return pid
+
+
 def _count_smart_subtree(node: dict[str, Any]) -> int:
     n = 1
     for child in node.get("children") or []:
@@ -519,23 +541,9 @@ def update_smart_folder_node(
 
     if parent_id is not ...:
         new_parent: str | None = parent_id or None
-
-        def find_parent(
-            nodes: list[Any], pid: str | None
-        ) -> tuple[bool, str | None]:
-            for n in nodes:
-                if not isinstance(n, dict):
-                    continue
-                if n.get("id") == folder_id:
-                    return True, pid
-                ch = n.get("children")
-                if isinstance(ch, list):
-                    found, got = find_parent(ch, str(n.get("id") or "") or None)
-                    if found:
-                        return True, got
-            return False, None
-
-        _ok, current_parent = find_parent(roots, None)
+        current_parent = _smart_parent_id(roots, folder_id)
+        if current_parent is False:
+            raise WriteError(f"Smart folder not found: {folder_id}")
         if current_parent != new_parent:
             if new_parent == folder_id or (
                 new_parent and new_parent in _smart_descendant_ids(node)
@@ -585,6 +593,73 @@ def delete_smart_folder_node(
     removed = parent_list.pop(idx)
     save_library_metadata(library_root, meta)
     return removed
+
+
+def move_smart_folder_node(
+    library_root: Path,
+    folder_id: str,
+    *,
+    target_id: str | None = None,
+    place: str = "after",
+) -> dict[str, Any]:
+    """
+    Move a smart folder next to *target_id*.
+
+    *place*:
+      - ``before`` / ``after`` — sibling of *target_id* (reparents if needed)
+      - ``first`` — first among root smart folders (*target_id* ignored)
+    """
+    if not folder_id:
+        raise WriteError("Smart folder id is required")
+    place = (place or "after").lower()
+    if place not in ("before", "after", "first"):
+        raise WriteError(f"Unknown move place: {place}")
+
+    meta = load_library_metadata(library_root)
+    roots = _smart_folder_roots(meta)
+    src = _find_smart_in_tree(roots, folder_id)
+    if src is None:
+        raise WriteError(f"Smart folder not found: {folder_id}")
+    src_node, src_list, src_idx = src
+
+    if place == "first":
+        if src_list is roots and src_idx == 0:
+            return src_node
+        moved = src_list.pop(src_idx)
+        roots.insert(0, moved)
+        moved.pop("parent", None)
+        moved["modificationTime"] = _now_ms()
+        save_library_metadata(library_root, meta)
+        return moved
+
+    if not target_id:
+        raise WriteError("target_id is required unless place=first")
+    if target_id == folder_id:
+        return src_node
+    if target_id in _smart_descendant_ids(src_node):
+        raise WriteError("Cannot move a smart folder under itself")
+
+    tgt = _find_smart_in_tree(roots, target_id)
+    if tgt is None:
+        raise WriteError(f"Target smart folder not found: {target_id}")
+    _tgt_node, tgt_list, tgt_idx = tgt
+    new_parent = _smart_parent_id(roots, target_id)
+    if new_parent is False:
+        raise WriteError(f"Target smart folder not found: {target_id}")
+
+    same_list = src_list is tgt_list
+    moved = src_list.pop(src_idx)
+    if same_list and src_idx < tgt_idx:
+        tgt_idx -= 1
+    insert_at = tgt_idx if place == "before" else tgt_idx + 1
+    tgt_list.insert(insert_at, moved)
+    if new_parent:
+        moved["parent"] = new_parent
+    else:
+        moved.pop("parent", None)
+    moved["modificationTime"] = _now_ms()
+    save_library_metadata(library_root, meta)
+    return moved
 
 
 def set_folder_auto_tags(
