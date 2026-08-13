@@ -268,13 +268,13 @@ not rely on the GUI for auto-import.
 | `y` | **Copy Eagle id(s)** (newline-separated if multi-selected) — agent-CLI safe |
 | `Y` / Shift+Y / `c` | **Copy path(s)** (absolute filesystem path) |
 | `Ctrl+Y` | Copy selection as `file://` URIs |
-| `s` | **Stage** marked files → outbox folder (copy; library stays read-only) |
+| `s` | **Stage** marked files → outbox folder (copy; library stays read-only) and open the folder |
 | `Esc` | Clear marks (then clear search) |
 
 ### Multi-file handoff (Lightroom / other apps)
 
 1. Browse smart folder, **`Space`** to mark several images  
-2. **`y`** — paste Eagle ids for an agent, **`Y`** / **`c`** — paste paths into a tool, **or** **`s`** — copy files to staging  
+2. **`y`** — paste Eagle ids for an agent, **`Y`** / **`c`** — paste paths into a tool, **or** **`s`** — copy files to staging and open the folder  
 3. Default stage dir: `~/Dropbox/ISAAC/GENNIE/Eunbi/outbox`  
    Override: `EAGLE_STAGE_DIR=/path/to/folder eagle-browse`  
 4. On another machine, import that Dropbox folder into Lightroom (or watch it)

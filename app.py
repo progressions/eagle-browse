@@ -3527,8 +3527,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         GLib.timeout_add(200, arm_outside)
         win.present()
 
+    def _open_folder(self, folder: Path) -> bool:
+        """Open a directory in the file manager. Returns True if a process started."""
+        commands = [
+            ["nautilus", str(folder)],
+            ["xdg-open", str(folder)],
+        ]
+        for cmd in commands:
+            try:
+                subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                return True
+            except FileNotFoundError:
+                continue
+        return False
+
     def stage_marked(self) -> None:
-        """Copy marked (or focused) files into the stage/outbox directory."""
+        """Copy marked (or focused) files into the stage/outbox directory and open it."""
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing to stage — mark with Space, or select one")
@@ -3566,6 +3582,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 msg = f"Staged {ok} → {stage}"
                 if errors:
                     msg += f" · {errors} failed"
+                if ok and not self._open_folder(stage):
+                    msg += " · could not open folder"
                 self._toast(msg)
                 return False
 
