@@ -295,6 +295,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._sf_menu: Gtk.Popover | None = None
         self._sf_editor = None
         self._sf_drop_row: Gtk.ListBoxRow | None = None
+        self._frame_saving = False
         # Inbox signal: watcher writes this after each new import
         self._inbox_signal_path = self.library.root / INBOX_SIGNAL_FILENAME
         self._inbox_signal_ts = 0.0
@@ -489,6 +490,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.viewer_hint.add_css_class("dim-label")
         self.viewer_hint.add_css_class("caption")
         vbar.append(self.viewer_hint)
+        self.viewer_save_frame_btn = Gtk.Button(label="Save frame")
+        self.viewer_save_frame_btn.add_css_class("flat")
+        self.viewer_save_frame_btn.set_tooltip_text(
+            "Save the current video frame as a new still (p)"
+        )
+        self.viewer_save_frame_btn.set_visible(False)
+        self.viewer_save_frame_btn.connect(
+            "clicked", lambda *_: self.save_viewer_frame()
+        )
+        vbar.append(self.viewer_save_frame_btn)
         close_btn = Gtk.Button(label="Close")
         close_btn.add_css_class("flat")
         close_btn.connect("clicked", lambda *_: self.close_inline_viewer())
@@ -625,7 +636,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints = Gtk.Label(
             label=(
                 "Enter open (image/video) · Esc close viewer · Space play/pause · "
-                "t tags · f folders · Ctrl+A all · Del · Ctrl+Z · Super+W"
+                "p save frame · t tags · f folders · Ctrl+A all · Del · Ctrl+Z · Super+W"
             ),
             xalign=0,
         )
@@ -4785,6 +4796,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.viewer_picture.set_paintable(paintable)
         self.viewer_title.set_text(item.display_name)
         self.viewer_hint.set_text("←→ · Esc close · +/- zoom")
+        self.viewer_save_frame_btn.set_visible(False)
         self._viewer_item_id = item.id
         self._viewer_open = True
         self._viewer_mode = "image"
@@ -4817,7 +4829,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
 
         self.viewer_title.set_text(item.display_name)
-        self.viewer_hint.set_text("Space play/pause · ←→ next · Esc close")
+        self.viewer_hint.set_text("Space play/pause · p save frame · ←→ next · Esc close")
+        self.viewer_save_frame_btn.set_visible(True)
         self._viewer_item_id = item.id
         self._viewer_open = True
         self._viewer_mode = "video"
@@ -4835,6 +4848,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._viewer_open = False
         self._viewer_item_id = None
         self._viewer_mode = "image"
+        self.viewer_save_frame_btn.set_visible(False)
         self._stop_inline_video()
         self.viewer_picture.set_paintable(None)
         self.center_stack.set_visible_child_name("grid")
@@ -4858,6 +4872,71 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if stream is None:
             return
         stream.set_playing(not stream.get_playing())
+
+    def save_viewer_frame(self) -> None:
+        """Grab the current video frame as a new untagged still in the library."""
+        from import_media import save_video_frame_as_item
+        from write import WriteError
+
+        if not self.is_viewer_open() or self._viewer_mode != "video":
+            self._toast("Open a video first")
+            return
+        if self._frame_saving:
+            return
+        item = None
+        if self._viewer_item_id:
+            item = self.library.items_by_id.get(self._viewer_item_id)
+        item = item or self.selected_item
+        if item is None or not item.is_video:
+            self._toast("No video to grab from")
+            return
+        stream = self.viewer_video.get_media_stream()
+        if stream is None:
+            self._toast("Video is not ready")
+            return
+        try:
+            stream.set_playing(False)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            ts_us = int(stream.get_timestamp())
+        except Exception as exc:  # noqa: BLE001
+            self._toast(f"Could not read time: {exc}")
+            return
+        seconds = max(0.0, ts_us / 1_000_000.0)
+        self._frame_saving = True
+        self.viewer_save_frame_btn.set_sensitive(False)
+        self._toast(f"Saving frame · {seconds:.2f}s…")
+
+        def work() -> None:
+            try:
+                new_item = save_video_frame_as_item(
+                    self.library.root, item, seconds
+                )
+                err = None
+            except WriteError as exc:
+                new_item = None
+                err = exc
+            except Exception as exc:  # noqa: BLE001
+                new_item = None
+                err = exc
+
+            def apply() -> bool:
+                self._frame_saving = False
+                self.viewer_save_frame_btn.set_sensitive(True)
+                if err is not None or new_item is None:
+                    self._toast(f"Save frame failed: {err}")
+                    return False
+                self.library.upsert_item(new_item)
+                self._toast(
+                    f"Saved frame · {seconds:.2f}s · {new_item.width}×{new_item.height} · "
+                    "untagged / uncategorized"
+                )
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(target=work, name="eagle-save-frame", daemon=True).start()
 
     def viewer_navigate(self, delta: int) -> None:
         """Prev/next image or video in current view while inline viewer is open."""
@@ -5242,6 +5321,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.viewer_toggle_play()
                 return True
             self.toggle_mark_selected()
+            return True
+        if (
+            not in_sidebar
+            and not in_search
+            and not ctrl
+            and not alt
+            and not super_mod
+            and keyval in (Gdk.KEY_p, Gdk.KEY_P)
+            and self.is_viewer_open()
+            and self._viewer_mode == "video"
+        ):
+            self.save_viewer_frame()
             return True
         # Ctrl+A — select all assets in the current view
         if (

@@ -531,6 +531,160 @@ def _video_meta(path: Path) -> tuple[int, int, float]:
         return 0, 0, 0.0
 
 
+def extract_video_frame(src: Path, dest: Path, seconds: float) -> None:
+    """Write one PNG frame from *src* at *seconds* via ffmpeg.
+
+    ``-ss`` after ``-i`` is a decode seek: slower, closer to the requested time
+    than a keyframe-only input seek.
+    """
+    seconds = max(0.0, float(seconds))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.check_call(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(src),
+                "-ss",
+                f"{seconds:.3f}",
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+                str(dest),
+            ],
+            timeout=120,
+        )
+    except FileNotFoundError as exc:
+        raise WriteError("ffmpeg is not installed") from exc
+    except subprocess.CalledProcessError as exc:
+        raise WriteError(f"ffmpeg could not extract a frame at {seconds:.3f}s") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise WriteError("ffmpeg timed out extracting the frame") from exc
+    if not dest.is_file() or dest.stat().st_size <= 0:
+        raise WriteError("ffmpeg produced no frame")
+
+
+def _frame_item_name(stem: str, seconds: float) -> str:
+    stem = (stem or "frame").replace("/", "-").replace("\\", "-").strip() or "frame"
+    whole = int(max(0.0, seconds))
+    frac = int(round((max(0.0, seconds) - whole) * 100))
+    if frac >= 100:
+        whole += 1
+        frac = 0
+    minutes, secs = divmod(whole, 60)
+    return f"{stem}-frame-{minutes}m{secs:02d}.{frac:02d}s"
+
+
+def save_video_frame_as_item(
+    library_root: Path,
+    item: Any,
+    seconds: float,
+) -> Any:
+    """
+    Extract one frame from a video item and store it as a new still.
+
+    New item has no tags and no folders (same as crop Save as). Source video
+    is unchanged. Returns a ``library.Item``.
+    """
+    from library import Item
+
+    src = Path(getattr(item, "path", "") or "")
+    if not src.is_file():
+        raise WriteError(f"Video file missing: {src}")
+    seconds = max(0.0, float(seconds))
+    name = _frame_item_name(str(getattr(item, "name", None) or src.stem), seconds)
+    ext = "png"
+
+    with write_session(library_root):
+        images_dir = Path(library_root) / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        iid, item_dir = _unique_item_dir(images_dir)
+        try:
+            item_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise WriteError(f"Item dir already exists: {item_dir}") from exc
+
+        dest_media = item_dir / f"{name}.{ext}"
+        try:
+            extract_video_frame(src, dest_media, seconds)
+        except Exception:
+            try:
+                if dest_media.is_file():
+                    dest_media.unlink()
+                item_dir.rmdir()
+            except OSError:
+                pass
+            raise
+
+        width, height = _image_size(dest_media)
+        new_size = dest_media.stat().st_size
+        thumb_path = item_dir / f"{name}_thumbnail.png"
+        thumb_ok = _make_image_thumbnail(dest_media, thumb_path)
+        now = _now_ms()
+        meta: dict[str, Any] = {
+            "id": iid,
+            "name": name,
+            "size": new_size,
+            "btime": now,
+            "mtime": now,
+            "ext": ext,
+            "tags": [],
+            "folders": [],
+            "isDeleted": False,
+            "url": "",
+            "annotation": "",
+            "modificationTime": now,
+            "width": width,
+            "height": height,
+            "lastModified": now,
+            "palettes": [],
+        }
+        atomic_write_json(item_dir / "metadata.json", meta)
+
+        mtime_path = Path(library_root) / "mtime.json"
+        if mtime_path.is_file():
+            try:
+                with mtime_path.open("r", encoding="utf-8") as f:
+                    mt = json.load(f)
+                if isinstance(mt, dict):
+                    mt[iid] = now
+                    backup_file(library_root, mtime_path)
+                    atomic_write_json(mtime_path, mt)
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        announce_imported_ids(library_root, [iid])
+
+    return Item(
+        id=iid,
+        name=name,
+        ext=ext,
+        tags=[],
+        folders=[],
+        path=dest_media.resolve(),
+        thumb=thumb_path.resolve() if thumb_ok else None,
+        is_deleted=False,
+        size=new_size,
+        width=width,
+        height=height,
+        annotation="",
+        modification_time=now,
+        btime=now,
+        star=None,
+        duration=None,
+        item_dir=item_dir.resolve(),
+        tag_set=frozenset(),
+        folder_set=frozenset(),
+        name_lower=name.lower(),
+        ext_lower=ext.lower(),
+    )
+
+
 def _make_video_thumbnail(src: Path, dest: Path) -> bool:
     try:
         subprocess.check_call(
