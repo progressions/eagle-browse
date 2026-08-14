@@ -97,7 +97,9 @@ class SmartFolderEditor(Gtk.Window):
         else:
             self._spec = empty_spec(parent_id=default_parent_id)
 
-        if hasattr(parent, "_picker_blocking"):
+        if hasattr(parent, "_remember_dialog"):
+            parent._remember_dialog(self)  # type: ignore[attr-defined]
+        elif hasattr(parent, "_picker_blocking"):
             parent._picker_blocking = True  # type: ignore[attr-defined]
 
         self._build_ui()
@@ -723,6 +725,8 @@ class SmartFolderEditor(Gtk.Window):
         if self._count_timeout:
             GLib.source_remove(self._count_timeout)
             self._count_timeout = 0
+        if getattr(self._parent_win, "_open_dialog", None) is self:
+            self._parent_win._open_dialog = None  # type: ignore[attr-defined]
         if hasattr(self._parent_win, "_picker_blocking"):
             self._parent_win._picker_blocking = False  # type: ignore[attr-defined]
         if self._on_closed:

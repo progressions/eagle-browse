@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-
-DEFAULT_LIBRARY = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi.library"
+from config import DEFAULT_LIBRARY, inbox_path, library_path  # noqa: F401
 
 VIDEO_EXTS = frozenset({"mp4", "mov", "webm", "mkv", "m4v", "avi", "wmv", "flv"})
 AUDIO_EXTS = frozenset({"mp3", "wav", "flac", "aac", "m4a", "ogg", "wma", "aiff", "aif"})
@@ -453,8 +453,17 @@ class EagleLibrary:
                 items.append(item)
                 items_by_id[item.id] = item
 
-        # Default in-memory order: added-to-library (btime), not modificationTime
-        items.sort(key=lambda i: i.btime or i.modification_time, reverse=True)
+        # Default in-memory order: added-to-library (btime), not modificationTime.
+        # File-birth values in the future (clock skew) must not sort above now.
+        now_ms = int(time.time() * 1000)
+
+        def added_key(i: Item) -> int:
+            t = int(i.btime or 0)
+            if t <= 0 or t > now_ms + 60_000:
+                t = int(i.modification_time or 0)
+            return t
+
+        items.sort(key=added_key, reverse=True)
         with self._lock:
             self.items = items
             self.items_by_id = items_by_id
@@ -980,12 +989,12 @@ class EagleLibrary:
         move_source: bool = True,
     ) -> list:
         """Import all media from inbox into this library; reload new items into memory."""
-        from import_media import DEFAULT_INBOX, import_inbox as _import_inbox
+        from import_media import import_inbox as _import_inbox
 
-        inbox_path = Path(inbox or os.environ.get("EAGLE_INBOX", DEFAULT_INBOX)).expanduser()
+        dest = Path(inbox).expanduser() if inbox else inbox_path()
         results = _import_inbox(
             self.root,
-            inbox_path,
+            dest,
             folder_ids=folder_ids,
             tags=tags,
             move_source=move_source,

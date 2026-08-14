@@ -107,8 +107,13 @@ class TogglePicker(Gtk.Window):
         self._closing = False
         self._outside_click: Gtk.GestureClick | None = None
 
-        # Tell parent to ignore global hotkeys while open
-        if hasattr(parent, "_picker_blocking"):
+        # Tell parent to ignore global hotkeys while open.
+        # Also register so Esc on the parent window closes us — Hyprland
+        # often leaves keyboard focus on the main window for non-modal
+        # transients, so our own key controller never sees Escape.
+        if hasattr(parent, "_remember_dialog"):
+            parent._remember_dialog(self)  # type: ignore[attr-defined]
+        elif hasattr(parent, "_picker_blocking"):
             parent._picker_blocking = True  # type: ignore[attr-defined]
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -204,8 +209,12 @@ class TogglePicker(Gtk.Window):
         self._outside_click = None
 
     def _on_close_request(self, *_args) -> bool:
+        if self._closing:
+            return True
         self._closing = True
         self._remove_outside_click()
+        if getattr(self._parent, "_open_dialog", None) is self:
+            self._parent._open_dialog = None  # type: ignore[attr-defined]
         if hasattr(self._parent, "_picker_blocking"):
             self._parent._picker_blocking = False  # type: ignore[attr-defined]
         if self._on_close_cb:

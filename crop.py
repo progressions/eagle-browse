@@ -23,7 +23,16 @@ gi.require_version("GdkPixbuf", "2.0")
 
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
 
+from pixbuf_io import pixbuf_from_path
 from write import WriteError, backup_file, load_item_metadata, save_item_metadata, write_session
+
+
+def _load_pixbuf(path: Path | str) -> GdkPixbuf.Pixbuf:
+    """Load *path* from bytes. GdkPixbuf's filename cache is stale after overwrite."""
+    pb = pixbuf_from_path(path)
+    if pb is None:
+        raise WriteError(f"Cannot load image: {path}")
+    return pb
 
 # (id, label, aspect_w, aspect_h) — aspect None means free
 ASPECT_PRESETS: list[tuple[str, str, int | None, int | None]] = [
@@ -527,9 +536,9 @@ def _clamp_rect_for_item(item: Any, path: Path, rect: CropRect) -> CropRect:
         raise WriteError("Crop region too small")
     # Prefer actual pixel bounds when readable
     try:
-        pb = GdkPixbuf.Pixbuf.new_from_file(str(path))
+        pb = _load_pixbuf(path)
         rect = rect.clamp_to(int(pb.get_width()), int(pb.get_height()))
-    except Exception:
+    except WriteError:
         pass
     return rect
 
@@ -557,8 +566,11 @@ def _write_crop_pixels(
     Returns actual written (width, height).
     """
     cropped_ok = False
+    cropped: GdkPixbuf.Pixbuf | None = None
     try:
-        pb = GdkPixbuf.Pixbuf.new_from_file(str(src))
+        pb = pixbuf_from_path(src)
+        if pb is None:
+            raise RuntimeError(f"Could not decode {src}")
         full_w, full_h = int(pb.get_width()), int(pb.get_height())
         rect = rect.clamp_to(full_w, full_h)
         sub = pb.new_subpixbuf(rect.x, rect.y, rect.w, rect.h)
@@ -577,12 +589,14 @@ def _write_crop_pixels(
 
     if not cropped_ok:
         _crop_with_imagemagick(src, dest, rect.x, rect.y, rect.w, rect.h)
-
-    try:
-        out_pb = GdkPixbuf.Pixbuf.new_from_file(str(dest))
-        return int(out_pb.get_width()), int(out_pb.get_height())
-    except Exception:
+        out_pb = pixbuf_from_path(dest)
+        if out_pb is not None:
+            return int(out_pb.get_width()), int(out_pb.get_height())
         return rect.w, rect.h
+
+    if cropped is not None:
+        return int(cropped.get_width()), int(cropped.get_height())
+    return rect.w, rect.h
 
 
 def apply_crop_to_item(
@@ -776,10 +790,7 @@ class CropWindow(Gtk.Window):
         self._closing = False
 
         path = Path(item.path)
-        try:
-            self._pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(path))
-        except Exception as exc:
-            raise WriteError(f"Cannot load image: {exc}") from exc
+        self._pixbuf = _load_pixbuf(path)
 
         self._img_w = int(self._pixbuf.get_width())
         self._img_h = int(self._pixbuf.get_height())
@@ -1276,12 +1287,12 @@ class CropWindow(Gtk.Window):
         if self._closing:
             return
         self._closing = True
+        self.destroy()
         if self._on_close:
             try:
                 self._on_close()
             except Exception:  # noqa: BLE001
                 pass
-        self.destroy()
 
 
 def open_crop_dialog(

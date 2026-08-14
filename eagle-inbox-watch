@@ -11,7 +11,7 @@ DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 ROOT="$DIR"
 LAUNCHER="$ROOT/$(basename "$SOURCE")"
 export EAGLE_LIBRARY="${EAGLE_LIBRARY:-$HOME/Dropbox/ISAAC/GENNIE/Eunbi.library}"
-export EAGLE_INBOX="${EAGLE_INBOX:-$HOME/Dropbox/ISAAC/GENNIE/Eunbi/PICS/Eunbi}"
+# Inbox path comes from eagle-browse.toml (or EAGLE_INBOX if already set).
 
 # shellcheck source=self_update.sh
 source "$ROOT/self_update.sh"

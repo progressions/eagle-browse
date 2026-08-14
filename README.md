@@ -102,7 +102,9 @@ Footer actions:
 | **Save as** | `Shift+Enter` | New library item with the crop — **no tags, no folders** (same as a fresh import) |
 | **Save** | `Enter` | Overwrite the original media in place (backup under `backup/eagle-browse-writes/`), update `width`/`height`/`size`, regenerate thumbnail |
 
-Videos/audio are not croppable.
+**Audio:** `x` on an audio file opens a start–end crop. Drag the handles (or type
+seconds) to keep a segment. **Play selection** previews it. Same footer:
+Cancel / Save as / Save. ffmpeg does the cut.
 
 ### Inspector (right sidebar)
 
@@ -184,9 +186,16 @@ Eagle Browse can **write** item metadata, crop media, and edit smart folders:
 
 ### Inbox import (consume new media)
 
-Default inbox:
+Inbox path comes from a TOML config, not from code:
 
-`~/Dropbox/ISAAC/GENNIE/Eunbi/PICS/Eunbi`
+| File | Role |
+|------|------|
+| `<vault>/eagle-browse.toml` | Shared (Dropbox). `inbox = "intake"` |
+| `~/.config/eagle-browse/config.toml` | Optional per-machine overlay |
+| `$EAGLE_BROWSE_CONFIG` | Explicit file |
+| `$EAGLE_INBOX` | Overrides the inbox path |
+
+See `config.toml.example`. Relative paths are resolved from the file that set them.
 
 **Only one process should auto-consume the inbox** — the headless
 `eagle-inbox-watch` on a single machine (see below). The GUI does **not**
@@ -201,11 +210,15 @@ once is safe; none of them will race the intake folder.
 
 Import steps (watcher or manual `i`):
 
-1. Content-hash (MD5) check against the library — exact duplicates: watcher uses `--dup` policy; GUI opens a review dialog
-2. Copies new items into `Eunbi.library/images/<ID>.info/`
-3. Writes Eagle `metadata.json` + thumbnail (ffmpeg for video)
-4. Leaves new items untagged / uncategorized (unless folder auto-tags apply when you file them)
-5. Deletes the inbox file after import or “use existing”
+1. Unpack any complete ``.zip`` in the inbox: media files are flattened into the
+   inbox root, then the zip and the extract folder are deleted. Incomplete
+   downloads wait. Subfolders inside the zip are not kept — Eagle only scans
+   the inbox root.
+2. Content-hash (MD5) check against the library — exact duplicates: watcher uses `--dup` policy; GUI opens a review dialog
+3. Copies new items into `Eunbi.library/images/<ID>.info/`
+4. Writes Eagle `metadata.json` + thumbnail (ffmpeg for video)
+5. Leaves new items untagged / uncategorized (unless folder auto-tags apply when you file them)
+6. Deletes the inbox file after import or “use existing”
 
 ### Duplicate import review
 

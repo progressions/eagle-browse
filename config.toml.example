@@ -1,0 +1,8 @@
+# Copy to the vault root (next to Eunbi.library) as eagle-browse.toml,
+# or to ~/.config/eagle-browse/config.toml for a per-machine overlay.
+#
+# Relative paths are resolved from this file's directory.
+# Env overrides: EAGLE_INBOX, EAGLE_LIBRARY, EAGLE_BROWSE_CONFIG
+
+inbox = "intake"
+library = "Eunbi.library"

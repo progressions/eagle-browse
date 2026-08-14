@@ -9,10 +9,12 @@ import secrets
 import shutil
 import subprocess
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from config import DEFAULT_INBOX  # noqa: F401
 from write import (
     WriteError,
     announce_imported_ids,
@@ -22,9 +24,6 @@ from write import (
     save_item_metadata,
     write_session,
 )
-
-# Default: user's Dropbox Eunbi inbox (watch/import only — no auto folder/tags)
-DEFAULT_INBOX = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/PICS/Eunbi"
 # Imports go in uncategorized / untagged unless the caller passes folders/tags.
 DEFAULT_FOLDER_ID: str | None = None
 DEFAULT_TAGS: list[str] = []
@@ -34,6 +33,8 @@ ID_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".m4v", ".avi"}
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".aiff", ".aif"}
+MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS | AUDIO_EXTS
+ZIP_EXTS = {".zip"}
 SKIP_NAMES = {".ds_store", "thumbs.db", "desktop.ini"}
 
 # Incomplete Dropbox / progressive writes often leave a tiny ftyp-only stub
@@ -314,7 +315,7 @@ def is_importable(path: Path) -> bool:
         return False
     if path.name.lower() in SKIP_NAMES:
         return False
-    if path.suffix.lower() not in IMAGE_EXTS | VIDEO_EXTS | AUDIO_EXTS:
+    if path.suffix.lower() not in MEDIA_EXTS:
         return False
     # Ignore incomplete downloads
     if path.suffix.lower() in {".crdownload", ".part", ".tmp"}:
@@ -419,6 +420,138 @@ def list_inbox_files(inbox: Path) -> list[Path]:
     return files
 
 
+def list_inbox_zips(inbox: Path) -> list[Path]:
+    if not inbox.is_dir():
+        return []
+    zips = [
+        p
+        for p in inbox.iterdir()
+        if p.is_file()
+        and not p.name.startswith(".")
+        and p.suffix.lower() in ZIP_EXTS
+    ]
+    zips.sort(key=lambda p: p.stat().st_mtime)
+    return zips
+
+
+def check_zip_complete(path: Path) -> tuple[bool, str]:
+    """True if *path* is a readable, non-empty zip (Dropbox finished writing)."""
+    try:
+        if path.stat().st_size < 22:
+            return False, "zip too small — still downloading?"
+    except OSError as exc:
+        return False, f"zip unreadable ({exc})"
+    try:
+        with zipfile.ZipFile(path) as zf:
+            if zf.testzip() is not None:
+                return False, "zip corrupt or incomplete"
+            if not zf.namelist():
+                return False, "zip empty"
+        return True, ""
+    except zipfile.BadZipFile:
+        return False, "zip incomplete or not a zip"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"zip unreadable ({exc})"
+
+
+def _skip_zip_member(name: str) -> bool:
+    norm = name.replace("\\", "/").lstrip("/")
+    lower = norm.lower()
+    base = Path(norm).name.lower()
+    if not norm or norm.endswith("/"):
+        return True
+    if lower.startswith("__macosx/") or "/__macosx/" in lower:
+        return True
+    if base.startswith(".") or base in SKIP_NAMES:
+        return True
+    return False
+
+
+def _safe_extract_path(root: Path, member: str) -> Path | None:
+    """Resolve a zip member under *root*, or None if it escapes (zip slip)."""
+    rel = Path(member.replace("\\", "/"))
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    dest = (root / rel).resolve()
+    try:
+        dest.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return dest
+
+
+def _unique_inbox_path(inbox: Path, name: str) -> Path:
+    dest = inbox / name
+    if not dest.exists():
+        return dest
+    stem, suf = Path(name).stem, Path(name).suffix
+    n = 2
+    while True:
+        cand = inbox / f"{stem}_{n}{suf}"
+        if not cand.exists():
+            return cand
+        n += 1
+
+
+def unpack_zip_to_inbox(zip_path: Path, inbox: Path) -> tuple[int, str | None]:
+    """
+    Extract media from *zip_path* flat into *inbox*.
+
+    Writes into a hidden ``.unzip-*`` dir, moves importable files to the inbox
+    root (unique names on collision), then deletes the zip and the extract dir.
+    Returns ``(moved_count, error_or_None)``.
+    """
+    extract_dir = inbox / f".unzip-{zip_path.stem}-{os.getpid()}"
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir, ignore_errors=True)
+    extract_dir.mkdir(parents=True, exist_ok=False)
+    moved = 0
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for info in zf.infolist():
+                if _skip_zip_member(info.filename):
+                    continue
+                dest = _safe_extract_path(extract_dir, info.filename)
+                if dest is None:
+                    continue
+                if dest.suffix.lower() not in MEDIA_EXTS:
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, dest.open("wb") as out:
+                    shutil.copyfileobj(src, out)
+
+        for p in extract_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in MEDIA_EXTS:
+                continue
+            if p.name.lower() in SKIP_NAMES or p.name.startswith("."):
+                continue
+            target = _unique_inbox_path(inbox, p.name)
+            shutil.move(str(p), str(target))
+            moved += 1
+
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        zip_path.unlink(missing_ok=True)
+        return moved, None
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        return moved, str(exc)
+
+
+def unpack_inbox_zips(inbox: Path) -> list[tuple[Path, int, str | None]]:
+    """Unpack every complete zip sitting in *inbox*. Incomplete zips are skipped."""
+    results: list[tuple[Path, int, str | None]] = []
+    for z in list_inbox_zips(inbox):
+        ok, reason = check_zip_complete(z)
+        if not ok:
+            results.append((z, 0, reason))
+            continue
+        n, err = unpack_zip_to_inbox(z, inbox)
+        results.append((z, n, err))
+    return results
+
+
 def _unique_item_dir(images_dir: Path) -> tuple[str, Path]:
     for _ in range(64):
         iid = new_eagle_id()
@@ -467,12 +600,11 @@ def _image_size(path: Path) -> tuple[int, int]:
 
 def _make_image_thumbnail(src: Path, dest: Path, max_edge: int = 400) -> bool:
     try:
-        import gi
+        from pixbuf_io import pixbuf_from_path
 
-        gi.require_version("GdkPixbuf", "2.0")
-        from gi.repository import GdkPixbuf
-
-        pb = GdkPixbuf.Pixbuf.new_from_file_at_size(str(src), max_edge, max_edge)
+        pb = pixbuf_from_path(src, max_edge, max_edge)
+        if pb is None:
+            raise RuntimeError(f"could not decode {src}")
         # Always write PNG thumb like Eagle often does
         pb.savev(str(dest), "png", [], [])
         return dest.is_file()
@@ -674,7 +806,7 @@ def save_video_frame_as_item(
         height=height,
         annotation="",
         modification_time=now,
-        btime=now,
+        btime=now,  # library add time, matches metadata.json
         star=None,
         duration=None,
         item_dir=item_dir.resolve(),
@@ -818,8 +950,10 @@ def import_file(
     # Eagle stores name without problematic path chars; keep stem
     name = name.replace("/", "-").replace("\\", "-")
     size = source.stat().st_size
-    btime, mtime = _file_times_ms(source)
+    _file_btime, file_mtime = _file_times_ms(source)
     now = _now_ms()
+    # Eagle btime = added-to-library. Using the source file's birth/mtime
+    # buried fresh imports under older (or future-dated) file timestamps.
 
     kind = "image"
     if f".{ext}" in VIDEO_EXTS:
@@ -867,8 +1001,8 @@ def import_file(
                 "id": iid,
                 "name": name,
                 "size": size,
-                "btime": btime,
-                "mtime": mtime,
+                "btime": now,
+                "mtime": file_mtime,
                 "ext": ext,
                 "tags": item_tags,
                 "folders": folder_ids,

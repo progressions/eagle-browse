@@ -33,10 +33,13 @@ if str(_ROOT) not in sys.path:
 
 from import_media import (  # noqa: E402
     DEFAULT_INBOX,
+    check_zip_complete,
     classify_inbox_files,
     import_file,
     list_inbox_files,
+    list_inbox_zips,
     reimport_existing,
+    unpack_zip_to_inbox,
 )
 from library import DEFAULT_LIBRARY, EagleLibrary  # noqa: E402
 from write import WriteError, write_session  # noqa: E402
@@ -143,6 +146,56 @@ def _stable_ready(
                     )
                     LOG.info("waiting on %s: %s", p.name, reason)
     return ready, current
+
+
+def _stable_ready_zips(
+    inbox: Path,
+    sizes: dict[str, int],
+    *,
+    wait_logged: set[str] | None = None,
+) -> tuple[list[Path], dict[str, int]]:
+    """Size-stable, readable zips ready to unpack."""
+    files = list_inbox_zips(inbox)
+    current: dict[str, int] = {}
+    ready: list[Path] = []
+    for p in files:
+        try:
+            sz = p.stat().st_size
+        except OSError:
+            continue
+        if sz <= 0:
+            continue
+        current[p.name] = sz
+        prev = sizes.get(p.name)
+        if prev is None or prev != sz:
+            continue
+        ok, reason = check_zip_complete(p)
+        if ok:
+            ready.append(p)
+            if wait_logged is not None:
+                wait_logged.discard(p.name)
+        elif wait_logged is not None:
+            key = f"{p.name}:{sz}"
+            if key not in wait_logged:
+                wait_logged.add(key)
+                wait_logged.difference_update(
+                    {k for k in list(wait_logged) if k.startswith(p.name + ":") and k != key}
+                )
+                LOG.info("waiting on %s: %s", p.name, reason)
+    return ready, current
+
+
+def process_ready_zips(inbox: Path, ready: list[Path]) -> int:
+    """Unpack ready zips into *inbox*. Returns number of media files flattened out."""
+    total = 0
+    for z in ready:
+        n, err = unpack_zip_to_inbox(z, inbox)
+        if err:
+            LOG.warning("unzip failed %s: %s", z.name, err)
+            continue
+        LOG.info("unzipped %s → %d file(s) in inbox", z.name, n)
+        total += n
+    return total
 
 
 def _queue_dup(source: Path, inbox: Path) -> Path | None:
@@ -312,9 +365,15 @@ def run_loop(
     LOG.info("library ready · %d items · inbox %s · dup=%s", len(library.items), inbox, dup_policy)
 
     sizes: dict[str, int] = {}
+    zip_sizes: dict[str, int] = {}
     wait_logged: set[str] = set()
     while True:
         try:
+            ready_zips, zip_sizes = _stable_ready_zips(
+                inbox, zip_sizes, wait_logged=wait_logged
+            )
+            if ready_zips:
+                process_ready_zips(inbox, ready_zips)
             ready, sizes = _stable_ready(inbox, sizes, wait_logged=wait_logged)
             # Only import files that are ready (stable size + playable)
             if ready:
@@ -337,12 +396,12 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Headless Eagle.cool inbox importer")
     p.add_argument(
         "--library",
-        default=os.environ.get("EAGLE_LIBRARY", str(DEFAULT_LIBRARY)),
+        default=str(DEFAULT_LIBRARY),
         help="Path to .library directory",
     )
     p.add_argument(
         "--inbox",
-        default=os.environ.get("EAGLE_INBOX", str(DEFAULT_INBOX)),
+        default=str(DEFAULT_INBOX),
         help="Inbox folder to watch",
     )
     p.add_argument(
