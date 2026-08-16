@@ -860,6 +860,7 @@ class EagleLibrary:
         item_id: str,
         *,
         star: int | None | object = ...,  # type: ignore[assignment]
+        annotation: str | None | object = ...,  # type: ignore[assignment]
         set_tags: list[str] | None = None,
         add_tags: list[str] | None = None,
         remove_tags: list[str] | None = None,
@@ -868,12 +869,14 @@ class EagleLibrary:
         remove_folders: list[str] | None = None,
     ) -> Item:
         """
-        Persist rating, tag, and/or folder changes for one item.
+        Persist rating, annotation, tag, and/or folder changes for one item.
 
         star: 1–5 to set, 0 or None to clear, omit (Ellipsis) to leave unchanged.
+        annotation: text to set, empty string to clear, omit (Ellipsis) to leave unchanged.
         """
         from write import (  # local import avoids cycles
             WriteError,
+            apply_annotation,
             apply_folders,
             apply_star,
             apply_tags,
@@ -892,6 +895,8 @@ class EagleLibrary:
             data = load_item_metadata(item.item_dir)
             if star is not ...:
                 apply_star(data, None if star in (0, None) else int(star))  # type: ignore[arg-type]
+            if annotation is not ...:
+                apply_annotation(data, "" if annotation is None else str(annotation))
             if set_tags is not None or add_tags is not None or remove_tags is not None:
                 apply_tags(
                     data,
@@ -922,6 +927,8 @@ class EagleLibrary:
         # Update in-memory model
         if star is not ...:
             item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
+        if annotation is not ...:
+            item.annotation = str(data.get("annotation") or "")
         # Tags may change from explicit edit and/or folder auto-tags
         if (
             set_tags is not None
@@ -971,12 +978,13 @@ class EagleLibrary:
         item_ids: list[str],
         *,
         star: int | None | object = ...,  # type: ignore[assignment]
+        annotation: str | None | object = ...,  # type: ignore[assignment]
         add_tags: list[str] | None = None,
         remove_tags: list[str] | None = None,
         add_folders: list[str] | None = None,
         remove_folders: list[str] | None = None,
     ) -> tuple[int, list[str]]:
-        """Apply the same star/tag/folder delta to many items. Returns (ok_count, errors)."""
+        """Apply the same star/annotation/tag/folder delta to many items. Returns (ok_count, errors)."""
         from write import WriteError, write_session
 
         ok = 0
@@ -990,6 +998,7 @@ class EagleLibrary:
                         self._update_item_unlocked(
                             iid,
                             star=star,
+                            annotation=annotation,
                             add_tags=add_tags,
                             remove_tags=remove_tags,
                             add_folders=add_folders,
@@ -1055,6 +1064,7 @@ class EagleLibrary:
         item_id: str,
         *,
         star: int | None | object = ...,
+        annotation: str | None | object = ...,
         set_tags: list[str] | None = None,
         add_tags: list[str] | None = None,
         remove_tags: list[str] | None = None,
@@ -1064,6 +1074,7 @@ class EagleLibrary:
     ) -> Item:
         from write import (
             WriteError,
+            apply_annotation,
             apply_folders,
             apply_star,
             apply_tags,
@@ -1080,6 +1091,8 @@ class EagleLibrary:
         data = load_item_metadata(item.item_dir)
         if star is not ...:
             apply_star(data, None if star in (0, None) else int(star))  # type: ignore[arg-type]
+        if annotation is not ...:
+            apply_annotation(data, "" if annotation is None else str(annotation))
         if set_tags is not None or add_tags is not None or remove_tags is not None:
             apply_tags(
                 data,
@@ -1109,6 +1122,8 @@ class EagleLibrary:
 
         if star is not ...:
             item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
+        if annotation is not ...:
+            item.annotation = str(data.get("annotation") or "")
         if (
             set_tags is not None
             or add_tags is not None

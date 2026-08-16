@@ -112,10 +112,10 @@ Cancel / Save as / Save. ffmpeg does the cut.
 Shows the focused asset (or **common** values when multi-selected):
 
 - Thumbnail preview  
-- **Rating** — click stars or use `1`–`5` / Clear  
-- **Tags** — `✓` shared by all; `±` only on some; **Edit** opens tag picker  
-- **Folders** — same commonality rules; **Edit** opens folder picker  
-- Path (single selection)
+- **Rating** — stars + Clear on one row (`1`–`5` / `0`)  
+- **Tags / Folders** — pill chips (shared tags plain; partial multi-select marked `±`); pencil icon or click chips to edit  
+- **Notes** — card with truncated Eagle annotation; click or pencil to view/edit (Ctrl+Enter / Ctrl+S saves)  
+- Path (single selection, dim line at bottom)
 | `t` | **Tags** picker (recent + autocomplete; Enter toggles and clears the filter; Esc closes) |
 | `f` | **Folders / categories** picker (same UX as tags) |
 | `A` (sidebar) | **Folder auto-tags** for the selected folder (or right-click the folder) |

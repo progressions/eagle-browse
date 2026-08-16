@@ -870,13 +870,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _build_inspector(self) -> Gtk.Widget:
         """Right sidebar: preview + rating + tags + folders for selection."""
         # Hard-pin the pane width on a Box (ScrolledWindow cannot take max-width).
-        # Keep the preview well under the pane width so HiDPI / fractional-scale
-        # clip on the window's right edge cannot hide Edit buttons.
-        # Keep pane + preview narrow enough that a ~45px right-edge clip from
-        # Hyprland fractional scaling (surface wider than client) still leaves
-        # Edit buttons and the thumbnail fully visible.
+        # Keep the preview under the pane width so HiDPI / fractional-scale clip
+        # on the window's right edge cannot hide the thumbnail.
+        # Compact edit controls sit next to section titles (left side), not as
+        # a second "Edit" row and not flush against the clipped right edge.
         INSPECTOR_WIDTH = self._insp_pane_w
-        SIDE_PAD = 10
+        SIDE_PAD = 12
         PREVIEW = 180
         self._insp_preview_px = PREVIEW
 
@@ -893,25 +892,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except AttributeError:
             pass
         scroll.add_css_class("inspector-sidebar")
-        css = Gtk.CssProvider()
-        css.load_from_data(
-            b"""
-            scrolledwindow.inspector-sidebar button {
-                min-width: 0;
-                min-height: 0;
-                padding: 2px 6px;
-            }
-            """
-        )
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(),
-            css,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-        )
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_margin_top(8)
-        box.set_margin_bottom(8)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
         box.set_margin_start(SIDE_PAD)
         box.set_margin_end(SIDE_PAD)
         box.set_hexpand(True)
@@ -927,58 +911,79 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             lbl.set_xalign(0.0)
             return lbl
 
-        def _section_head(title: str, on_edit) -> Gtk.Box:
-            """Heading + Edit stacked on the left.
+        def _icon_btn(
+            *,
+            tooltip: str,
+            on_click,
+            icon_name: str = "document-edit-symbolic",
+            fallback: str = "✎",
+        ) -> Gtk.Button:
+            """Compact flat icon button next to a section title (left-aligned)."""
+            btn = Gtk.Button()
+            btn.add_css_class("flat")
+            btn.add_css_class("circular")
+            btn.add_css_class("insp-icon-btn")
+            btn.set_tooltip_text(tooltip)
+            btn.set_hexpand(False)
+            btn.set_vexpand(False)
+            btn.set_valign(Gtk.Align.CENTER)
+            try:
+                btn.set_icon_name(icon_name)
+            except (AttributeError, TypeError):
+                btn.set_label(fallback)
+            btn.connect("clicked", lambda *_: on_click())
+            return btn
 
-            Edit is left-aligned on its own row so a right-edge window clip
-            (Hyprland fractional scale) cannot hide the button.
-            """
-            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            col.set_hexpand(True)
+        def _section_head(title: str, on_edit, *, tooltip: str = "Edit") -> Gtk.Box:
+            """Section title with a compact pencil control beside it (same row)."""
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+            row.set_hexpand(True)
+            row.set_halign(Gtk.Align.START)
             lbl = Gtk.Label(label=title, xalign=0)
-            lbl.add_css_class("heading")
-            lbl.set_hexpand(True)
-            lbl.set_ellipsize(3)
-            col.append(lbl)
-            edit = Gtk.Button(label="Edit")
-            edit.add_css_class("flat")
-            edit.set_hexpand(False)
-            edit.set_halign(Gtk.Align.START)
-            edit.connect("clicked", lambda *_: on_edit())
-            col.append(edit)
+            lbl.add_css_class("insp-section-title")
+            lbl.set_hexpand(False)
+            row.append(lbl)
+            row.append(_icon_btn(tooltip=tooltip, on_click=on_edit))
+            return row
+
+        def _chip_box() -> Gtk.Box:
+            # Vertical box — avoid Gtk.FlowBox here. On this stack FlowBox inside
+            # a fixed-width ScrolledWindow can spin the main thread in layout and
+            # freeze the window (close/killactive stop responding).
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            col.set_halign(Gtk.Align.START)
+            col.set_hexpand(True)
+            col.set_valign(Gtk.Align.START)
             return col
 
-        self.insp_title = _narrow_label(Gtk.Label(xalign=0), chars=22)
-        self.insp_title.add_css_class("heading")
-        box.append(self.insp_title)
-        self.insp_rename_btn = Gtk.Button(label="Rename")
-        self.insp_rename_btn.add_css_class("flat")
-        self.insp_rename_btn.set_halign(Gtk.Align.START)
-        self.insp_rename_btn.set_tooltip_text("Rename file (F2)")
-        self.insp_rename_btn.set_sensitive(False)
-        self.insp_rename_btn.connect("clicked", lambda *_: self.open_rename_dialog())
-        box.append(self.insp_rename_btn)
+        def _clickable(widget: Gtk.Widget, on_click) -> None:
+            click = Gtk.GestureClick()
+            click.set_button(1)
 
-        # Dimensions — large and readable (main reason you glance at the inspector)
+            def _pressed(*_a) -> None:
+                on_click()
+
+            click.connect("pressed", _pressed)
+            widget.add_controller(click)
+
+        # ── Title row: name + rename ───────────────────────────────────
+        title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        title_row.set_hexpand(True)
+        self.insp_title = _narrow_label(Gtk.Label(xalign=0), chars=20)
+        self.insp_title.add_css_class("insp-title")
+        title_row.append(self.insp_title)
+        self.insp_rename_btn = _icon_btn(
+            tooltip="Rename file (F2)",
+            on_click=self.open_rename_dialog,
+            icon_name="document-edit-symbolic",
+        )
+        self.insp_rename_btn.set_sensitive(False)
+        title_row.append(self.insp_rename_btn)
+        box.append(title_row)
+
+        # Dimensions — large and readable
         self.insp_dims = _narrow_label(Gtk.Label(xalign=0), chars=18)
         self.insp_dims.add_css_class("insp-dims")
-        css_dims = Gtk.CssProvider()
-        css_dims.load_from_data(
-            b"""
-            label.insp-dims {
-                font-size: 18px;
-                font-weight: 600;
-                letter-spacing: 0.02em;
-                margin-top: 2px;
-                margin-bottom: 2px;
-            }
-            """
-        )
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(),
-            css_dims,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-        )
         box.append(self.insp_dims)
 
         self.insp_subtitle = _narrow_label(Gtk.Label(xalign=0), chars=24)
@@ -986,6 +991,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_subtitle.add_css_class("caption")
         box.append(self.insp_subtitle)
 
+        # Preview
         self.insp_picture = Gtk.Picture()
         self.insp_picture.set_size_request(PREVIEW, PREVIEW)
         self.insp_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
@@ -996,6 +1002,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_picture.set_valign(Gtk.Align.START)
         self.insp_preview_frame = Gtk.Box()
         self.insp_preview_frame.add_css_class("card")
+        self.insp_preview_frame.add_css_class("insp-preview")
         # Left-align: Hyprland fractional scale clips the window's right edge.
         self.insp_preview_frame.set_halign(Gtk.Align.START)
         self.insp_preview_frame.set_hexpand(False)
@@ -1008,10 +1015,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_preview_frame.append(self.insp_picture)
         box.append(self.insp_preview_frame)
 
-        # Rating — compact stars only (Clear on next row)
+        # ── Rating: stars + Clear on one row ──────────────────────────
         rate_lbl = Gtk.Label(label="Rating", xalign=0)
-        rate_lbl.add_css_class("heading")
+        rate_lbl.add_css_class("insp-section-title")
         box.append(rate_lbl)
+
+        rate_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        rate_row.set_halign(Gtk.Align.START)
         self.insp_stars_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         self.insp_stars_box.set_halign(Gtk.Align.START)
         self.insp_stars_box.set_hexpand(False)
@@ -1020,45 +1030,163 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             btn = Gtk.Button(label="☆")
             btn.add_css_class("flat")
             btn.add_css_class("circular")
+            btn.add_css_class("insp-star-btn")
             btn.set_tooltip_text(f"Set {n} star(s)")
-            btn.set_size_request(28, 28)
+            btn.set_size_request(26, 26)
             btn.set_hexpand(False)
             btn.connect("clicked", lambda _b, s=n: self.set_rating(s))
             self.insp_star_buttons.append(btn)
             self.insp_stars_box.append(btn)
-        box.append(self.insp_stars_box)
+        rate_row.append(self.insp_stars_box)
         clear_r = Gtk.Button(label="Clear")
         clear_r.add_css_class("flat")
-        clear_r.set_halign(Gtk.Align.START)
+        clear_r.add_css_class("insp-quiet-btn")
+        clear_r.set_valign(Gtk.Align.CENTER)
+        clear_r.set_tooltip_text("Clear rating (0)")
         clear_r.connect("clicked", lambda *_: self.set_rating(0))
-        box.append(clear_r)
+        rate_row.append(clear_r)
+        box.append(rate_row)
+        # Only shown when multi-select ratings differ
         self.insp_rating_note = _narrow_label(Gtk.Label(xalign=0), chars=28)
         self.insp_rating_note.add_css_class("dim-label")
         self.insp_rating_note.add_css_class("caption")
+        self.insp_rating_note.set_visible(False)
         box.append(self.insp_rating_note)
 
-        # Tags
-        box.append(_section_head("Tags", self.edit_tags_dialog))
-        self.insp_tags = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self.insp_tags.set_hexpand(True)
+        # ── Tags ──────────────────────────────────────────────────────
+        box.append(
+            _section_head("Tags", self.edit_tags_dialog, tooltip="Edit tags (T)")
+        )
+        self.insp_tags = _chip_box()
+        self.insp_tags.add_css_class("insp-chip-box")
+        _clickable(self.insp_tags, self.edit_tags_dialog)
         box.append(self.insp_tags)
 
-        # Folders
-        box.append(_section_head("Folders", self.edit_folders_dialog))
-        self.insp_folders = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self.insp_folders.set_hexpand(True)
+        # ── Folders ───────────────────────────────────────────────────
+        box.append(
+            _section_head(
+                "Folders", self.edit_folders_dialog, tooltip="Edit folders (F)"
+            )
+        )
+        self.insp_folders = _chip_box()
+        self.insp_folders.add_css_class("insp-chip-box")
+        _clickable(self.insp_folders, self.edit_folders_dialog)
         box.append(self.insp_folders)
 
-        # Path
-        path_lbl = Gtk.Label(label="Path", xalign=0)
-        path_lbl.add_css_class("heading")
-        box.append(path_lbl)
+        # ── Notes (Eagle annotation) — truncated; click opens edit ────
+        box.append(
+            _section_head("Notes", self.edit_notes_dialog, tooltip="Edit note")
+        )
+        self.insp_notes = _narrow_label(Gtk.Label(xalign=0), chars=26)
+        self.insp_notes.add_css_class("caption")
+        self.insp_notes.add_css_class("insp-notes")
+        try:
+            self.insp_notes.set_lines(3)
+        except (AttributeError, TypeError):
+            pass
+        self.insp_notes_btn = Gtk.Button()
+        self.insp_notes_btn.add_css_class("flat")
+        self.insp_notes_btn.add_css_class("insp-notes-btn")
+        self.insp_notes_btn.set_halign(Gtk.Align.FILL)
+        self.insp_notes_btn.set_hexpand(True)
+        self.insp_notes_btn.set_child(self.insp_notes)
+        self.insp_notes_btn.set_tooltip_text("Click to view or edit note")
+        self.insp_notes_btn.set_sensitive(False)
+        self.insp_notes_btn.connect("clicked", lambda *_: self.edit_notes_dialog())
+        box.append(self.insp_notes_btn)
+
+        # Path — no heavy heading; dim selectable line at the bottom
         self.insp_path = _narrow_label(
             Gtk.Label(xalign=0, selectable=True), chars=28
         )
         self.insp_path.add_css_class("caption")
         self.insp_path.add_css_class("dim-label")
+        self.insp_path.add_css_class("insp-path")
         box.append(self.insp_path)
+
+        # ── Inspector CSS (one provider) ──────────────────────────────
+        css = Gtk.CssProvider()
+        css.load_from_data(
+            b"""
+            scrolledwindow.inspector-sidebar button {
+                min-width: 0;
+                min-height: 0;
+            }
+            scrolledwindow.inspector-sidebar button.insp-icon-btn {
+                padding: 2px;
+                min-width: 24px;
+                min-height: 24px;
+            }
+            scrolledwindow.inspector-sidebar button.insp-star-btn {
+                padding: 0;
+                font-size: 14px;
+            }
+            scrolledwindow.inspector-sidebar button.insp-quiet-btn {
+                padding: 2px 6px;
+                font-size: 0.85em;
+                opacity: 0.75;
+            }
+            label.insp-title {
+                font-weight: 600;
+                font-size: 1.05em;
+            }
+            label.insp-section-title {
+                font-size: 0.72em;
+                font-weight: 600;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+                opacity: 0.72;
+                margin-top: 2px;
+            }
+            label.insp-dims {
+                font-size: 18px;
+                font-weight: 600;
+                letter-spacing: 0.02em;
+            }
+            label.insp-chip {
+                font-size: 0.82em;
+                padding: 2px 8px;
+                border-radius: 999px;
+                background-color: alpha(@theme_fg_color, 0.10);
+            }
+            label.insp-chip.insp-chip-dim {
+                opacity: 0.55;
+            }
+            label.insp-chip.insp-chip-empty {
+                opacity: 0.45;
+                font-style: italic;
+                background-color: transparent;
+                padding-left: 0;
+            }
+            button.insp-notes-btn {
+                padding: 8px 10px;
+                min-height: 0;
+                border-radius: 8px;
+                background-color: alpha(@theme_fg_color, 0.06);
+            }
+            button.insp-notes-btn:hover {
+                background-color: alpha(@theme_fg_color, 0.10);
+            }
+            button.insp-notes-btn label {
+                font-weight: normal;
+            }
+            button.insp-notes-btn:disabled {
+                opacity: 0.5;
+            }
+            label.insp-path {
+                margin-top: 4px;
+                opacity: 0.65;
+            }
+            box.insp-preview {
+                border-radius: 8px;
+            }
+            """
+        )
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
 
         self._inspector_empty()
 
@@ -1111,27 +1239,45 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.insp_rename_btn.set_sensitive(False)
         self.insp_picture.set_paintable(None)
         self.insp_rating_note.set_text("")
+        self.insp_rating_note.set_visible(False)
         for b in self.insp_star_buttons:
             b.set_label("☆")
         self._clear_box(self.insp_tags)
         self._clear_box(self.insp_folders)
+        if hasattr(self, "insp_notes"):
+            self.insp_notes.set_text("")
+        if hasattr(self, "insp_notes_btn"):
+            self.insp_notes_btn.set_sensitive(False)
+            self.insp_notes_btn.set_tooltip_text("Select an asset to add a note")
         self.insp_path.set_text("")
 
     @staticmethod
-    def _clear_box(box: Gtk.Box) -> None:
+    def _clear_box(box: Gtk.Widget) -> None:
         while (c := box.get_first_child()) is not None:
             box.remove(c)
 
-    def _add_chip_label(self, box: Gtk.Box, text: str, *, dim: bool = False) -> None:
+    def _add_chip_label(
+        self,
+        box: Gtk.Widget,
+        text: str,
+        *,
+        dim: bool = False,
+        empty: bool = False,
+        tooltip: str | None = None,
+    ) -> None:
+        """Pill chip for tags/folders."""
         lbl = Gtk.Label(label=text, xalign=0)
-        lbl.set_wrap(True)
-        lbl.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        lbl.set_max_width_chars(16)
-        lbl.set_ellipsize(3)
+        lbl.set_halign(Gtk.Align.START)
         lbl.set_hexpand(False)
-        if dim:
-            lbl.add_css_class("dim-label")
-        lbl.add_css_class("caption")
+        lbl.set_ellipsize(3)  # END
+        lbl.set_max_width_chars(24)
+        lbl.add_css_class("insp-chip")
+        if empty:
+            lbl.add_css_class("insp-chip-empty")
+        elif dim:
+            lbl.add_css_class("insp-chip-dim")
+        if tooltip:
+            lbl.set_tooltip_text(tooltip)
         box.append(lbl)
 
     def update_inspector(self) -> None:
@@ -1187,22 +1333,22 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if hasattr(self, "insp_rename_btn"):
                 self.insp_rename_btn.set_sensitive(False)
 
-        # Rating commonality
+        # Rating commonality — stars carry the value; note only for mixed
         stars = {it.star for it in items}
         if len(stars) == 1:
             s = next(iter(stars))
             rating = s if s else 0
-            self.insp_rating_note.set_text(
-                f"{'★' * rating}{'☆' * (5 - rating)}" if rating else "Unrated (all)"
-            )
+            self.insp_rating_note.set_text("")
+            self.insp_rating_note.set_visible(False)
             for i, b in enumerate(self.insp_star_buttons, start=1):
                 b.set_label("★" if rating and i <= rating else "☆")
         else:
             self.insp_rating_note.set_text("Mixed ratings")
+            self.insp_rating_note.set_visible(True)
             for b in self.insp_star_buttons:
                 b.set_label("☆")
 
-        # Tags: intersection (common) and partial
+        # Tags: intersection (common) and partial — pill chips
         tag_sets = [set(it.tags) for it in items]
         common_tags = set.intersection(*tag_sets) if tag_sets else set()
         union_tags = set.union(*tag_sets) if tag_sets else set()
@@ -1210,12 +1356,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._clear_box(self.insp_tags)
         if common_tags:
             for t in sorted(common_tags, key=str.lower):
-                self._add_chip_label(self.insp_tags, f"✓ {t}")
+                self._add_chip_label(self.insp_tags, t)
         if partial_tags and n > 1:
             for t in sorted(partial_tags, key=str.lower):
                 self._add_chip_label(self.insp_tags, f"± {t}", dim=True)
         if not common_tags and not partial_tags:
-            self._add_chip_label(self.insp_tags, "(none)", dim=True)
+            self._add_chip_label(self.insp_tags, "None — click to add", empty=True)
 
         # Folders commonality
         folder_sets = [set(it.folders) for it in items]
@@ -1226,13 +1372,41 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if common_f:
             for fid in sorted(common_f):
                 name = self.library.folder_paths.get(fid, fid)
-                self._add_chip_label(self.insp_folders, f"✓ {name}")
+                # Prefer leaf name for chips; full path in tooltip
+                leaf = name.rsplit("/", 1)[-1] if name else fid
+                self._add_chip_label(
+                    self.insp_folders,
+                    leaf,
+                    tooltip=name if name != leaf else None,
+                )
         if partial_f and n > 1:
             for fid in sorted(partial_f):
                 name = self.library.folder_paths.get(fid, fid)
-                self._add_chip_label(self.insp_folders, f"± {name}", dim=True)
+                leaf = name.rsplit("/", 1)[-1] if name else fid
+                self._add_chip_label(
+                    self.insp_folders,
+                    f"± {leaf}",
+                    dim=True,
+                    tooltip=name if name != leaf else None,
+                )
         if not common_f and not partial_f:
-            self._add_chip_label(self.insp_folders, "(none)", dim=True)
+            self._add_chip_label(self.insp_folders, "None — click to add", empty=True)
+
+        # Notes (annotation) commonality — truncated preview in the card
+        notes = [(it.annotation or "").strip() for it in items]
+        unique_notes = set(notes)
+        if hasattr(self, "insp_notes_btn"):
+            self.insp_notes_btn.set_sensitive(True)
+            self.insp_notes_btn.set_tooltip_text("Click to view or edit note")
+        if len(unique_notes) == 1:
+            note = next(iter(unique_notes))
+            if note:
+                preview = " ".join(note.split())
+                self.insp_notes.set_text(preview)
+            else:
+                self.insp_notes.set_text("Add a note…")
+        else:
+            self.insp_notes.set_text("Mixed notes — click to set for all")
 
     def _install_keybinds(self) -> None:
         controller = Gtk.EventControllerKey()
@@ -3488,6 +3662,170 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         win.present()
         entry.grab_focus()
         entry.select_region(0, -1)
+
+    def edit_notes_dialog(self) -> None:
+        """View or edit Eagle annotation (notes) for the selection."""
+        if self._picker_blocking:
+            return
+        from write import WriteError
+
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+
+        n = len(items)
+        notes = [(it.annotation or "") for it in items]
+        unique = set(notes)
+        initial = next(iter(unique)) if len(unique) == 1 else ""
+        mixed = len(unique) > 1
+
+        win = Gtk.Window(
+            title="Notes" if n == 1 else f"Notes · {n} items",
+            transient_for=self,
+            modal=True,
+            default_width=480,
+            default_height=360,
+        )
+        self._remember_dialog(win)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        win.set_child(box)
+
+        if n == 1:
+            subtitle = items[0].display_name
+        elif mixed:
+            subtitle = f"{n} items · notes differ — saving replaces all"
+        else:
+            subtitle = f"{n} items · shared note"
+        hint = Gtk.Label(label=subtitle, xalign=0, wrap=True)
+        hint.add_css_class("dim-label")
+        box.append(hint)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_vexpand(True)
+        scroll.set_hexpand(True)
+        scroll.set_min_content_height(180)
+        try:
+            scroll.set_has_frame(True)
+        except AttributeError:
+            pass
+        text = Gtk.TextView()
+        text.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        text.set_accepts_tab(False)
+        text.set_top_margin(8)
+        text.set_bottom_margin(8)
+        text.set_left_margin(8)
+        text.set_right_margin(8)
+        buf = text.get_buffer()
+        buf.set_text(initial)
+        scroll.set_child(text)
+        box.append(scroll)
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        clear_btn = Gtk.Button(label="Clear")
+        clear_btn.add_css_class("flat")
+        clear_btn.set_halign(Gtk.Align.START)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        cancel = Gtk.Button(label="Cancel")
+        save = Gtk.Button(label="Save")
+        save.add_css_class("suggested-action")
+        btns.append(clear_btn)
+        btns.append(spacer)
+        btns.append(cancel)
+        btns.append(save)
+        box.append(btns)
+
+        def close_win(*_a) -> None:
+            if self._open_dialog is win:
+                self._open_dialog = None
+            self._picker_blocking = False
+            try:
+                win.close()
+            except Exception:
+                win.destroy()
+
+        def read_text() -> str:
+            start = buf.get_start_iter()
+            end = buf.get_end_iter()
+            return buf.get_text(start, end, include_hidden_chars=False)
+
+        def do_save(value: str) -> None:
+            ids = [it.id for it in items]
+
+            def apply() -> None:
+                try:
+                    if len(ids) == 1:
+                        self.library.update_item(ids[0], annotation=value)
+                        ok, errors = 1, []
+                    else:
+                        ok, errors = self.library.update_items_batch(
+                            ids, annotation=value
+                        )
+                except WriteError as exc:
+                    self._toast(str(exc))
+                    return
+                self.update_inspector()
+                if value.strip():
+                    msg = f"Note saved · {ok} item(s)"
+                else:
+                    msg = f"Note cleared · {ok} item(s)"
+                if errors:
+                    msg += f" · {len(errors)} failed"
+                self._toast(msg)
+                close_win()
+
+            if n > BULK_EDIT_CONFIRM:
+                self._confirm_bulk_edit(
+                    n,
+                    heading=f"Update notes on {n} items?",
+                    body="The same note text will be written to every selected item.",
+                    apply_fn=apply,
+                    parent=win,
+                )
+                return
+            apply()
+
+        def on_save(*_a) -> None:
+            do_save(read_text())
+
+        def on_clear(*_a) -> None:
+            buf.set_text("")
+            text.grab_focus()
+
+        cancel.connect("clicked", close_win)
+        save.connect("clicked", on_save)
+        clear_btn.connect("clicked", on_clear)
+
+        def on_key(_c, keyval: int, _kc: int, state: Gdk.ModifierType) -> bool:
+            if keyval == Gdk.KEY_Escape:
+                close_win()
+                return True
+            # Ctrl+Enter / Ctrl+S saves (plain Enter inserts a newline in TextView)
+            ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+            if ctrl and keyval in (
+                Gdk.KEY_Return,
+                Gdk.KEY_KP_Enter,
+                Gdk.KEY_s,
+                Gdk.KEY_S,
+            ):
+                on_save()
+                return True
+            return False
+
+        # Capture on the window so shortcuts work while the TextView has focus
+        key = Gtk.EventControllerKey()
+        key.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        key.connect("key-pressed", on_key)
+        win.add_controller(key)
+        win.connect("close-request", lambda *_: False)
+        win.present()
+        text.grab_focus()
 
     def open_crop_dialog(self) -> None:
         """Open the crop editor for the focused image or audio file."""

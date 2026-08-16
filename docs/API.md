@@ -26,13 +26,15 @@ eagle-api search --folder Eunbi --name mirror --ids-only
 # Item
 eagle-api get MXXXXXXXXXXXX
 
-# Tags / categories / rating
+# Tags / categories / rating / notes
 eagle-api tag add MXXXXXXXXXXXX sofie,raw
 eagle-api tag remove MXXXXXXXXXXXX raw
 eagle-api folder add MXXXXXXXXXXXX Eunbi
 eagle-api folder remove MXXXXXXXXXXXX Eunbi
 eagle-api rate MXXXXXXXXXXXX 4
 eagle-api rate MXXXXXXXXXXXX,MYYYYYYYYYYYY 0   # clear
+eagle-api note MXXXXXXXXXXXX "use for fanvue PPV"
+eagle-api note MXXXXXXXXXXXX --clear
 
 # Crop (images only)
 eagle-api crop MXXXXXXXXXXXX --aspect 9:16 --mode new          # new untagged item
@@ -87,6 +89,8 @@ for it in r["items"]:
 api.add_tags(item_id, ["sofie"])
 api.add_folders(item_id, ["Eunbi"])
 api.set_rating(item_id, 4)
+api.set_annotation(item_id, "use for fanvue PPV")
+api.set_annotation(item_id, "")  # clear
 
 # Crop
 api.crop(item_id, aspect="9:16", mode="new")          # new item, no tags/folders

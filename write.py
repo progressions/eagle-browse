@@ -354,6 +354,18 @@ def apply_star(data: dict[str, Any], star: int | None) -> dict[str, Any]:
     return data
 
 
+def apply_annotation(data: dict[str, Any], annotation: str | None) -> dict[str, Any]:
+    """Set Eagle item annotation (notes). None or empty string clears it."""
+    text = "" if annotation is None else str(annotation)
+    # Normalize newlines; strip trailing whitespace on each line but keep content.
+    # Eagle stores plain text; empty means no note.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if len(text) > 20000:
+        raise WriteError("Note is too long (max 20000 characters)")
+    data["annotation"] = text
+    return data
+
+
 def normalize_tag(tag: str) -> str:
     """Tags are case-insensitive. Store and compare as lowercase."""
     return (tag or "").strip().lower()

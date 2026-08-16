@@ -78,6 +78,12 @@ def _fmt_get(data: dict[str, Any]) -> None:
     print(f"  rating:   {_stars(it.get('star'))}")
     print(f"  tags:     {', '.join(it.get('tags') or []) or '—'}")
     print(f"  folders:  {', '.join(it.get('folder_names') or []) or '—'}")
+    ann = (it.get("annotation") or "").strip()
+    if ann:
+        preview = " ".join(ann.split())
+        if len(preview) > 120:
+            preview = preview[:117] + "…"
+        print(f"  note:     {preview}")
     print(f"  size:     {it.get('width')}×{it.get('height')}  {it.get('size')} bytes")
     if it.get("duration"):
         print(f"  duration: {it.get('duration')}s")
@@ -109,6 +115,15 @@ def _fmt_ok_action(data: dict[str, Any]) -> None:
         parts.append("folders=" + ",".join(data["folder_ids"]))
     if "rating" in data:
         parts.append(f"rating={data['rating']}")
+    if "annotation" in data:
+        ann = data["annotation"] or ""
+        if ann:
+            preview = " ".join(str(ann).split())
+            if len(preview) > 60:
+                preview = preview[:57] + "…"
+            parts.append(f"note={preview!r}")
+        else:
+            parts.append("note=cleared")
     print("ok · " + " · ".join(parts))
 
 
@@ -251,6 +266,8 @@ examples:
   eagle-api tag add MXXXXXXXXXXXX sofie,raw
   eagle-api folder add MXXXXXXXXXXXX Eunbi
   eagle-api rate MXXXXXXXXXXXX 4
+  eagle-api note MXXXXXXXXXXXX "use for fanvue PPV"
+  eagle-api note MXXXXXXXXXXXX --clear
   eagle-api crop MXXXXXXXXXXXX --aspect 9:16 --mode new
   eagle-api crop MXXXXXXXXXXXX --width 1080 --height 1440 --anchor top --mode overwrite
   eagle-api smart-folder list
@@ -329,6 +346,24 @@ environment:
     r = sub.add_parser("rate", parents=[shared], help="Set rating 0–5 (0 clears)")
     r.add_argument("ids", help="Item id or comma-separated ids")
     r.add_argument("rating", type=int)
+
+    n = sub.add_parser(
+        "note",
+        parents=[shared],
+        help="Set or clear asset notes (Eagle annotation field)",
+    )
+    n.add_argument("ids", help="Item id or comma-separated ids")
+    n.add_argument(
+        "text",
+        nargs="?",
+        default=None,
+        help="Note text (omit with --clear)",
+    )
+    n.add_argument(
+        "--clear",
+        action="store_true",
+        help="Clear the note",
+    )
 
     c = sub.add_parser(
         "crop",
@@ -509,6 +544,17 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cmd == "rate":
             result = api.set_rating(_split_csv(args.ids), args.rating)
+            return out(result, _fmt_ok_action)
+
+        if args.cmd == "note":
+            if args.clear:
+                text = ""
+            elif args.text is None:
+                _err("note: provide text, or --clear")
+                return 2
+            else:
+                text = args.text
+            result = api.set_annotation(_split_csv(args.ids), text)
             return out(result, _fmt_ok_action)
 
         if args.cmd == "crop":

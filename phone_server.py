@@ -48,25 +48,64 @@ DEFAULT_MDNS_NAME = "eagle"  # → eagle.local
 
 
 def _lan_ips() -> list[str]:
+    """IPv4 addresses on this machine that phones on the LAN can reach.
+
+    Boot order matters: systemd can start us before Wi‑Fi has an address.
+    Try several methods so a later retry (see main) can pick the IP up.
+    """
     ips: list[str] = []
+
+    def _add(ip: str, *, front: bool = False) -> None:
+        if not ip or ip.startswith("127.") or ip.startswith("169.254."):
+            return
+        if ip in ips:
+            return
+        if front:
+            ips.insert(0, ip)
+        else:
+            ips.append(ip)
+
+    # 1) Hostname A records (often empty until /etc/hosts or DNS knows us)
     try:
         out = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
         for info in out:
-            ip = info[4][0]
-            if not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
+            _add(info[4][0])
     except OSError:
         pass
-    # Fallback: UDP trick for primary outbound interface
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        if ip not in ips and not ip.startswith("127."):
-            ips.insert(0, ip)
-    except OSError:
-        pass
+
+    # 2) UDP connect trick — works once a default route exists
+    for dest in (("8.8.8.8", 80), ("1.1.1.1", 80), ("192.168.40.1", 80)):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.5)
+            s.connect(dest)
+            _add(s.getsockname()[0], front=True)
+            s.close()
+            break
+        except OSError:
+            try:
+                s.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # 3) Enumerate interfaces via `ip` (reliable on Omarchy once link is up)
+    if not ips and shutil.which("ip"):
+        try:
+            out = subprocess.check_output(
+                ["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                text=True,
+                timeout=2,
+            )
+            for line in out.splitlines():
+                # "2: wlp3s0    inet 192.168.40.126/24 brd ..."
+                parts = line.split()
+                if "inet" in parts:
+                    i = parts.index("inet")
+                    if i + 1 < len(parts):
+                        _add(parts[i + 1].split("/")[0])
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     return ips
 
 
@@ -503,33 +542,78 @@ def main() -> int:
     server = ThreadingHTTPServer((args.host, args.port), PhoneBrowseHandler)
     ips = _lan_ips()
     mdns_host = _normalize_mdns_host(args.mdns_name)
-    publisher: MdnsPublisher | None = None
+    # Mutable so the deferred-mDNS thread can update it after boot networking.
+    pub_state: dict = {"publisher": None}
 
-    print()
-    print("Eagle phone browse (local)")
-    print(f"  library: {library_root}")
-    print(f"  UI:      {PHONE_WEB}")
-    print(f"  bind:    http://{args.host}:{args.port}/")
-    print("  open on phone (same Wi‑Fi):")
-    if not args.no_mdns and ips:
-        publisher = MdnsPublisher(mdns_host, ips[0], args.port)
+    def _try_publish_mdns(ip_list: list[str]) -> bool:
+        if args.no_mdns or not ip_list:
+            return False
+        if pub_state["publisher"] is not None:
+            return True
+        publisher = MdnsPublisher(mdns_host, ip_list[0], args.port)
         if publisher.start():
-            print(f"    http://{mdns_host}:{args.port}/")
-        else:
-            publisher = None
-    # Always print IP fallback(s)
-    for ip in ips:
-        print(f"    http://{ip}:{args.port}/  (IP fallback)")
-    if not ips and args.no_mdns:
-        print("    (no LAN IP detected)")
-    print("  Ctrl+C to stop")
-    print()
+            pub_state["publisher"] = publisher
+            print(
+                f"  mDNS ready: http://{mdns_host}:{args.port}/  ({ip_list[0]})",
+                flush=True,
+            )
+            return True
+        return False
+
+    def _log(*parts: object) -> None:
+        print(*parts, flush=True)
+
+    _log()
+    _log("Eagle phone browse (local)")
+    _log(f"  library: {library_root}")
+    _log(f"  UI:      {PHONE_WEB}")
+    _log(f"  bind:    http://{args.host}:{args.port}/")
+    _log("  open on phone (same Wi‑Fi):")
+    if ips:
+        _try_publish_mdns(ips)
+        if pub_state["publisher"] is not None:
+            _log(f"    http://{mdns_host}:{args.port}/")
+        for ip in ips:
+            _log(f"    http://{ip}:{args.port}/  (IP fallback)")
+    else:
+        _log("    (LAN IP not up yet — will retry mDNS in background)")
+        _log(f"    http://{mdns_host}:{args.port}/  (once Wi‑Fi is up)")
+    _log("  Ctrl+C to stop")
+    _log()
+
+    # Boot race: Wi‑Fi often comes up after this service. Retry IP + mDNS.
+    def _deferred_mdns() -> None:
+        if args.no_mdns:
+            return
+        for delay in (2, 5, 10, 20, 30, 60, 120):
+            if pub_state["publisher"] is not None:
+                return
+            time.sleep(delay)
+            found = _lan_ips()
+            if not found:
+                print(f"  mDNS retry: still no LAN IP (waited +{delay}s)", flush=True)
+                continue
+            print(f"  mDNS retry: found {found[0]} — publishing…", flush=True)
+            if _try_publish_mdns(found):
+                return
+        if pub_state["publisher"] is None:
+            print(
+                "  mDNS: gave up — use the IP URL from `ip -4 addr` on this machine",
+                flush=True,
+            )
+
+    if not args.no_mdns and pub_state["publisher"] is None:
+        threading.Thread(
+            target=_deferred_mdns, name="phone-mdns-retry", daemon=True
+        ).start()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
-        if publisher:
+        publisher = pub_state.get("publisher")
+        if publisher is not None:
             publisher.stop()
     return 0
 

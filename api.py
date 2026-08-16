@@ -391,6 +391,27 @@ class EagleAPI:
             return {"ok": False, "error": str(exc)}
         return {"ok": ok > 0 or not errors, "updated": ok, "errors": errors, "rating": star}
 
+    def set_annotation(
+        self, item_ids: list[str] | str, annotation: str | None
+    ) -> dict[str, Any]:
+        """Set Eagle annotation (notes). Empty string or None clears."""
+        ids = [item_ids] if isinstance(item_ids, str) else list(item_ids)
+        text = "" if annotation is None else str(annotation)
+        try:
+            if len(ids) == 1:
+                self.library.update_item(ids[0], annotation=text)
+                ok, errors = 1, []
+            else:
+                ok, errors = self.library.update_items_batch(ids, annotation=text)
+        except WriteError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {
+            "ok": ok > 0 or not errors,
+            "updated": ok,
+            "errors": errors,
+            "annotation": text,
+        }
+
     def crop(
         self,
         item_id: str,
@@ -934,6 +955,15 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("ids", help="Item id or comma-separated ids")
     r.add_argument("rating", type=int)
 
+    n = sub.add_parser(
+        "note",
+        parents=[shared],
+        help="Set or clear asset notes (Eagle annotation)",
+    )
+    n.add_argument("ids", help="Item id or comma-separated ids")
+    n.add_argument("text", nargs="?", default=None, help="Note text")
+    n.add_argument("--clear", action="store_true", help="Clear the note")
+
     c = sub.add_parser(
         "crop",
         parents=[shared],
@@ -1101,6 +1131,21 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cmd == "rate":
             result = api.set_rating(_split_csv(args.ids), args.rating)
+            _json_out(result, pretty=pretty)
+            return 0 if result.get("ok") else 2
+
+        if args.cmd == "note":
+            if args.clear:
+                text = ""
+            elif args.text is None:
+                _json_out(
+                    {"ok": False, "error": "note: provide text, or --clear"},
+                    pretty=pretty,
+                )
+                return 2
+            else:
+                text = args.text
+            result = api.set_annotation(_split_csv(args.ids), text)
             _json_out(result, pretty=pretty)
             return 0 if result.get("ok") else 2
 
