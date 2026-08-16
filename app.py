@@ -5171,7 +5171,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return True
 
     def _apply_new_items(self, items: list[Item], *, toast: bool = False) -> None:
-        """Show newly ingested items without rebuilding the whole grid."""
+        """Show newly ingested items without rebuilding the whole grid.
+
+        Never steal focus from the asset the user is already viewing or has
+        selected — rating/tag edits must keep applying to that item even while
+        new imports land at the top of an "Added · newest" grid.
+        """
         if not items:
             return
         visible = [it for it in items if self._item_matches_current_view(it)]
@@ -5192,24 +5197,91 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._all_items.insert(i, it)
                 self._items.insert(i, it)
                 self.store.insert(i, ItemObject(it))
-            if to_add and len(self._marked) <= 1:
-                self.selected_item = to_add[0]
-                self._marked = {to_add[0].id}
+            if to_add:
+                self._restore_selection_after_grid_insert()
+            self._rebuild_scope_text()
+            self._refresh_status()
+            self._update_path_label()
+        elif visible:
+            # refresh_items preserves keep_focus_id / _marked by default
+            self.refresh_items(reset_selection=False, scroll_to_top=False)
+        self._refresh_special_counts()
+        if toast and items:
+            self._toast(f"{len(items)} new")
+
+    def _restore_selection_after_grid_insert(self) -> None:
+        """After prepending store rows, re-pin selection by item id (not index).
+
+        Gtk.SingleSelection is position-based: inserting at 0 would otherwise
+        make "selected position 0" point at the newcomer while the user still
+        thinks they are editing the asset they had open.
+        """
+        if self._keep_grid_unselected:
+            self.selected_item = None
+            self._marked.clear()
+            self._sel_anchor = 0
+            self._last_focus_idx = 0
+            try:
+                self.selection.set_selected(Gtk.INVALID_LIST_POSITION)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+        # Prefer the open viewer, then current focus, then a sole mark.
+        keep_id: str | None = None
+        if self.is_viewer_open() and self._viewer_item_id:
+            keep_id = self._viewer_item_id
+        elif self.selected_item is not None:
+            keep_id = self.selected_item.id
+        elif len(self._marked) == 1:
+            keep_id = next(iter(self._marked))
+
+        if keep_id is None and not self._marked:
+            # Nothing was selected — only then auto-focus the newest arrival.
+            if self._items:
+                self.selected_item = self._items[0]
+                self._marked = {self._items[0].id}
                 self._sel_anchor = 0
                 self._last_focus_idx = 0
                 if self._grid_has_focus:
                     try:
                         self.selection.set_selected(0)
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         pass
-            self._rebuild_scope_text()
-            self._refresh_status()
-            self._update_path_label()
-        elif visible:
-            self.refresh_items()
-        self._refresh_special_counts()
-        if toast and items:
-            self._toast(f"{len(items)} new")
+            return
+
+        # Multi-select: keep the mark set; only re-resolve the focus row.
+        id_to_idx = {it.id: i for i, it in enumerate(self._items)}
+        focus_id = keep_id
+        if focus_id is None or focus_id not in id_to_idx:
+            for mid in self._marked:
+                if mid in id_to_idx:
+                    focus_id = mid
+                    break
+
+        if focus_id is not None and focus_id in id_to_idx:
+            idx = id_to_idx[focus_id]
+            self.selected_item = self._items[idx]
+            self._last_focus_idx = idx
+            self._sel_anchor = idx
+            # Marks are id-based (safe across prepend). Single-select: pin the
+            # mark to the preserved asset. Multi-select: leave the set alone.
+            if not self._marked or len(self._marked) == 1:
+                self._marked = {focus_id}
+            if self._grid_has_focus:
+                try:
+                    self.selection.set_selected(idx)
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            # Focused asset not in the loaded page (rare) — keep id-based marks
+            # and selected_item from the library so edits still hit the right item.
+            if keep_id is not None:
+                it = self.library.items_by_id.get(keep_id)
+                if it is not None:
+                    self.selected_item = it
+                if not self._marked or len(self._marked) == 1:
+                    self._marked = {keep_id}
 
     # ── Inbox import (manual only) ────────────────────────────────────
     # Auto-import belongs exclusively to eagle-inbox-watch on one machine.
