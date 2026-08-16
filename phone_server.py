@@ -31,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -188,6 +189,13 @@ class PhoneBrowseHandler(SimpleHTTPRequestHandler):
     lock = threading.Lock()
     recent_imports: list = []  # (ts, row)
     updates_ts: float = 0.0
+    # id → (tries, next_retry_unix) for incomplete .info folders
+    pending: dict = {}
+    _persist_timer: threading.Timer | None = None
+    _persist_dirty: bool = False
+    _PENDING_MAX = 200
+    _PENDING_MAX_TRIES = 8
+    _PENDING_BACKOFF = (2.0, 5.0, 10.0, 20.0, 40.0, 60.0, 60.0, 60.0)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(PHONE_WEB), **kwargs)
@@ -412,6 +420,7 @@ class PhoneBrowseHandler(SimpleHTTPRequestHandler):
             cls.catalog = catalog
             cls.items_by_id = {row["id"]: row for row in catalog.get("items") or []}
             cls.recent_imports = []
+            cls.pending = {}
             cls.updates_ts = time.time()
             print(
                 f"Catalog ready: {catalog.get('item_count')} items "
@@ -427,15 +436,22 @@ class PhoneBrowseHandler(SimpleHTTPRequestHandler):
         added = 0
         now = time.time()
         for iid in item_ids:
-            if not iid or iid in cls.items_by_id:
+            if not iid:
+                continue
+            with cls.lock:
+                already = iid in cls.items_by_id
+            if already:
+                cls.pending.pop(iid, None)
                 continue
             item_dir = cls.library_root / "images" / f"{iid}.info"
             item = _item_from_dir(item_dir)
             if item is None or item.is_deleted:
+                cls._note_pending(iid)
                 continue
             row = item_to_row(item)
             with cls.lock:
                 if item.id in cls.items_by_id:
+                    cls.pending.pop(item.id, None)
                     continue
                 cls.items_by_id[item.id] = row
                 if cls.catalog is not None:
@@ -446,43 +462,178 @@ class PhoneBrowseHandler(SimpleHTTPRequestHandler):
                 if len(cls.recent_imports) > 200:
                     cls.recent_imports = cls.recent_imports[-200:]
                 cls.updates_ts = now
+                cls.pending.pop(item.id, None)
             added += 1
+        if added:
+            cls.schedule_persist()
         return added
+
+    @classmethod
+    def _note_pending(cls, iid: str) -> None:
+        tries, _nxt = cls.pending.get(iid, (0, 0.0))
+        tries += 1
+        if tries > cls._PENDING_MAX_TRIES:
+            cls.pending.pop(iid, None)
+            return
+        if iid not in cls.pending and len(cls.pending) >= cls._PENDING_MAX:
+            return
+        delay = cls._PENDING_BACKOFF[min(tries, len(cls._PENDING_BACKOFF)) - 1]
+        cls.pending[iid] = (tries, time.time() + delay)
+
+    @classmethod
+    def retry_pending(cls) -> int:
+        if not cls.pending:
+            return 0
+        now = time.time()
+        due = [iid for iid, (_tries, nxt) in list(cls.pending.items()) if nxt <= now]
+        if not due:
+            return 0
+        return cls.ingest_item_ids(due)
+
+    @classmethod
+    def scan_unknown_ids(cls) -> list[str]:
+        """Ids on disk that are not in the in-memory catalog."""
+        images = cls.library_root / "images"
+        with cls.lock:
+            known = set(cls.items_by_id)
+        unknown: list[str] = []
+        try:
+            for p in images.iterdir():
+                if not p.is_dir() or not p.name.endswith(".info"):
+                    continue
+                iid = p.name.removesuffix(".info")
+                if iid and iid not in known:
+                    unknown.append(iid)
+        except OSError:
+            return []
+        return unknown
+
+    @classmethod
+    def schedule_persist(cls) -> None:
+        """Debounce writes of phone-index.json (full catalog is a few MB)."""
+        def fire() -> None:
+            with cls.lock:
+                cls._persist_timer = None
+                dirty = cls._persist_dirty
+                cls._persist_dirty = False
+            if dirty:
+                cls.persist_catalog()
+            with cls.lock:
+                again = cls._persist_dirty
+            if again:
+                cls.schedule_persist()
+
+        with cls.lock:
+            cls._persist_dirty = True
+            if cls._persist_timer is not None:
+                return
+            timer = threading.Timer(2.0, fire)
+            timer.daemon = True
+            cls._persist_timer = timer
+        timer.start()
+
+    @classmethod
+    def persist_catalog(cls) -> None:
+        """Write the live catalog back to phone-index.json."""
+        with cls.lock:
+            catalog = cls.catalog
+            if not catalog:
+                return
+            snap = dict(catalog)
+            snap["items"] = list(catalog.get("items") or [])
+            snap["item_count"] = len(snap["items"])
+            snap["updated_at"] = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            path = cls.index_path
+        try:
+            text = json.dumps(snap, separators=(",", ":"), ensure_ascii=False)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            print(f"  persist phone-index.json failed: {exc}", flush=True)
 
 
 def _watch_inbox_signal(handler: type[PhoneBrowseHandler]) -> None:
-    """Poll the inbox signal file and ingest new item ids into the catalog."""
+    """Poll the inbox signal file and ingest new item ids into the catalog.
+
+    last_ts starts at 0 so a signal written while we were down is still
+    ingested. Missing disk ids are scanned on a slow timer (one walker).
+    """
     path = handler.library_root / INBOX_SIGNAL_FILENAME
     last_ts = 0.0
-    if path.is_file():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            last_ts = float(raw.get("ts") or 0)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            last_ts = 0.0
+    last_disk_scan = 0.0
+    images_mtime = 0.0
+    scan_lock = threading.Lock()
+    scanning = False
+
+    def kick_disk_scan() -> None:
+        nonlocal scanning
+        if not scan_lock.acquire(blocking=False):
+            return
+        if scanning:
+            scan_lock.release()
+            return
+        scanning = True
+        scan_lock.release()
+
+        def work() -> None:
+            nonlocal scanning
+            try:
+                unknown = handler.scan_unknown_ids()
+                if unknown:
+                    n = handler.ingest_item_ids(unknown)
+                    if n:
+                        print(
+                            f"Ingested {n} item(s) from images/ into phone catalog",
+                            flush=True,
+                        )
+            finally:
+                with scan_lock:
+                    scanning = False
+
+        threading.Thread(target=work, name="phone-disk-scan", daemon=True).start()
+
+    # First pass: current signal (if any) + disk gap-fill, then loop.
+    kick_disk_scan()
+
     while True:
         time.sleep(1.0)
-        if not path.is_file():
-            continue
+        now = time.time()
+        n_pending = handler.retry_pending()
+        if n_pending:
+            print(f"Ingested {n_pending} pending item(s) into phone catalog", flush=True)
+
+        if path.is_file():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raw = None
+            if isinstance(raw, dict):
+                try:
+                    ts = float(raw.get("ts") or 0)
+                except (TypeError, ValueError):
+                    ts = 0.0
+                ids = [str(i) for i in (raw.get("ids") or []) if i]
+                if ts > last_ts and ids:
+                    last_ts = ts
+                    n = handler.ingest_item_ids(ids)
+                    if n:
+                        print(
+                            f"Ingested {n} new item(s) into phone catalog",
+                            flush=True,
+                        )
+
+        images = handler.library_root / "images"
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(raw, dict):
-            continue
-        try:
-            ts = float(raw.get("ts") or 0)
-        except (TypeError, ValueError):
-            continue
-        if ts <= last_ts:
-            continue
-        last_ts = ts
-        ids = [str(i) for i in (raw.get("ids") or []) if i]
-        if not ids:
-            continue
-        n = handler.ingest_item_ids(ids)
-        if n:
-            print(f"Ingested {n} new item(s) into phone catalog", flush=True)
+            mt = images.stat().st_mtime
+        except OSError:
+            mt = images_mtime
+        if mt != images_mtime or (now - last_disk_scan) >= 30.0:
+            images_mtime = mt
+            last_disk_scan = now
+            kick_disk_scan()
 
 
 def main() -> int:
@@ -615,6 +766,7 @@ def main() -> int:
         publisher = pub_state.get("publisher")
         if publisher is not None:
             publisher.stop()
+        PhoneBrowseHandler.persist_catalog()
     return 0
 
 

@@ -18,15 +18,28 @@ INBOX_SIGNAL_FILENAME = ".eagle-browse.inbox-signal"
 
 
 def announce_imported_ids(library_root: Path, item_ids: list[str]) -> None:
-    """Atomically record newly imported item ids for the GUI watcher."""
+    """Atomically record newly imported item ids for GUI / phone watchers.
+
+    Merges with unread ids already in the file so a rapid batch of one-id
+    announces does not drop earlier ids (phone polls once a second).
+    """
     ids = [i for i in item_ids if i]
     if not ids:
         return
     path = library_root / INBOX_SIGNAL_FILENAME
+    existing: list[str] = []
+    try:
+        if path.is_file():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                existing = [str(i) for i in (raw.get("ids") or []) if i]
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        existing = []
+    merged = list(dict.fromkeys(existing + ids))[-200:]
     try:
         atomic_write_json(
             path,
-            {"ids": ids, "ts": time.time()},
+            {"ids": merged, "ts": time.time()},
         )
     except OSError:
         pass

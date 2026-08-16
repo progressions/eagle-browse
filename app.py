@@ -161,9 +161,13 @@ def _spawn_detached(cmd: list[str], env: dict[str, str] | None = None) -> bool:
 
 # Decode thumbs off the UI thread; textures are applied on the main loop.
 _thumb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="eagle-thumb")
-# path → Gdk.Texture (main thread only) or "loading" sentinel handled via generation
+# cache_key → Gdk.Texture (main thread writes; lock for inflight + cache)
 _thumb_textures: dict[str, Gdk.Texture] = {}
 _THUMB_CACHE_MAX = 400
+# Keys currently decoding — skip a second submit for the same key.
+_thumb_inflight: set[str] = set()
+# Waiters for an in-flight key: (list_item, gen)
+_thumb_waiters: dict[str, list[tuple[object, int]]] = {}
 _thumb_lock = threading.Lock()
 
 
@@ -300,10 +304,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Inbox signal: watcher writes this after each new import
         self._inbox_signal_path = self.library.root / INBOX_SIGNAL_FILENAME
         self._inbox_signal_ts = 0.0
-        self._pending_import_ids: set[str] = set()
+        # id → (tries, next_retry_unix). Incomplete Dropbox .info folders retry
+        # with backoff instead of every 1s forever.
+        self._pending_imports: dict[str, tuple[int, float]] = {}
         self._inbox_poll_id = 0
         self._inbox_monitor: Gio.FileMonitor | None = None
         self._inbox_images_mtime = 0.0
+        self._images_scan_running = False
+        self._images_scan_again = False
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
         self._library_ready = False
@@ -3041,8 +3049,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
 
         cache_key = _thumb_cache_key(path, size)
-        # Instant if cached
-        cached = _thumb_textures.get(cache_key)
+        with _thumb_lock:
+            cached = _thumb_textures.get(cache_key)
         if cached is not None:
             picture.set_paintable(cached)
             picture.set_visible(True)
@@ -3060,31 +3068,58 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             icon.set_from_icon_name("image-x-generic-symbolic")
         icon.set_visible(True)
 
+        already_loading = False
+        with _thumb_lock:
+            _thumb_waiters.setdefault(cache_key, []).append((list_item, gen))
+            if cache_key in _thumb_inflight:
+                already_loading = True
+            else:
+                _thumb_inflight.add(cache_key)
+        if already_loading:
+            return
+
         def work() -> None:
             pixbuf = _decode_square_pixbuf(path, size)
 
             def apply() -> bool:
-                if getattr(list_item, "_thumb_gen", None) != gen:
+                texture = None
+                if pixbuf is not None:
+                    texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+                with _thumb_lock:
+                    _thumb_inflight.discard(cache_key)
+                    waiters = _thumb_waiters.pop(cache_key, [])
+                    if texture is not None:
+                        if len(_thumb_textures) >= _THUMB_CACHE_MAX:
+                            for _ in range(40):
+                                try:
+                                    _thumb_textures.pop(next(iter(_thumb_textures)))
+                                except StopIteration:
+                                    break
+                        _thumb_textures[cache_key] = texture
+                if texture is None:
                     return False
-                if pixbuf is None:
-                    return False
-                texture = Gdk.Texture.new_for_pixbuf(pixbuf)
-                # Cap cache
-                if len(_thumb_textures) >= _THUMB_CACHE_MAX:
-                    for _ in range(40):
-                        try:
-                            _thumb_textures.pop(next(iter(_thumb_textures)))
-                        except StopIteration:
-                            break
-                _thumb_textures[cache_key] = texture
-                picture.set_paintable(texture)
-                picture.set_visible(True)
-                icon.set_visible(False)
+                for li, waiter_gen in waiters:
+                    if getattr(li, "_thumb_gen", None) != waiter_gen:
+                        continue
+                    pic = getattr(li, "picture", None)
+                    icn = getattr(li, "icon", None)
+                    if pic is None:
+                        continue
+                    pic.set_paintable(texture)
+                    pic.set_visible(True)
+                    if icn is not None:
+                        icn.set_visible(False)
                 return False
 
             GLib.idle_add(apply)
 
-        _thumb_executor.submit(work)
+        try:
+            _thumb_executor.submit(work)
+        except RuntimeError:
+            # Pool shut down on window close
+            with _thumb_lock:
+                _thumb_inflight.discard(cache_key)
+                _thumb_waiters.pop(cache_key, None)
 
     def _on_grid_selection(self, selection: Gtk.SingleSelection, _pspec) -> None:
         obj = selection.get_selected_item()
@@ -3905,6 +3940,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ]
             for k in drop:
                 _thumb_textures.pop(k, None)
+                _thumb_waiters.pop(k, None)
+                _thumb_inflight.discard(k)
 
     def _refresh_after_in_place_edit(self, it: Item) -> None:
         """Reload grid, inspector, and viewer after overwriting an item on disk."""
@@ -5069,6 +5106,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if mt == self._inbox_images_mtime:
             return
         self._inbox_images_mtime = mt
+        self._start_images_scan()
+
+    def _start_images_scan(self) -> None:
+        """One images/ walker at a time. Extra mtime bumps queue a follow-up."""
+        if self._images_scan_running:
+            self._images_scan_again = True
+            return
+        self._images_scan_running = True
+        images = self.library.root / "images"
 
         def work() -> None:
             unknown: list[str] = []
@@ -5080,9 +5126,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     if iid not in self.library.items_by_id:
                         unknown.append(iid)
             except OSError:
-                return
-            if unknown:
-                GLib.idle_add(lambda: self._ingest_item_ids(unknown) or False)
+                unknown = []
+
+            def done() -> bool:
+                self._images_scan_running = False
+                if unknown:
+                    self._ingest_item_ids(unknown)
+                if self._images_scan_again:
+                    self._images_scan_again = False
+                    self._start_images_scan()
+                return False
+
+            GLib.idle_add(done)
 
         threading.Thread(target=work, name="eagle-scan-new", daemon=True).start()
 
@@ -5111,23 +5166,40 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._inbox_signal_ts = ts
         self._ingest_item_ids(ids)
 
+    _PENDING_MAX = 200
+    _PENDING_MAX_TRIES = 8
+    _PENDING_BACKOFF = (2.0, 5.0, 10.0, 20.0, 40.0, 60.0, 60.0, 60.0)
+
     def _retry_pending_imports(self) -> None:
-        if not self._pending_import_ids:
+        if not self._pending_imports:
             return
-        pending = list(self._pending_import_ids)
-        self._ingest_item_ids(pending)
+        now = time.time()
+        due = [iid for iid, (_tries, nxt) in self._pending_imports.items() if nxt <= now]
+        if due:
+            self._ingest_item_ids(due)
+
+    def _note_pending_import(self, iid: str) -> None:
+        tries, _nxt = self._pending_imports.get(iid, (0, 0.0))
+        tries += 1
+        if tries > self._PENDING_MAX_TRIES:
+            self._pending_imports.pop(iid, None)
+            return
+        if iid not in self._pending_imports and len(self._pending_imports) >= self._PENDING_MAX:
+            return
+        delay = self._PENDING_BACKOFF[min(tries, len(self._PENDING_BACKOFF)) - 1]
+        self._pending_imports[iid] = (tries, time.time() + delay)
 
     def _ingest_item_ids(self, item_ids: list[str]) -> None:
         new_items: list[Item] = []
         for iid in item_ids:
             if iid in self.library.items_by_id:
-                self._pending_import_ids.discard(iid)
+                self._pending_imports.pop(iid, None)
                 continue
             item = self.library.load_item(iid)
             if item is None:
-                self._pending_import_ids.add(iid)
+                self._note_pending_import(iid)
                 continue
-            self._pending_import_ids.discard(iid)
+            self._pending_imports.pop(iid, None)
             new_items.append(item)
         if new_items:
             self._apply_new_items(new_items, toast=True)
