@@ -75,11 +75,12 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `←` / `→` or `h` / `l` | Previous / next image |
 | `←` on leftmost column | Focus sidebar on the **current** smart folder / folder |
 | `↑` / `↓` or `k` / `j` | Image above / below (one row) |
-| `Enter` / `o` | Open larger: **images → imv**, **video/audio → mpv** |
+| `Enter` / `o` | Open larger: **images and videos → inline viewer**, **audio → mpv** |
 | `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
-| `x` | **Crop** focused image (also header-bar crop icon) |
-| `p` (video viewer) | **Save frame** — current time as a new untagged still |
+| `x` | **Crop** focused image (also the crop icon on the viewer toolbar) |
+| `F2` / `n` | **Rename** focused file (media + matching thumbnail; Eagle id unchanged) |
+| `p` (video playing) | **Save frame** at the current playhead; ffmpeg writes a new untagged still |
 | `Ctrl+A` | **Select all** assets in the current grid view |
 | `Delete` / `Backspace` | **Soft-delete** selection (Eagle trash — files stay on disk) |
 | `Ctrl+Z` | **Undo** last delete batch (restore items) |
@@ -322,7 +323,17 @@ Browsers open the system file picker (GTK portal). It does **not** auto-jump to 
 | `r` | Reset view |
 | `f` | Fullscreen |
 
-### Video / audio player (`mpv`) keys
+### Video viewer (center pane)
+
+| Key | Action |
+|-----|--------|
+| **`Enter`** / **`o`** / double-click | Play in the center pane |
+| **`Space`** | Play / pause |
+| **`p`** or camera button | Save the current frame as a new still |
+| **`Esc`** | Close the viewer |
+| `←` / `→` | Previous / next image or video |
+
+Audio still opens in **mpv**.
 
 | Key | Action |
 |-----|--------|

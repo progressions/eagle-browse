@@ -484,14 +484,17 @@ class SmartFolderEditor(Gtk.Window):
         rule = self._rule_at(g_idx, r_idx)
         if not isinstance(rule, TagsRule):
             return
-        current = set(rule.tags)
+        current = {t.strip().lower() for t in rule.tags if t and str(t).strip()}
 
         def on_toggle(tag: str, turn_on: bool) -> None:
+            key = tag.strip().lower()
+            if not key:
+                return
             if turn_on:
-                current.add(tag)
+                current.add(key)
             else:
-                current.discard(tag)
-            rule.tags = sorted(current, key=str.lower)
+                current.discard(key)
+            rule.tags = sorted(current)
             lab = self._rule_labels.get((g_idx, r_idx))
             if lab is not None:
                 lab.set_text(self._values_label(rule))

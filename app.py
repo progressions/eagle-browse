@@ -49,17 +49,18 @@ THUMB_SIZE_DEFAULT = 160  # square cell edge (Eagle-style uniform tiles)
 THUMB_SIZE_MIN = 72
 THUMB_SIZE_MAX = 360
 THUMB_SIZE_STEP = 24
-VIEWER_ZOOM_STEP = 1.15
-VIEWER_ZOOM_MAX = 8.0
+VIEWER_ZOOM_STEP = 1.08  # 8% of the current on-screen size per notch
+VIEWER_ZOOM_MAX = 8.0  # cap vs native pixels
+VIEWER_ZOOM_COOLDOWN_S = 0.12
 PAGE_CHUNK = 500  # first page + each infinite-scroll increment
+BULK_EDIT_CONFIRM = 100  # confirm tag/folder writes above this many items
 SEARCH_DEBOUNCE_MS = 150
 # Staging handoff (copy out of library — never writes into .library)
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
 # UI sounds extracted from Eagle.app (app/sounds/*.wav)
 _SOUNDS_DIR = Path(__file__).resolve().parent / "sounds"
-# Keep Gtk.MediaFile refs alive until playback finishes (otherwise GC stops audio).
-_playing_media: list[Any] = []
-
+# Sidebar expand/selection — survives close / crash
+_UI_STATE_PATH = Path.home() / ".config" / "eagle-browse" / "ui-state.json"
 # Grid sort options: (id, label) — applied after folder/smart/search filters
 SORT_OPTIONS: list[tuple[str, str]] = [
     ("added_desc", "Added · newest"),
@@ -100,8 +101,8 @@ def _sound_path(name: str) -> Path | None:
 def play_sound(name: str = "notification") -> None:
     """Play an Eagle UI sound (notification / remove / duplicate / error).
 
-    Primary path: Gtk.MediaFile (same process / session audio as the app).
-    Fallbacks: canberra-gtk-play, pw-play, paplay, mpv.
+    Always out-of-process. In-process Gtk.MediaFile / GStreamer has SIGSEGV'd
+    the whole app (GstPlay teardown); short UI clips are not worth that risk.
     Safe to call from the GTK main loop (e.g. GLib.idle_add).
     """
     path = _sound_path(name)
@@ -109,37 +110,6 @@ def play_sound(name: str = "notification") -> None:
         return
     path_s = str(path)
 
-    # 1) In-process GStreamer via GTK (most reliable under uwsm / Wayland)
-    try:
-        media = Gtk.MediaFile.new_for_filename(path_s)
-        media.set_loop(False)
-
-        def _on_ended(m: Gtk.MediaStream, *_args: object) -> None:
-            try:
-                _playing_media.remove(m)
-            except ValueError:
-                pass
-            if isinstance(m, Gtk.MediaFile):
-                try:
-                    m.clear()
-                except Exception:  # noqa: BLE001
-                    pass
-
-        media.connect("notify::ended", _on_ended)
-        _playing_media.append(media)
-        media.set_playing(True)
-        # If stream errors immediately, fall through to external players
-        err = media.get_error()
-        if err is None:
-            return
-        try:
-            _playing_media.remove(media)
-        except ValueError:
-            pass
-    except Exception:  # noqa: BLE001
-        pass
-
-    # 2) External CLI players (inherit session env for PipeWire/Pulse)
     env = os.environ.copy()
     players: list[list[str]] = []
     if shutil.which("canberra-gtk-play"):
@@ -159,8 +129,6 @@ def play_sound(name: str = "notification") -> None:
                 path_s,
             ]
         )
-    if shutil.which("gst-play-1.0"):
-        players.append(["gst-play-1.0", path_s])
     if shutil.which("ffplay"):
         players.append(
             ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path_s]
@@ -371,13 +339,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         reload_btn.connect("clicked", lambda *_: self.reload_library())
         header.pack_end(reload_btn)
 
-        self.crop_btn = Gtk.Button(
-            icon_name="image-crop-symbolic",
-            tooltip_text="Crop image or audio (x)",
+        self.rename_btn = Gtk.Button(
+            icon_name="document-edit-symbolic",
+            tooltip_text="Rename file (F2)",
         )
-        self.crop_btn.set_sensitive(False)
-        self.crop_btn.connect("clicked", lambda *_: self.open_crop_dialog())
-        header.pack_end(self.crop_btn)
+        self.rename_btn.set_sensitive(False)
+        self.rename_btn.connect("clicked", lambda *_: self.open_rename_dialog())
+        header.pack_end(self.rename_btn)
 
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         body.set_vexpand(True)
@@ -424,12 +392,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         filter_bar.set_margin_top(6)
         filter_bar.set_margin_bottom(2)
 
-        filter_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.btn_toggle_left = Gtk.Button(label="◀ Nav")
-        self.btn_toggle_left.add_css_class("flat")
-        self.btn_toggle_left.set_tooltip_text("Collapse/expand left sidebar")
-        self.btn_toggle_left.connect("clicked", lambda *_: self.toggle_left_sidebar())
-        filter_btns.append(self.btn_toggle_left)
+        filter_btns = Gtk.FlowBox()
+        filter_btns.set_selection_mode(Gtk.SelectionMode.NONE)
+        filter_btns.set_homogeneous(False)
+        filter_btns.set_hexpand(True)
+        filter_btns.set_halign(Gtk.Align.FILL)
+        filter_btns.set_valign(Gtk.Align.START)
+        filter_btns.set_min_children_per_line(1)
+        filter_btns.set_max_children_per_line(20)
+        filter_btns.set_column_spacing(6)
+        filter_btns.set_row_spacing(2)
+        filter_btns.set_can_focus(False)
+        filter_btns.add_css_class("eagle-filter-btns")
 
         for label, handler in (
             ("Tags", self.open_view_tag_filter),
@@ -460,35 +434,22 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.sort_dropdown.set_tooltip_text("Sort items in the current view")
         self.sort_dropdown.connect("notify::selected", self._on_sort_changed)
         filter_btns.append(self.sort_dropdown)
-
-        self.btn_toggle_right = Gtk.Button(label="Inspector ▶")
-        self.btn_toggle_right.add_css_class("flat")
-        self.btn_toggle_right.set_tooltip_text("Collapse/expand right inspector")
-        self.btn_toggle_right.connect("clicked", lambda *_: self.toggle_right_sidebar())
-        filter_btns.append(self.btn_toggle_right)
-        # Horizontal scroll so the button row cannot force the window wider
-        # than a scrolling-layout column (that clip ate the inspector).
-        btn_scroll = Gtk.ScrolledWindow()
-        btn_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
-        btn_scroll.set_hexpand(True)
-        btn_scroll.add_css_class("eagle-filter-btns")
-        try:
-            btn_scroll.set_propagate_natural_width(False)
-        except AttributeError:
-            pass
-        try:
-            btn_scroll.set_overlay_scrolling(True)
-        except AttributeError:
-            pass
-        btn_scroll.set_child(filter_btns)
-        filter_bar.append(btn_scroll)
+        filter_bar.append(filter_btns)
 
         self.filter_chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         self.filter_chips.set_hexpand(True)
         chip_scroll = Gtk.ScrolledWindow()
-        chip_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        try:
+            chip_h = Gtk.PolicyType.EXTERNAL
+        except AttributeError:
+            chip_h = Gtk.PolicyType.NEVER
+        chip_scroll.set_policy(chip_h, Gtk.PolicyType.NEVER)
         chip_scroll.set_child(self.filter_chips)
         chip_scroll.set_size_request(-1, 28)
+        try:
+            chip_scroll.set_propagate_natural_width(False)
+        except AttributeError:
+            pass
         filter_bar.append(chip_scroll)
         main.append(filter_bar)
 
@@ -516,20 +477,29 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.grid_scroll.set_hexpand(True)
         self.center_stack.add_named(self.grid_scroll, "grid")
 
-        # Inline viewer (Eagle-style detail pane) — images + in-frame video
+        # Inline viewer (Eagle-style detail pane) — stills + in-frame video.
+        # Audio still opens in mpv (no playhead we need). Video stays in-process
+        # so Space/p can read the current timestamp.
         self._viewer_open = False
         self._viewer_item_id: str | None = None
         self._viewer_mode: str = "image"  # "image" | "video"
         self._viewer_fit = True  # True = contain; False = scaled
         self._viewer_scale: float | None = None  # None = fit pane; else × native
-        self._viewer_zoom_acc = 0.0
-        self._viewer_media: Gtk.MediaFile | None = None
+        self._viewer_zoom_steps = 0  # 0 = fit; each notch is +1
+        self._viewer_pane: tuple[int, int] | None = None
+        self._viewer_src_pixbuf: GdkPixbuf.Pixbuf | None = None
+        self._viewer_zoom_last = 0.0
+        self._viewer_drag_h0 = 0.0
+        self._viewer_drag_v0 = 0.0
+        self._viewer_lock_center = False
+        self._viewer_center_wh: tuple[int, int] | None = None
+        self._viewer_setting_adj = False
         viewer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         viewer.set_hexpand(True)
         viewer.set_vexpand(True)
         viewer.add_css_class("view")
 
-        vbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        vbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         vbar.add_css_class("toolbar")
         vbar.set_margin_start(8)
         vbar.set_margin_end(8)
@@ -538,27 +508,57 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.viewer_title = Gtk.Label(xalign=0, hexpand=True, ellipsize=3)
         self.viewer_title.add_css_class("heading")
         vbar.append(self.viewer_title)
-        self.viewer_hint = Gtk.Label(label="←→ · Esc close · scroll/+- zoom")
+        self.viewer_hint = Gtk.Label(label="")
         self.viewer_hint.add_css_class("dim-label")
         self.viewer_hint.add_css_class("caption")
+        self.viewer_hint.set_ellipsize(3)
         vbar.append(self.viewer_hint)
-        self.viewer_save_frame_btn = Gtk.Button(label="Save frame")
-        self.viewer_save_frame_btn.add_css_class("flat")
-        self.viewer_save_frame_btn.set_tooltip_text(
-            "Save the current video frame as a new still (p)"
+
+        def _tool_icon(icon: str, tooltip: str, handler) -> Gtk.Button:
+            btn = Gtk.Button(icon_name=icon)
+            btn.add_css_class("flat")
+            btn.set_tooltip_text(tooltip)
+            btn.connect("clicked", lambda *_: handler())
+            return btn
+
+        self.crop_btn = _tool_icon(
+            "image-crop-symbolic", "Crop (x)", self.open_crop_dialog
+        )
+        self.crop_btn.set_sensitive(False)
+        self.viewer_zoom_out_btn = _tool_icon(
+            "zoom-out-symbolic", "Zoom out (scroll / −)", lambda: self.viewer_toggle_zoom(larger=False)
+        )
+        self.viewer_zoom_in_btn = _tool_icon(
+            "zoom-in-symbolic", "Zoom in (scroll / +)", lambda: self.viewer_toggle_zoom(larger=True)
+        )
+        self.viewer_save_frame_btn = _tool_icon(
+            "camera-photo-symbolic",
+            "Save current frame (p)",
+            self.save_viewer_frame,
         )
         self.viewer_save_frame_btn.set_visible(False)
-        self.viewer_save_frame_btn.connect(
-            "clicked", lambda *_: self.save_viewer_frame()
+        self.viewer_prev_btn = _tool_icon(
+            "go-previous-symbolic", "Previous (←)", lambda: self.viewer_navigate(-1)
         )
-        vbar.append(self.viewer_save_frame_btn)
-        close_btn = Gtk.Button(label="Close")
-        close_btn.add_css_class("flat")
-        close_btn.connect("clicked", lambda *_: self.close_inline_viewer())
-        vbar.append(close_btn)
+        self.viewer_next_btn = _tool_icon(
+            "go-next-symbolic", "Next (→)", lambda: self.viewer_navigate(1)
+        )
+        self.viewer_close_btn = _tool_icon(
+            "window-close-symbolic", "Close (Esc)", self.close_inline_viewer
+        )
+        for b in (
+            self.crop_btn,
+            self.viewer_zoom_out_btn,
+            self.viewer_zoom_in_btn,
+            self.viewer_save_frame_btn,
+            self.viewer_prev_btn,
+            self.viewer_next_btn,
+            self.viewer_close_btn,
+        ):
+            vbar.append(b)
         viewer.append(vbar)
 
-        # Stack: still image (Picture) vs video (Gtk.Video with controls)
+        # Stack: still image (DrawingArea) vs video (Gtk.Video with controls)
         self.viewer_body = Gtk.Stack()
         self.viewer_body.set_hexpand(True)
         self.viewer_body.set_vexpand(True)
@@ -569,22 +569,47 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.viewer_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         self.viewer_scroll.set_hexpand(True)
         self.viewer_scroll.set_vexpand(True)
-        self.viewer_picture = Gtk.Picture()
-        self.viewer_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
-        self.viewer_picture.set_can_shrink(True)
-        self.viewer_picture.set_halign(Gtk.Align.CENTER)
-        self.viewer_picture.set_valign(Gtk.Align.CENTER)
+        try:
+            self.viewer_scroll.set_propagate_natural_width(False)
+            self.viewer_scroll.set_propagate_natural_height(False)
+        except AttributeError:
+            pass
+        # DrawingArea reports the zoom size as its natural size, so the
+        # ScrolledWindow can pan. One source pixbuf is drawn scaled — no
+        # replace-paintable / delayed-recenter jump each notch.
+        self.viewer_picture = Gtk.DrawingArea()
         self.viewer_picture.set_hexpand(True)
         self.viewer_picture.set_vexpand(True)
+        self.viewer_picture.set_halign(Gtk.Align.CENTER)
+        self.viewer_picture.set_valign(Gtk.Align.CENTER)
         self.viewer_picture.set_can_focus(True)
+        self.viewer_picture.set_draw_func(self._on_viewer_draw, None)
         self.viewer_scroll.set_child(self.viewer_picture)
-        self.viewer_body.add_named(self.viewer_scroll, "image")
+        hadj = self.viewer_scroll.get_hadjustment()
+        vadj = self.viewer_scroll.get_vadjustment()
+        if hadj is not None:
+            hadj.connect("changed", self._on_viewer_adj_changed)
+            hadj.connect("value-changed", self._on_viewer_adj_value)
+        if vadj is not None:
+            vadj.connect("changed", self._on_viewer_adj_changed)
+            vadj.connect("value-changed", self._on_viewer_adj_value)
+        self.viewer_scroll.connect("notify::width", self._on_viewer_scroll_resized)
+        self.viewer_scroll.connect("notify::height", self._on_viewer_scroll_resized)
         # Wheel zooms the still; capture so the ScrolledWindow does not pan instead
-        vz = Gtk.EventControllerScroll()
-        vz.set_flags(Gtk.EventControllerScrollFlags.VERTICAL)
-        vz.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        vz.connect("scroll", self._on_viewer_scroll)
-        self.viewer_scroll.add_controller(vz)
+        for host in (self.viewer_scroll, self.viewer_picture):
+            vz = Gtk.EventControllerScroll()
+            vz.set_flags(Gtk.EventControllerScrollFlags.VERTICAL)
+            vz.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            vz.connect("scroll", self._on_viewer_scroll)
+            host.add_controller(vz)
+            vdrag = Gtk.GestureDrag()
+            vdrag.set_button(1)
+            vdrag.connect("drag-begin", self._on_viewer_drag_begin)
+            vdrag.connect("drag-update", self._on_viewer_drag_update)
+            vdrag.connect("drag-end", self._on_viewer_drag_end)
+            host.add_controller(vdrag)
+
+        self.viewer_body.add_named(self.viewer_scroll, "image")
 
         self.viewer_video = Gtk.Video()
         self.viewer_video.set_autoplay(True)
@@ -708,8 +733,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         hints = Gtk.Label(
             label=(
-                "Enter open (image/video) · Esc close viewer · Space play/pause · "
-                "p save frame · t tags · f folders · Ctrl+A all · Del · Ctrl+Z · Super+W"
+                "Enter open (image inline · video/audio mpv) · Esc close viewer · "
+                "p save video frame · t tags · f folders · Ctrl+A all · Del · Ctrl+Z · Super+W"
             ),
             xalign=0,
         )
@@ -740,7 +765,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.search.set_sensitive(True)
                 if self.center_stack.get_visible_child_name() == "loading":
                     self.center_stack.set_visible_child_name("grid")
-                self._populate_sidebar()
+                self._load_sidebar_state()
+                self._populate_sidebar(select_current=True)
                 self.refresh_items()
                 self._start_inbox_watch()
                 return False
@@ -802,8 +828,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             box.eagle-main {
                 min-width: 0;
             }
-            scrolledwindow.eagle-filter-btns {
+            flowbox.eagle-filter-btns {
                 min-width: 0;
+            }
+            flowbox.eagle-filter-btns > flowboxchild {
+                padding: 0;
             }
             gridview {
                 min-width: 0;
@@ -922,6 +951,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_title = _narrow_label(Gtk.Label(xalign=0), chars=22)
         self.insp_title.add_css_class("heading")
         box.append(self.insp_title)
+        self.insp_rename_btn = Gtk.Button(label="Rename")
+        self.insp_rename_btn.add_css_class("flat")
+        self.insp_rename_btn.set_halign(Gtk.Align.START)
+        self.insp_rename_btn.set_tooltip_text("Rename file (F2)")
+        self.insp_rename_btn.set_sensitive(False)
+        self.insp_rename_btn.connect("clicked", lambda *_: self.open_rename_dialog())
+        box.append(self.insp_rename_btn)
 
         # Dimensions — large and readable (main reason you glance at the inspector)
         self.insp_dims = _narrow_label(Gtk.Label(xalign=0), chars=18)
@@ -1069,6 +1105,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_subtitle.set_text("Select an asset in the grid")
         if hasattr(self, "crop_btn"):
             self.crop_btn.set_sensitive(False)
+        if hasattr(self, "rename_btn"):
+            self.rename_btn.set_sensitive(False)
+        if hasattr(self, "insp_rename_btn"):
+            self.insp_rename_btn.set_sensitive(False)
         self.insp_picture.set_paintable(None)
         self.insp_rating_note.set_text("")
         for b in self.insp_star_buttons:
@@ -1121,6 +1161,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.crop_btn.set_sensitive(
                     bool((it.is_image or it.is_audio) and it.path.is_file())
                 )
+            can_rename = bool(it.item_dir and it.path.is_file())
+            if hasattr(self, "rename_btn"):
+                self.rename_btn.set_sensitive(can_rename)
+            if hasattr(self, "insp_rename_btn"):
+                self.insp_rename_btn.set_sensitive(can_rename)
         else:
             self.insp_title.set_text(f"{n} assets selected")
             # Show size range when multi-selected and dimensions differ
@@ -1137,6 +1182,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._set_inspector_preview(_thumb_path_for(items[0]))
             if hasattr(self, "crop_btn"):
                 self.crop_btn.set_sensitive(False)
+            if hasattr(self, "rename_btn"):
+                self.rename_btn.set_sensitive(False)
+            if hasattr(self, "insp_rename_btn"):
+                self.insp_rename_btn.set_sensitive(False)
 
         # Rating commonality
         stars = {it.star for it in items}
@@ -1225,10 +1274,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _shutdown_background(self) -> None:
         """Stop timers / workers so the process can actually exit."""
-        try:
-            self._stop_inline_video()
-        except Exception:  # noqa: BLE001
-            pass
         if self._search_timeout_id:
             try:
                 GLib.source_remove(self._search_timeout_id)
@@ -1272,12 +1317,66 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _on_window_close_request(self, *_args) -> bool:
         """Window closed (including Hyprland Super+W killactive)."""
+        self._save_sidebar_state()
         self._shutdown_background()
         app = self.get_application()
         if app is not None:
             # Quit after this close finishes so D-Bus single-instance releases.
             GLib.idle_add(app.quit)
         return False  # allow destroy
+
+    def _save_sidebar_state(self) -> None:
+        """Write expand + current-view ids so the next launch matches."""
+        if not getattr(self, "_library_ready", False):
+            return
+        data = {
+            "smart_expanded": sorted(self._smart_expanded),
+            "folders_section_expanded": bool(self._folders_section_expanded),
+            "current_smart_folder_id": self.current_smart_folder_id,
+            "current_folder_id": self.current_folder_id,
+            "special_view": self._special_view,
+        }
+        try:
+            _UI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _UI_STATE_PATH.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            tmp.replace(_UI_STATE_PATH)
+        except OSError:
+            pass
+
+    def _load_sidebar_state(self) -> None:
+        """Restore expand + current view after the library has loaded."""
+        try:
+            data = json.loads(_UI_STATE_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(data, dict):
+            return
+        valid_smart = set(self.library.smart_folders_by_id)
+        valid_folder = set(self.library.folders_by_id)
+        raw_exp = data.get("smart_expanded") or []
+        if isinstance(raw_exp, list):
+            self._smart_expanded = {str(i) for i in raw_exp if str(i) in valid_smart}
+        self._folders_section_expanded = bool(data.get("folders_section_expanded"))
+        sid = data.get("current_smart_folder_id")
+        fid = data.get("current_folder_id")
+        special = data.get("special_view")
+        self.current_smart_folder_id = (
+            str(sid) if sid and str(sid) in valid_smart else None
+        )
+        self.current_folder_id = (
+            str(fid) if fid and str(fid) in valid_folder else None
+        )
+        self._special_view = (
+            special if special in ("untagged", "uncategorized") else None
+        )
+        if self.current_smart_folder_id:
+            self.current_folder_id = None
+            self._special_view = None
+            self._ensure_smart_expanded_path(self.current_smart_folder_id)
+        elif self.current_folder_id:
+            self._special_view = None
+            self._folders_section_expanded = True
 
     # ── Sidebar ───────────────────────────────────────────────────────
 
@@ -1632,25 +1731,38 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         for parent_id in self._smart_ancestors(smart_id):
             self._smart_expanded.add(parent_id)
 
+    def _smart_is_under(self, smart_id: str | None, ancestor_id: str) -> bool:
+        """True if *smart_id* is *ancestor_id* or a descendant of it."""
+        if not smart_id or not ancestor_id:
+            return False
+        if smart_id == ancestor_id:
+            return True
+        return ancestor_id in self._smart_ancestors(smart_id)
+
     def _toggle_smart_expand(self, smart_id: str) -> None:
         if not smart_id:
             return
         if smart_id in self._smart_expanded:
+            # A selected child would force this parent open again. Move
+            # the view to the parent, then collapse.
+            moved = False
+            if self._smart_is_under(self.current_smart_folder_id, smart_id):
+                self.current_smart_folder_id = smart_id
+                self.current_folder_id = None
+                self._special_view = None
+                moved = True
             self._smart_expanded.discard(smart_id)
-            # Collapse descendants too so re-expand starts clean
             to_drop = {
                 sid
                 for sid in self._smart_expanded
-                if smart_id in self._smart_ancestors(sid) or sid == smart_id
+                if smart_id in self._smart_ancestors(sid)
             }
-            # Also drop any expanded node whose ancestor chain includes smart_id
-            for sid in list(self._smart_expanded):
-                if smart_id in self._smart_ancestors(sid):
-                    to_drop.add(sid)
             self._smart_expanded -= to_drop
-            self._smart_expanded.discard(smart_id)
-        else:
-            self._smart_expanded.add(smart_id)
+            self._repopulate_sidebar_keep_selection()
+            if moved:
+                self.refresh_items(reset_selection=True, scroll_to_top=True)
+            return
+        self._smart_expanded.add(smart_id)
         self._repopulate_sidebar_keep_selection()
 
     def _repopulate_sidebar_keep_selection(self) -> None:
@@ -1659,6 +1771,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if self.current_folder_id:
             self._folders_section_expanded = True
         self._populate_sidebar(select_current=True)
+        self._save_sidebar_state()
 
     def _smart_label(self, sf: SmartFolder) -> str:
         """Sidebar label with live count, e.g. 'images (12)'."""
@@ -1946,7 +2059,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.current_folder_id = new_folder
         self._special_view = new_special
         # Reset selection when changing scope, or after closing a preview from the sidebar
-        self.refresh_items(reset_selection=not same_place or was_viewing)
+        # Sidebar click always starts at the top. Dialogs still pass
+        # reset_selection=False so tag/folder pickers keep their offset.
+        self.refresh_items(
+            reset_selection=not same_place or was_viewing,
+            scroll_to_top=True,
+        )
+        self._save_sidebar_state()
 
     def _restore_sidebar_selection(self) -> None:
         target_smart = self.current_smart_folder_id
@@ -2054,6 +2173,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                         r.grab_focus()
                         break
                     r = r.get_next_sibling()
+                self._save_sidebar_state()
                 return True
             return False
         if kind != "smart":
@@ -2120,17 +2240,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def toggle_left_sidebar(self) -> None:
         self._left_sidebar_open = not self._left_sidebar_open
         self.left_sidebar.set_visible(self._left_sidebar_open)
-        self.btn_toggle_left.set_label(
-            "◀ Nav" if self._left_sidebar_open else "▶ Nav"
-        )
         self._schedule_column_sync()
 
     def toggle_right_sidebar(self) -> None:
         self._right_sidebar_open = not self._right_sidebar_open
         self.inspector_sidebar.set_visible(self._right_sidebar_open)
-        self.btn_toggle_right.set_label(
-            "Inspector ▶" if self._right_sidebar_open else "Inspector ◀"
-        )
         self._schedule_column_sync()
 
     def _grid_scroll_value(self) -> float:
@@ -2185,6 +2299,37 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._maybe_load_more()
             return False
 
+        self._scroll_restore_source = GLib.timeout_add(10, apply)
+
+    def _scroll_grid_to_top(self) -> None:
+        """Pin the grid at 0 after a view change. One set_value is lost on rebuild."""
+        self._cancel_scroll_restore()
+        gen = self._scroll_restore_gen
+        attempts = {"n": 0}
+
+        def apply() -> bool:
+            if gen != self._scroll_restore_gen:
+                self._scroll_restore_source = 0
+                return False
+            attempts["n"] += 1
+            self._restoring_scroll = True
+            try:
+                self._set_grid_scroll_value(0.0)
+                if self.store.get_n_items() > 0:
+                    try:
+                        self.grid.scroll_to(0, Gtk.ListScrollFlags.NONE, None)
+                    except Exception:  # noqa: BLE001
+                        pass
+            finally:
+                self._restoring_scroll = False
+            adj = self.grid_scroll.get_vadjustment()
+            at_top = adj is None or float(adj.get_value()) <= 1.0
+            if at_top or attempts["n"] >= 20:
+                self._scroll_restore_source = 0
+                return False
+            return True
+
+        self._set_grid_scroll_value(0.0)
         self._scroll_restore_source = GLib.timeout_add(10, apply)
 
     def _on_grid_scrolled(self, *_args: object) -> None:
@@ -2279,14 +2424,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _on_grid_has_focus_notify(self, *_args) -> None:
         self._set_grid_focus(self.grid.has_focus())
 
-    def refresh_items(self, *, reset_selection: bool = False) -> None:
+    def refresh_items(
+        self, *, reset_selection: bool = False, scroll_to_top: bool | None = None
+    ) -> None:
         """
         Kick off a background query so the UI never freezes on smart folders.
 
         By default, multi-selection (_marked) is preserved across refresh so
         tagging/categorizing on Untagged/Uncategorized can remove items from
         the view without clearing the selection. Pass reset_selection=True
-        when changing sidebar scope.
+        when changing sidebar scope. scroll_to_top defaults to that same flag;
+        sidebar clicks pass True even when the folder is already selected.
         """
         self._query_gen += 1
         gen = self._query_gen
@@ -2306,20 +2454,22 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if (not reset_selection and self.selected_item is not None)
             else None
         )
-        keep_scroll = 0.0 if reset_selection else self._grid_scroll_value()
+        if scroll_to_top is None:
+            scroll_to_top = reset_selection
+        keep_scroll = 0.0 if scroll_to_top else self._grid_scroll_value()
         keep_loaded = 0 if reset_selection else len(self._items)
-        if reset_selection:
+        if scroll_to_top:
             self._cancel_scroll_restore()
 
         def work() -> None:
-            # Watcher imports land on disk; pick them up when changing folder
-            # so "Added · newest" is not a stale in-memory snapshot.
+            # Always drop query cache so tag/star/folder edits re-evaluate
+            # smart folders. Scan disk only when changing sidebar scope.
             if reset_selection:
                 try:
                     self.library.scan_new_items()
                 except Exception:  # noqa: BLE001
                     pass
-                self.library._invalidate_caches()  # noqa: SLF001
+            self.library._invalidate_caches()  # noqa: SLF001
             if special in ("untagged", "uncategorized"):
                 items = self.library.query(
                     search=search,
@@ -2464,7 +2614,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._refresh_status()
                 self._update_path_label()
                 self._rebuild_filter_chips()
-                if not reset_selection:
+                if scroll_to_top:
+                    self._scroll_grid_to_top()
+                elif not reset_selection:
                     self._restore_grid_scroll(keep_scroll)
                 else:
                     self._set_grid_scroll_value(0.0)
@@ -2891,7 +3043,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         shift: bool = False,
         from_click: bool = False,
     ) -> None:
-        """Update focus + multi-selection (replace / Ctrl-toggle / Shift-path)."""
+        """Update focus + multi-selection (replace / Ctrl-toggle / Shift-range)."""
         n = len(self._items)
         if n == 0 or idx < 0 or idx >= n:
             return
@@ -2904,14 +3056,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
 
         if shift:
-            # Path-style multi-select: keep existing marks and add only the
-            # newly focused cell (and the shift-anchor). Does NOT fill a
-            # rectangle or linear range — Shift+Right then Shift+Down yields
-            # an L of 3, not a square of 4.
-            if 0 <= self._sel_anchor < n:
-                self._marked.add(self._items[self._sel_anchor].id)
-            self._marked.add(item.id)
-            # Anchor stays at the start of the shift gesture (set on non-shift)
+            # Fill every item from the click/keyboard anchor to here.
+            anchor = self._sel_anchor
+            if anchor < 0 or anchor >= n:
+                anchor = idx
+            lo, hi = (anchor, idx) if anchor <= idx else (idx, anchor)
+            self._marked = {self._items[i].id for i in range(lo, hi + 1)}
         elif ctrl:
             if item.id in self._marked:
                 self._marked.discard(item.id)
@@ -2950,6 +3100,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 card.add_css_class("accent")
             else:
                 card.remove_css_class("accent")
+
+    def _sync_star_overlays(self) -> None:
+        """Update ★ overlays on visible tiles without rebuilding the grid."""
+        for li in list(self._live_list_items):
+            obj = li.get_item()
+            if obj is None:
+                continue
+            item: Item = obj.item
+            stars_lbl: Gtk.Label = getattr(li, "stars", None)  # type: ignore[assignment]
+            if stars_lbl is None:
+                continue
+            if item.star and 1 <= item.star <= 5:
+                stars_lbl.set_text("★" * item.star)
+                stars_lbl.set_visible(True)
+            else:
+                stars_lbl.set_text("")
+                stars_lbl.set_visible(False)
 
     def _clipboard_set_text(self, text: str) -> bool:
         display = Gdk.Display.get_default()
@@ -3016,8 +3183,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             # Cap undo history
             if len(self._delete_undo_stack) > 50:
                 self._delete_undo_stack = self._delete_undo_stack[-50:]
+            if self.is_viewer_open():
+                self.close_inline_viewer(restore_scroll=True)
             self._marked.clear()
-            self.refresh_items()
+            self.refresh_items(reset_selection=False, scroll_to_top=False)
             msg = f"Deleted {len(ok_ids)} · Ctrl+Z undo"
             if errors:
                 msg += f" · {len(errors)} failed"
@@ -3203,7 +3372,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except WriteError as exc:
             self._toast(str(exc))
             return
-        self._rebind_grid_keep_selection()
+        self._sync_star_overlays()
+        self.refresh_items(reset_selection=False, scroll_to_top=False)
         self._update_path_label()
         self.update_inspector()
         if star:
@@ -3213,6 +3383,111 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if errors:
             msg += f" · {len(errors)} failed"
         self._toast(msg)
+
+    def open_rename_dialog(self) -> None:
+        """Rename the focused item's file stem. Thumbnail is renamed with it."""
+        if self._picker_blocking:
+            return
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        if len(items) != 1:
+            self._toast("Rename one file at a time")
+            return
+        item = items[0]
+        if item.item_dir is None or not item.path.is_file():
+            self._toast("Cannot rename this item")
+            return
+
+        win = Gtk.Window(
+            title="Rename",
+            transient_for=self,
+            modal=True,
+            default_width=420,
+        )
+        self._remember_dialog(win)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        win.set_child(box)
+        hint = Gtk.Label(
+            label="Changes the file name and its thumbnail. The Eagle id stays the same.",
+            xalign=0,
+            wrap=True,
+        )
+        hint.add_css_class("dim-label")
+        box.append(hint)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        entry = Gtk.Entry()
+        entry.set_text(item.name)
+        entry.set_hexpand(True)
+        entry.set_activates_default(True)
+        row.append(entry)
+        if item.ext:
+            ext_lbl = Gtk.Label(label=f".{item.ext}")
+            ext_lbl.add_css_class("dim-label")
+            row.append(ext_lbl)
+        box.append(row)
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btns.set_halign(Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        save = Gtk.Button(label="Rename")
+        save.add_css_class("suggested-action")
+        btns.append(cancel)
+        btns.append(save)
+        box.append(btns)
+
+        def close_win(*_a) -> None:
+            if self._open_dialog is win:
+                self._open_dialog = None
+            self._picker_blocking = False
+            try:
+                win.close()
+            except Exception:
+                win.destroy()
+
+        def apply(*_a) -> None:
+            from write import WriteError
+
+            raw = entry.get_text()
+            try:
+                self._invalidate_thumb_cache_for(item)
+                it = self.library.rename_item(item.id, raw)
+            except WriteError as exc:
+                self._toast(str(exc))
+                return
+            except OSError as exc:
+                self._toast(str(exc))
+                return
+            self._refresh_after_in_place_edit(it)
+            if self._sort_key.startswith("name"):
+                self.refresh_items(reset_selection=False)
+            self._toast(f"Renamed · {it.display_name}")
+            close_win()
+
+        cancel.connect("clicked", close_win)
+        save.connect("clicked", apply)
+        key = Gtk.EventControllerKey()
+
+        def on_key(_c, keyval: int, _kc: int, _state: Gdk.ModifierType) -> bool:
+            if keyval == Gdk.KEY_Escape:
+                close_win()
+                return True
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                apply()
+                return True
+            return False
+
+        key.connect("key-pressed", on_key)
+        win.add_controller(key)
+        win.connect("close-request", lambda *_: False)
+        win.present()
+        entry.grab_focus()
+        entry.select_region(0, -1)
 
     def open_crop_dialog(self) -> None:
         """Open the crop editor for the focused image or audio file."""
@@ -3316,6 +3591,39 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         else:
             self.update_inspector()
 
+    def _confirm_bulk_edit(
+        self,
+        n: int,
+        *,
+        heading: str,
+        body: str,
+        apply_fn,
+        parent: Gtk.Window | None = None,
+    ) -> bool:
+        """If *n* > 100, ask first. Returns False when the write is deferred."""
+        if n <= BULK_EDIT_CONFIRM:
+            apply_fn()
+            return True
+        dialog = Adw.MessageDialog(
+            transient_for=parent or self,
+            heading=heading,
+            body=body,
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("apply", "Apply")
+        dialog.set_response_appearance("apply", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+
+        def on_resp(_d: Adw.MessageDialog, response: str) -> None:
+            _d.close()
+            if response == "apply":
+                apply_fn()
+
+        dialog.connect("response", on_resp)
+        dialog.present()
+        return False
+
     def edit_tags_dialog(self) -> None:
         """Keyboard tag picker: recent + autocomplete, Enter toggles, Esc closes."""
         from picker import TogglePicker, load_recent
@@ -3340,8 +3648,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         recent = load_recent("tags")
         ids = [it.id for it in items]
         n = len(items)
+        picker_ref: dict[str, object] = {"p": None}
 
-        def on_toggle(tag: str, turn_on: bool) -> None:
+        def apply_tag(tag: str, turn_on: bool, *, update_picker: bool) -> None:
             try:
                 if n == 1:
                     if turn_on:
@@ -3356,11 +3665,28 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except WriteError as exc:
                 self._toast(str(exc))
                 raise
-            # Re-query so Untagged drops just-tagged items; keep multi-select
-            self.refresh_items()
+            # Re-query so the current smart folder / Untagged drops mismatches
+            self.refresh_items(reset_selection=False, scroll_to_top=False)
             # Sidebar badge: keep Untagged (N) fresh even when not on that view
             self._refresh_special_counts()
             self._toast(("+ " if turn_on else "− ") + tag)
+            picker = picker_ref["p"]
+            if update_picker and picker is not None:
+                picker.note_toggled(tag, turn_on)  # type: ignore[union-attr]
+
+        def on_toggle(tag: str, turn_on: bool) -> bool:
+            if n > BULK_EDIT_CONFIRM:
+                verb = "Add" if turn_on else "Remove"
+                self._confirm_bulk_edit(
+                    n,
+                    heading=f"{verb} tag on {n} items?",
+                    body=f"{verb} “{tag}” on {n} selected items.",
+                    apply_fn=lambda: apply_tag(tag, turn_on, update_picker=True),
+                    parent=picker_ref["p"],  # type: ignore[arg-type]
+                )
+                return False
+            apply_tag(tag, turn_on, update_picker=False)
+            return True
 
         def on_close() -> None:
             self.grid.grab_focus()
@@ -3380,6 +3706,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             on_toggle=on_toggle,
             on_close=on_close,
         )
+        picker_ref["p"] = picker
         picker.present()
 
     def edit_folder_auto_tags(self, folder_id: str | None = None) -> None:
@@ -3409,10 +3736,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         recent = load_recent("tags")
 
         def on_toggle(tag: str, turn_on: bool) -> None:
+            key = tag.strip().lower()
+            if not key:
+                return
             if turn_on:
-                current.add(tag)
+                current.add(key)
+                current.difference_update({t for t in list(current) if t != key and t.lower() == key})
             else:
-                current.discard(tag)
+                current.discard(key)
+                current.difference_update({t for t in list(current) if t.lower() == key})
             try:
                 self.library.set_folder_auto_tags(fid, sorted(current, key=str.lower))
             except WriteError as exc:
@@ -3679,15 +4011,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         recent = [r for r in load_recent("folders") if r in path_to_id or r in id_to_path.values()]
         ids = [it.id for it in items]
         n = len(items)
+        picker_ref: dict[str, object] = {"p": None}
 
-        def on_toggle(path_label: str, turn_on: bool) -> None:
+        def resolve_fid(path_label: str) -> str | None:
             fid = path_to_id.get(path_label)
-            if not fid:
-                # Try exact path match
-                for k, v in id_to_path.items():
-                    if v == path_label:
-                        fid = k
-                        break
+            if fid:
+                return fid
+            for k, v in id_to_path.items():
+                if v == path_label:
+                    return k
+            return None
+
+        def apply_folder(path_label: str, turn_on: bool, *, update_picker: bool) -> None:
+            fid = resolve_fid(path_label)
             if not fid:
                 self._toast(f"Unknown folder: {path_label}")
                 raise WriteError(f"Unknown folder: {path_label}")
@@ -3705,8 +4041,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except WriteError as exc:
                 self._toast(str(exc))
                 raise
-            # Re-query so Uncategorized drops just-filed items; keep multi-select
-            self.refresh_items()
+            # Re-query so the current smart folder / Uncategorized drops mismatches
+            self.refresh_items(reset_selection=False, scroll_to_top=False)
             # Sidebar badge: keep Uncategorized (N) fresh even when not on that view
             self._refresh_special_counts()
             msg = ("+ " if turn_on else "− ") + path_label
@@ -3715,6 +4051,31 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 if auto:
                     msg += " · auto-tags " + ", ".join(auto)
             self._toast(msg)
+            picker = picker_ref["p"]
+            if update_picker and picker is not None:
+                picker.note_toggled(path_label, turn_on)  # type: ignore[union-attr]
+
+        def on_toggle(path_label: str, turn_on: bool) -> bool:
+            if n > BULK_EDIT_CONFIRM:
+                verb = "Add" if turn_on else "Remove"
+                extra = ""
+                fid = resolve_fid(path_label)
+                if turn_on and fid:
+                    auto = self.library.auto_tags_for_folders([fid])
+                    if auto:
+                        extra = f" Auto-tags {', '.join(auto)} will also be applied."
+                self._confirm_bulk_edit(
+                    n,
+                    heading=f"{verb} category on {n} items?",
+                    body=f"{verb} “{path_label}” on {n} selected items.{extra}",
+                    apply_fn=lambda: apply_folder(
+                        path_label, turn_on, update_picker=True
+                    ),
+                    parent=picker_ref["p"],  # type: ignore[arg-type]
+                )
+                return False
+            apply_folder(path_label, turn_on, update_picker=False)
+            return True
 
         def on_close() -> None:
             self.grid.grab_focus()
@@ -3734,6 +4095,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             on_toggle=on_toggle,
             on_close=on_close,
         )
+        picker_ref["p"] = picker
         picker.present()
 
     def _rebuild_filter_chips(self) -> None:
@@ -3801,19 +4163,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         recent = load_recent("filter_tags")
 
         def on_include(tag: str, turn_on: bool) -> None:
+            key = tag.strip().lower()
             if turn_on:
-                vf.tags_include.add(tag)
-                vf.tags_exclude.discard(tag)
+                vf.tags_include.add(key)
+                vf.tags_exclude.discard(key)
             else:
-                vf.tags_include.discard(tag)
+                vf.tags_include.discard(key)
             self.refresh_items()
 
         def on_exclude(tag: str, turn_on: bool) -> None:
+            key = tag.strip().lower()
             if turn_on:
-                vf.tags_exclude.add(tag)
-                vf.tags_include.discard(tag)
+                vf.tags_exclude.add(key)
+                vf.tags_include.discard(key)
             else:
-                vf.tags_exclude.discard(tag)
+                vf.tags_exclude.discard(key)
             self.refresh_items()
 
         TogglePicker(
@@ -4988,76 +5352,39 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return False
 
     def _stop_inline_video(self) -> None:
-        """Tear down the in-frame GStreamer pipeline, not just pause it.
-
-        Gtk.Video.set_filename() leaves the previous Gtk.MediaFile / playbin
-        alive (file FDs, decoder threads, PipeWire streams). Pause +
-        set_file(None) is not enough — clear() and detach the stream.
-        """
-        media = getattr(self, "_viewer_media", None)
-        stream = media
+        """Pause and detach any in-frame video stream."""
+        video = getattr(self, "viewer_video", None)
+        if video is None:
+            return
         try:
-            widget_stream = self.viewer_video.get_media_stream()
-        except Exception:  # noqa: BLE001
-            widget_stream = None
-        if stream is None:
-            stream = widget_stream
-
-        try:
-            self.viewer_video.set_autoplay(False)
+            stream = video.get_media_stream()
+            if stream is not None:
+                stream.set_playing(False)
         except Exception:  # noqa: BLE001
             pass
-        # Detach first so Gtk.Video / MediaControls drop their refs.
         try:
-            self.viewer_video.set_media_stream(None)
+            video.set_file(None)
         except Exception:  # noqa: BLE001
             try:
-                self.viewer_video.set_file(None)
+                video.set_media_stream(None)
             except Exception:  # noqa: BLE001
                 pass
-
-        if stream is not None:
-            for stopper in (
-                lambda: stream.set_playing(False),
-                lambda: stream.pause(),
-            ):
-                try:
-                    stopper()
-                except Exception:  # noqa: BLE001
-                    pass
-            if isinstance(stream, Gtk.MediaFile):
-                try:
-                    stream.clear()
-                except Exception:  # noqa: BLE001
-                    try:
-                        stream.set_file(None)
-                    except Exception:  # noqa: BLE001
-                        pass
-            try:
-                if stream.is_prepared():
-                    stream.stream_unprepared()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                native = self.get_native()
-                surface = native.get_surface() if native is not None else None
-                if surface is not None:
-                    stream.unrealize(surface)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                stream.run_dispose()
-            except Exception:  # noqa: BLE001
-                pass
-
-        self._viewer_media = None
 
     def open_inline_viewer(self, item: Item | None = None) -> None:
-        """Show image or video in the center pane (between sidebars), Eagle-style."""
+        """Show a still or video in the center pane (Eagle-style detail view).
+
+        Audio still opens in an external player.
+        """
         item = item or self.selected_item
         if item is None:
             self._toast("Nothing selected")
             return
+        if item.is_audio or (not item.is_image and not item.is_video):
+            if self.is_viewer_open():
+                self.close_inline_viewer(restore_scroll=True)
+            self._open_external_media(item)
+            return
+
         # Capture grid offset before the stack unmaps it (that resets scroll).
         if not self.is_viewer_open():
             self._saved_grid_scroll = {
@@ -5065,81 +5392,53 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 "loaded": len(self._items),
                 "focus_id": item.id,
             }
+            self._snapshot_viewer_pane()
+
         if item.is_video:
             self._open_inline_video(item)
             return
-        if not item.is_image:
-            # Audio / other: external player
-            self._open_external_media(item)
-            return
+
         path = item.path
         if not path.is_file():
             self._toast(f"Missing file: {path}")
             return
 
-        # Leave any previous video stream before showing a still
         self._stop_inline_video()
 
         # Prefer full image; decode from bytes so an overwrite is not cached
-        paintable = None
         pb = _pixbuf_from_path(str(path), 4096, 4096)
-        if pb is not None:
-            paintable = Gdk.Texture.new_for_pixbuf(pb)
-        else:
+        if pb is None:
             self._toast(f"Could not load image: {path}")
             return
 
-        self.viewer_picture.set_paintable(paintable)
+        self._viewer_src_pixbuf = pb
         self.viewer_title.set_text(item.display_name)
-        self.viewer_hint.set_text("←→ · Esc close · scroll/+- zoom")
-        self.viewer_save_frame_btn.set_visible(False)
+        self.viewer_hint.set_text("")
         self._viewer_item_id = item.id
         self._viewer_open = True
         self._viewer_mode = "image"
+        self._sync_viewer_toolbar()
         self._viewer_fit = True
         self._viewer_scale = None
-        self._viewer_zoom_acc = 0.0
-        self._apply_viewer_zoom()
+        self._viewer_zoom_steps = 0
+        self._viewer_zoom_last = 0.0
         self.viewer_body.set_visible_child_name("image")
+        self._apply_viewer_zoom()
         self.center_stack.set_visible_child_name("viewer")
         self.viewer_picture.grab_focus()
+
+        def _after_map() -> bool:
+            if not self.is_viewer_open() or self._viewer_mode != "image":
+                return False
+            self._snapshot_viewer_pane()
+            if self._viewer_zoom_steps <= 0:
+                self._apply_viewer_zoom()
+            self.viewer_picture.queue_draw()
+            return False
+
+        GLib.idle_add(_after_map)
+        GLib.timeout_add(30, _after_map)
         # Keep grid selection in sync for inspector
-        self.selected_item = item
-        self.update_inspector()
-        self._update_path_label()
-
-    def _open_inline_video(self, item: Item) -> None:
-        """Play a video in the center pane (Gtk.Video / GStreamer)."""
-        path = item.path
-        if not path.is_file():
-            self._toast(f"Missing file: {path}")
-            return
-
-        # Drop the previous playbin before opening another clip.
-        self._stop_inline_video()
-        self.viewer_picture.set_paintable(None)
-        try:
-            media = Gtk.MediaFile.new_for_filename(str(path))
-            media.set_loop(False)
-            self._viewer_media = media
-            self.viewer_video.set_media_stream(media)
-            self.viewer_video.set_autoplay(True)
-            media.set_playing(True)
-        except Exception as exc:  # noqa: BLE001
-            self._viewer_media = None
-            self._toast(f"Could not load video: {exc}")
-            self._open_external_media(item)
-            return
-
-        self.viewer_title.set_text(item.display_name)
-        self.viewer_hint.set_text("Space play/pause · p save frame · ←→ next · Esc close")
-        self.viewer_save_frame_btn.set_visible(True)
-        self._viewer_item_id = item.id
-        self._viewer_open = True
-        self._viewer_mode = "video"
-        self.viewer_body.set_visible_child_name("video")
-        self.center_stack.set_visible_child_name("viewer")
-        self.viewer_video.grab_focus()
         self.selected_item = item
         self.update_inspector()
         self._update_path_label()
@@ -5151,9 +5450,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._viewer_open = False
         self._viewer_item_id = None
         self._viewer_mode = "image"
-        self.viewer_save_frame_btn.set_visible(False)
+        self._viewer_src_pixbuf = None
+        self._viewer_zoom_steps = 0
+        self._viewer_scale = None
+        self._viewer_lock_center = False
+        self._viewer_center_wh = None
         self._stop_inline_video()
-        self.viewer_picture.set_paintable(None)
+        self._sync_viewer_toolbar()
+        try:
+            self.viewer_body.set_visible_child_name("image")
+        except Exception:  # noqa: BLE001
+            pass
+        self.viewer_picture.queue_draw()
+        try:
+            self.viewer_picture.set_cursor_from_name("default")
+            self.viewer_scroll.set_cursor_from_name("default")
+        except Exception:
+            pass
         self.center_stack.set_visible_child_name("grid")
         snap = self._saved_grid_scroll
         self._saved_grid_scroll = None
@@ -5167,6 +5480,37 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._cancel_scroll_restore()
         return True
 
+    def _open_inline_video(self, item: Item) -> None:
+        """Play a video in the center pane (Gtk.Video)."""
+        path = item.path
+        if not path.is_file():
+            self._toast(f"Missing file: {path}")
+            return
+
+        self._stop_inline_video()
+        self._viewer_src_pixbuf = None
+        self.viewer_picture.queue_draw()
+        try:
+            self.viewer_video.set_filename(str(path))
+            self.viewer_video.set_autoplay(True)
+        except Exception as exc:  # noqa: BLE001
+            self._toast(f"Could not load video: {exc}")
+            self._open_external_media(item)
+            return
+
+        self.viewer_title.set_text(item.display_name)
+        self.viewer_hint.set_text("Space play/pause · p save frame")
+        self._viewer_item_id = item.id
+        self._viewer_open = True
+        self._viewer_mode = "video"
+        self._sync_viewer_toolbar()
+        self.viewer_body.set_visible_child_name("video")
+        self.center_stack.set_visible_child_name("viewer")
+        self.viewer_video.grab_focus()
+        self.selected_item = item
+        self.update_inspector()
+        self._update_path_label()
+
     def viewer_toggle_play(self) -> None:
         """Space while video is open: play/pause."""
         if not self.is_viewer_open() or self._viewer_mode != "video":
@@ -5177,14 +5521,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         stream.set_playing(not stream.get_playing())
 
     def save_viewer_frame(self) -> None:
-        """Grab the current video frame as a new untagged still in the library."""
+        """Grab the current playhead frame as a new untagged still."""
         from import_media import save_video_frame_as_item
         from write import WriteError
 
-        if not self.is_viewer_open() or self._viewer_mode != "video":
-            self._toast("Open a video first")
-            return
         if self._frame_saving:
+            return
+        if not self.is_viewer_open() or self._viewer_mode != "video":
+            self._toast("Play the video first")
             return
         item = None
         if self._viewer_item_id:
@@ -5192,6 +5536,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         item = item or self.selected_item
         if item is None or not item.is_video:
             self._toast("No video to grab from")
+            return
+        if not item.path.is_file():
+            self._toast(f"Missing file: {item.path}")
             return
         stream = self.viewer_video.get_media_stream()
         if stream is None:
@@ -5207,14 +5554,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast(f"Could not read time: {exc}")
             return
         seconds = max(0.0, ts_us / 1_000_000.0)
+        dur_s = float(item.duration or 0.0)
+        last_frame = bool(dur_s > 0 and seconds >= max(0.0, dur_s - 0.12))
+        where = "last frame" if last_frame else f"{seconds:.2f}s"
         self._frame_saving = True
-        self.viewer_save_frame_btn.set_sensitive(False)
-        self._toast(f"Saving frame · {seconds:.2f}s…")
+        if hasattr(self, "viewer_save_frame_btn"):
+            self.viewer_save_frame_btn.set_sensitive(False)
+        self._toast(f"Saving frame · {where}…")
 
         def work() -> None:
             try:
                 new_item = save_video_frame_as_item(
-                    self.library.root, item, seconds
+                    self.library.root, item, seconds, last_frame=last_frame
                 )
                 err = None
             except WriteError as exc:
@@ -5226,13 +5577,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
             def apply() -> bool:
                 self._frame_saving = False
-                self.viewer_save_frame_btn.set_sensitive(True)
+                if hasattr(self, "viewer_save_frame_btn"):
+                    self.viewer_save_frame_btn.set_sensitive(True)
                 if err is not None or new_item is None:
                     self._toast(f"Save frame failed: {err}")
                     return False
                 self.library.upsert_item(new_item)
                 self._toast(
-                    f"Saved frame · {seconds:.2f}s · {new_item.width}×{new_item.height} · "
+                    f"Saved frame · {where} · {new_item.width}×{new_item.height} · "
                     "untagged / uncategorized"
                 )
                 return False
@@ -5242,7 +5594,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         threading.Thread(target=work, name="eagle-save-frame", daemon=True).start()
 
     def viewer_navigate(self, delta: int) -> None:
-        """Prev/next image or video in current view while inline viewer is open."""
+        """Prev/next image or video while the inline viewer is open."""
         if not self.is_viewer_open() or not self._items:
             return
         # Find current index by id
@@ -5255,7 +5607,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if delta > 0 and cur >= len(self._items) - 2:
             self._load_more_items()
         new = max(0, min(len(self._items) - 1, cur + delta))
-        # Prefer images and videos (skip audio / unknown)
         step = 1 if delta >= 0 else -1
         i = new
         while 0 <= i < len(self._items):
@@ -5268,86 +5619,274 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._toast("No more media in this view")
 
     def _viewer_native_size(self) -> tuple[int, int] | None:
-        paintable = self.viewer_picture.get_paintable()
-        if paintable is None:
-            return None
-        w = int(paintable.get_intrinsic_width())
-        h = int(paintable.get_intrinsic_height())
-        if w <= 0 or h <= 0:
-            return None
-        return w, h
+        pb = self._viewer_src_pixbuf
+        if pb is not None:
+            w, h = int(pb.get_width()), int(pb.get_height())
+            if w > 0 and h > 0:
+                return w, h
+        return None
 
-    def _viewer_fit_scale(self) -> float:
+    def _snapshot_viewer_pane(self) -> None:
+        """Record the visible center pane before the image can inflate it."""
+        for wdg in (self.viewer_scroll, self.viewer_body, self.center_stack, self.grid_scroll):
+            w = int(wdg.get_allocated_width())
+            h = int(wdg.get_allocated_height())
+            if w >= 64 and h >= 64:
+                self._viewer_pane = (max(1, w - 8), max(1, h - 8))
+                return
+
+    def _viewer_viewport_px(self) -> tuple[int, int]:
+        if self._viewer_pane is not None:
+            return self._viewer_pane
+        self._snapshot_viewer_pane()
+        if self._viewer_pane is not None:
+            return self._viewer_pane
+        return 1, 1
+
+    def _viewer_fit_canvas_size(self) -> tuple[int, int]:
+        """Allocation the fitted image should fill so the DrawingArea actually draws."""
+        w = int(self.viewer_scroll.get_allocated_width())
+        h = int(self.viewer_scroll.get_allocated_height())
+        if w >= 32 and h >= 32:
+            return w, h
+        pw, ph = self._viewer_viewport_px()
+        return max(32, pw), max(32, ph)
+
+    def _on_viewer_scroll_resized(self, *_a) -> None:
+        if not self.is_viewer_open() or self._viewer_mode != "image":
+            return
+        if self._viewer_zoom_steps > 0:
+            return
+        cw, ch = self._viewer_fit_canvas_size()
+        if (
+            self.viewer_picture.get_content_width() != cw
+            or self.viewer_picture.get_content_height() != ch
+        ):
+            self.viewer_picture.set_content_width(cw)
+            self.viewer_picture.set_content_height(ch)
+            self.viewer_picture.queue_draw()
+
+    def _viewer_fit_wh(self) -> tuple[int, int] | None:
         size = self._viewer_native_size()
         if size is None:
-            return 1.0
-        pw = max(1, self.viewer_scroll.get_width() - 8)
-        ph = max(1, self.viewer_scroll.get_height() - 8)
-        return min(pw / size[0], ph / size[1])
+            return None
+        pw, ph = self._viewer_viewport_px()
+        fit = min(pw / size[0], ph / size[1])
+        return max(1, int(round(size[0] * fit))), max(1, int(round(size[1] * fit)))
+
+    def _viewer_zoom_label(self) -> str:
+        if self._viewer_zoom_steps <= 0:
+            return ""
+        return f"{max(1, int(round((VIEWER_ZOOM_STEP ** self._viewer_zoom_steps) * 100)))}%"
+
+    def _sync_viewer_toolbar(self) -> None:
+        """Image tools vs video save-frame on the focused-item bar."""
+        video = self._viewer_mode == "video"
+        if hasattr(self, "viewer_zoom_in_btn"):
+            self.viewer_zoom_in_btn.set_visible(not video)
+            self.viewer_zoom_out_btn.set_visible(not video)
+        if hasattr(self, "viewer_save_frame_btn"):
+            self.viewer_save_frame_btn.set_visible(video)
+        if hasattr(self, "crop_btn"):
+            item = self.selected_item
+            can_crop = bool(
+                not video
+                and item is not None
+                and (item.is_image or item.is_audio)
+                and item.path.is_file()
+            )
+            self.crop_btn.set_visible(not video)
+            self.crop_btn.set_sensitive(can_crop)
+
+    def _on_viewer_draw(self, _area, cr, width: int, height: int, _data) -> None:
+        pb = self._viewer_src_pixbuf
+        if pb is None or width <= 0 or height <= 0:
+            return
+        nw, nh = int(pb.get_width()), int(pb.get_height())
+        if nw <= 0 or nh <= 0:
+            return
+        if self._viewer_zoom_steps <= 0:
+            scale = min(width / nw, height / nh)
+            cr.translate((width - nw * scale) / 2.0, (height - nh * scale) / 2.0)
+            cr.scale(scale, scale)
+        else:
+            cr.scale(width / nw, height / nh)
+        Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
+        cr.paint()
 
     def _apply_viewer_zoom(self) -> None:
-        size = self._viewer_native_size()
-        if size is None or self._viewer_scale is None:
+        """Fit, or grow the canvas to fit×1.08^steps and pin the image center."""
+        src = self._viewer_src_pixbuf
+        if src is None:
+            self.viewer_hint.set_text(self._viewer_zoom_label())
+            self.viewer_picture.queue_draw()
+            return
+        if self._viewer_zoom_steps <= 0:
             self._viewer_fit = True
-            self.viewer_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
-            self.viewer_picture.set_can_shrink(True)
-            self.viewer_picture.set_size_request(-1, -1)
+            self._viewer_scale = None
+            self._viewer_lock_center = False
+            self._viewer_center_wh = None
+            # ScrolledWindow sizes its child from content size. 0×0 never draws.
+            cw, ch = self._viewer_fit_canvas_size()
+            self.viewer_picture.set_content_width(cw)
+            self.viewer_picture.set_content_height(ch)
             self.viewer_picture.set_hexpand(True)
             self.viewer_picture.set_vexpand(True)
-            self.viewer_hint.set_text("←→ · Esc close · scroll/+- zoom")
+            self.viewer_picture.set_halign(Gtk.Align.FILL)
+            self.viewer_picture.set_valign(Gtk.Align.FILL)
+            self.viewer_picture.queue_draw()
+            self._viewer_set_pan_cursor()
+            self.viewer_hint.set_text(self._viewer_zoom_label())
             return
+        fitted = self._viewer_fit_wh()
+        if fitted is None:
+            return
+        factor = VIEWER_ZOOM_STEP ** self._viewer_zoom_steps
+        w = max(1, int(round(fitted[0] * factor)))
+        h = max(1, int(round(fitted[1] * factor)))
+        nat = self._viewer_native_size()
+        if nat is not None:
+            cap_w = max(1, int(nat[0] * VIEWER_ZOOM_MAX))
+            cap_h = max(1, int(nat[1] * VIEWER_ZOOM_MAX))
+            if w > cap_w or h > cap_h:
+                w, h = cap_w, cap_h
         self._viewer_fit = False
-        w = max(1, int(round(size[0] * self._viewer_scale)))
-        h = max(1, int(round(size[1] * self._viewer_scale)))
-        self.viewer_picture.set_content_fit(Gtk.ContentFit.FILL)
-        self.viewer_picture.set_can_shrink(False)
+        self._viewer_scale = w / max(1, src.get_width())
+        self._viewer_lock_center = True
+        self._viewer_center_wh = (w, h)
         self.viewer_picture.set_hexpand(False)
         self.viewer_picture.set_vexpand(False)
-        self.viewer_picture.set_size_request(w, h)
-        pct = max(1, int(round(self._viewer_scale * 100)))
-        self.viewer_hint.set_text(f"←→ · Esc close · scroll/+- zoom · {pct}%")
+        self.viewer_picture.set_halign(Gtk.Align.START)
+        self.viewer_picture.set_valign(Gtk.Align.START)
+        self.viewer_picture.set_content_width(w)
+        self.viewer_picture.set_content_height(h)
+        self.viewer_picture.queue_draw()
+        self._pin_viewer_center()
+        self._viewer_set_pan_cursor()
+        self.viewer_hint.set_text(self._viewer_zoom_label())
 
     def _viewer_zoom_by(self, factor: float) -> None:
         if not self.is_viewer_open() or self._viewer_mode != "image":
             return
-        fit = self._viewer_fit_scale()
-        cur = self._viewer_scale if self._viewer_scale is not None else fit
-        new = cur * factor
-        new = max(fit, min(VIEWER_ZOOM_MAX, new))
-        if new <= fit * 1.02:
-            self._viewer_scale = None
-        else:
-            self._viewer_scale = new
+        if factor > 1:
+            self._viewer_zoom_steps += 1
+        elif self._viewer_zoom_steps > 0:
+            self._viewer_zoom_steps -= 1
         self._apply_viewer_zoom()
+
+    def _pin_viewer_center(self) -> None:
+        """Keep the image center in the pane. Uses known size, not delayed idle."""
+        wh = self._viewer_center_wh
+        if wh is None or self._viewer_zoom_steps <= 0:
+            return
+        img_w, img_h = wh
+        hadj = self.viewer_scroll.get_hadjustment()
+        vadj = self.viewer_scroll.get_vadjustment()
+        pw, ph = self._viewer_viewport_px()
+        if hadj is not None and hadj.get_page_size() > 1:
+            pw = hadj.get_page_size()
+        if vadj is not None and vadj.get_page_size() > 1:
+            ph = vadj.get_page_size()
+        self._viewer_setting_adj = True
+        try:
+            if hadj is not None:
+                self._set_scroll_adj(hadj, (img_w - pw) / 2.0)
+            if vadj is not None:
+                self._set_scroll_adj(vadj, (img_h - ph) / 2.0)
+        finally:
+            self._viewer_setting_adj = False
+
+    def _on_viewer_adj_changed(self, _adj) -> None:
+        if self._viewer_lock_center:
+            self._pin_viewer_center()
+
+    def _on_viewer_adj_value(self, _adj) -> None:
+        if self._viewer_setting_adj or not self._viewer_lock_center:
+            return
+        self._pin_viewer_center()
+
+    @staticmethod
+    def _set_scroll_adj(adj: Gtk.Adjustment, value: float) -> None:
+        lo = adj.get_lower()
+        hi = adj.get_upper() - adj.get_page_size()
+        if hi < lo:
+            hi = lo
+        adj.set_value(max(lo, min(hi, value)))
+
+    def _viewer_can_pan(self) -> bool:
+        return (
+            self.is_viewer_open()
+            and self._viewer_mode == "image"
+            and self._viewer_zoom_steps > 0
+        )
+
+    def _viewer_set_pan_cursor(self) -> None:
+        name = "grab" if self._viewer_can_pan() else "default"
+        try:
+            self.viewer_picture.set_cursor_from_name(name)
+            self.viewer_scroll.set_cursor_from_name(name)
+        except Exception:
+            pass
+
+    def _on_viewer_drag_begin(self, gesture: Gtk.GestureDrag, _x: float, _y: float) -> None:
+        if not self._viewer_can_pan():
+            gesture.set_state(Gtk.EventSequenceState.DENIED)
+            return
+        self._viewer_lock_center = False
+        hadj = self.viewer_scroll.get_hadjustment()
+        vadj = self.viewer_scroll.get_vadjustment()
+        self._viewer_drag_h0 = hadj.get_value()
+        self._viewer_drag_v0 = vadj.get_value()
+        try:
+            self.viewer_picture.set_cursor_from_name("grabbing")
+            self.viewer_scroll.set_cursor_from_name("grabbing")
+        except Exception:
+            pass
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+
+    def _on_viewer_drag_update(self, _g: Gtk.GestureDrag, dx: float, dy: float) -> None:
+        self._set_scroll_adj(self.viewer_scroll.get_hadjustment(), self._viewer_drag_h0 - dx)
+        self._set_scroll_adj(self.viewer_scroll.get_vadjustment(), self._viewer_drag_v0 - dy)
+
+    def _on_viewer_drag_end(self, _g: Gtk.GestureDrag, _dx: float, _dy: float) -> None:
+        self._viewer_set_pan_cursor()
 
     def _on_viewer_scroll(self, _c, _dx: float, dy: float) -> bool:
         if not self.is_viewer_open() or self._viewer_mode != "image":
             return False
         if dy == 0:
             return False
-        self._viewer_zoom_acc += dy
-        stepped = False
-        while self._viewer_zoom_acc <= -1.0:
-            self._viewer_zoom_acc += 1.0
+        now = time.monotonic()
+        if now - self._viewer_zoom_last < VIEWER_ZOOM_COOLDOWN_S:
+            return True
+        self._viewer_zoom_last = now
+        if dy < 0:
             self._viewer_zoom_by(VIEWER_ZOOM_STEP)
-            stepped = True
-        while self._viewer_zoom_acc >= 1.0:
-            self._viewer_zoom_acc -= 1.0
+        else:
             self._viewer_zoom_by(1.0 / VIEWER_ZOOM_STEP)
-            stepped = True
-        return True if stepped or dy != 0 else False
+        return True
 
     def viewer_toggle_zoom(self, *, larger: bool | None = None) -> None:
         """Step zoom in/out, or toggle fit vs 100% if larger is None."""
         if not self.is_viewer_open() or self._viewer_mode != "image":
             return
         if larger is None:
-            if self._viewer_scale is None:
-                self._viewer_scale = 1.0
-                self._apply_viewer_zoom()
+            if self._viewer_zoom_steps <= 0:
+                fitted = self._viewer_fit_wh()
+                nat = self._viewer_native_size()
+                if fitted and nat and fitted[0] > 0:
+                    rel = nat[0] / fitted[0]
+                    steps = 0
+                    acc = 1.0
+                    while acc * VIEWER_ZOOM_STEP <= rel + 0.001 and steps < 40:
+                        acc *= VIEWER_ZOOM_STEP
+                        steps += 1
+                    self._viewer_zoom_steps = max(1, steps)
+                else:
+                    self._viewer_zoom_steps = 8
             else:
-                self._viewer_scale = None
-                self._apply_viewer_zoom()
+                self._viewer_zoom_steps = 0
+            self._apply_viewer_zoom()
             return
         self._viewer_zoom_by(VIEWER_ZOOM_STEP if larger else 1.0 / VIEWER_ZOOM_STEP)
 
@@ -5396,6 +5935,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if item.is_image or item.is_video:
             self.open_inline_viewer(item)
             return
+        # Audio / other: external (mpv)
         self._open_external_media(item)
 
     def reload_library(self) -> None:
@@ -5471,8 +6011,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     ) -> None:
         """
         Move focus by delta indices.
-        extend=True (Shift): path multi-select — add only the cell you move to
-        (keeps prior marks; L-shapes, no filled rectangles).
+        extend=True (Shift): select every item from the anchor to the new focus.
         keep_selection=True (Ctrl): move focus only; multi-selection unchanged.
         If multi-select is already active (>1), plain arrows also keep selection
         (only move focus) so checkboxes don't vanish when releasing Shift.
@@ -5691,11 +6230,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             and not alt
             and not super_mod
             and keyval in (Gdk.KEY_p, Gdk.KEY_P)
-            and self.is_viewer_open()
-            and self._viewer_mode == "video"
         ):
-            self.save_viewer_frame()
-            return True
+            if self.is_viewer_open() and self._viewer_mode == "video":
+                self.save_viewer_frame()
+                return True
+            if self.selected_item is not None and self.selected_item.is_video:
+                self._toast("Play the video first")
+                return True
         # Ctrl+A — select all assets in the current view
         if (
             not in_sidebar
@@ -5737,6 +6278,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 return True
             if keyval in (Gdk.KEY_x, Gdk.KEY_X):
                 self.open_crop_dialog()
+                return True
+            if keyval == Gdk.KEY_F2:
+                self.open_rename_dialog()
+                return True
+            if keyval in (Gdk.KEY_n, Gdk.KEY_N):
+                self.open_rename_dialog()
                 return True
         # y = Eagle id(s) — paste-safe for agent CLIs (not rewritten as image)
         # Shift+Y / c = path(s)
@@ -5852,7 +6399,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Grid movement (reading order is left→right, top→bottom):
         #   Left/Right / h/l  → previous / next image
         #   Up/Down / k/j     → image above / below (exactly one row)
-        #   Shift+arrows      → path multi-select
+        #   Shift+arrows      → range select from anchor through focus
         #   Ctrl+arrows       → move focus only (keep multi-selection); then Space to add
         #   Left on first column → focus sidebar
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)

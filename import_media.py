@@ -663,46 +663,92 @@ def _video_meta(path: Path) -> tuple[int, int, float]:
         return 0, 0, 0.0
 
 
-def extract_video_frame(src: Path, dest: Path, seconds: float) -> None:
-    """Write one PNG frame from *src* at *seconds* via ffmpeg.
-
-    ``-ss`` after ``-i`` is a decode seek: slower, closer to the requested time
-    than a keyframe-only input seek.
-    """
-    seconds = max(0.0, float(seconds))
-    dest.parent.mkdir(parents=True, exist_ok=True)
+def _run_ffmpeg(cmd: list[str]) -> str:
+    """Run ffmpeg. Return stderr (empty on success). Raise WriteError on tool issues."""
     try:
-        subprocess.check_call(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-i",
-                str(src),
-                "-ss",
-                f"{seconds:.3f}",
-                "-frames:v",
-                "1",
-                "-update",
-                "1",
-                str(dest),
-            ],
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=120,
+            text=True,
         )
     except FileNotFoundError as exc:
         raise WriteError("ffmpeg is not installed") from exc
-    except subprocess.CalledProcessError as exc:
-        raise WriteError(f"ffmpeg could not extract a frame at {seconds:.3f}s") from exc
     except subprocess.TimeoutExpired as exc:
         raise WriteError("ffmpeg timed out extracting the frame") from exc
-    if not dest.is_file() or dest.stat().st_size <= 0:
-        raise WriteError("ffmpeg produced no frame")
+    return (proc.stderr or "").strip()
+
+
+def extract_video_frame(
+    src: Path, dest: Path, seconds: float, *, last_frame: bool = False
+) -> None:
+    """Write one PNG frame from *src* at *seconds* via ffmpeg.
+
+    The last frame is a special case: ``-ss`` at EOF writes nothing (FFmpeg 9
+    still exits 0). Walk the tail with ``-sseof`` + ``-update 1`` so the last
+    decoded frame overwrites the output.
+    """
+    seconds = max(0.0, float(seconds))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _w, _h, duration = _video_meta(src)
+    if duration and duration > 0:
+        if seconds >= duration - 0.12:
+            last_frame = True
+        seconds = min(seconds, max(0.0, duration - 0.05))
+
+    def have_frame() -> bool:
+        return dest.is_file() and dest.stat().st_size > 32
+
+    one_frame = [
+        "-map",
+        "0:v:0",
+        "-an",
+        "-frames:v",
+        "1",
+        "-vf",
+        "format=rgb24",
+        str(dest),
+    ]
+    tail_update = [
+        "-map",
+        "0:v:0",
+        "-an",
+        "-update",
+        "1",
+        "-vf",
+        "format=rgb24",
+        str(dest),
+    ]
+    head = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    attempts: list[list[str]] = []
+    if last_frame:
+        # Decode the last 2s; each frame overwrites dest, so the file is the last.
+        attempts.append([*head, "-sseof", "-2", "-i", str(src), *tail_update])
+        attempts.append([*head, "-sseof", "-0.5", "-i", str(src), *one_frame])
+    attempts.extend(
+        [
+            [*head, "-i", str(src), "-ss", f"{seconds:.3f}", *one_frame],
+            [*head, "-ss", f"{seconds:.3f}", "-i", str(src), *one_frame],
+            [*head, "-sseof", "-2", "-i", str(src), *tail_update],
+        ]
+    )
+    last_err = ""
+    for cmd in attempts:
+        if dest.is_file():
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        last_err = _run_ffmpeg(cmd)
+        if have_frame():
+            return
+    detail = last_err.splitlines()[-1] if last_err else "no frame written"
+    raise WriteError(f"ffmpeg could not extract a frame at {seconds:.3f}s · {detail}")
 
 
 def _frame_item_name(stem: str, seconds: float) -> str:
-    stem = (stem or "frame").replace("/", "-").replace("\\", "-").strip() or "frame"
+    stem = (stem or "frame").replace("/", "-").replace("\\", "-").replace("%", "_").strip() or "frame"
     whole = int(max(0.0, seconds))
     frac = int(round((max(0.0, seconds) - whole) * 100))
     if frac >= 100:
@@ -716,6 +762,8 @@ def save_video_frame_as_item(
     library_root: Path,
     item: Any,
     seconds: float,
+    *,
+    last_frame: bool = False,
 ) -> Any:
     """
     Extract one frame from a video item and store it as a new still.
@@ -743,7 +791,7 @@ def save_video_frame_as_item(
 
         dest_media = item_dir / f"{name}.{ext}"
         try:
-            extract_video_frame(src, dest_media, seconds)
+            extract_video_frame(src, dest_media, seconds, last_frame=last_frame)
         except Exception:
             try:
                 if dest_media.is_file():
@@ -986,14 +1034,15 @@ def import_file(
                 _make_audio_thumbnail(thumb_path)
 
             # Merge folder auto-tags (Eagle: folder.tags + ancestors) onto import
-            item_tags = list(tags)
+            from write import canonicalize_tags, folder_auto_tags_from_metadata
+
+            item_tags = canonicalize_tags(tags)
             if folder_ids:
                 try:
-                    from write import folder_auto_tags_from_metadata
-
                     for t in folder_auto_tags_from_metadata(library_root, folder_ids):
                         if t not in item_tags:
                             item_tags.append(t)
+                    item_tags = canonicalize_tags(item_tags)
                 except Exception:  # noqa: BLE001
                     pass
 

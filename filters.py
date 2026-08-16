@@ -140,10 +140,14 @@ def _matches_type_set(item: Item, filters: set[str]) -> bool:
 
 def item_matches_view_filters(item: Item, vf: ViewFilters) -> bool:
     # Tags: must have all includes; must have none of excludes
-    if vf.tags_include and not vf.tags_include.issubset(item.tag_set):
-        return False
-    if vf.tags_exclude and not item.tag_set.isdisjoint(vf.tags_exclude):
-        return False
+    if vf.tags_include:
+        inc = {t.lower() for t in vf.tags_include}
+        if not inc.issubset(item.tag_set):
+            return False
+    if vf.tags_exclude:
+        exc = {t.lower() for t in vf.tags_exclude}
+        if not item.tag_set.isdisjoint(exc):
+            return False
 
     # Folders: must be in all included folders? Usually OR for include is better for
     # "show items in A or B". AND for include is strict. Eagle multi-folder is membership

@@ -7,7 +7,7 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator  # Any used by rename_item_media
 
 
 LOCK_FILENAME = ".eagle-browse.write.lock"
@@ -54,7 +54,8 @@ class LibraryLock:
                 text = self.path.read_text(encoding="utf-8")
             except OSError as exc:
                 raise WriteError(f"Cannot read lock file: {exc}") from exc
-            if age < self.stale_seconds:
+            holder_dead = self._holder_is_dead(text)
+            if age < self.stale_seconds and not holder_dead:
                 raise WriteError(
                     f"Library is locked by another writer:\n{text.strip()}\n"
                     f"(lock age {int(age)}s; remove {self.path.name} if stale)"
@@ -82,6 +83,31 @@ class LibraryLock:
         except OSError as exc:
             raise WriteError(f"Cannot create lock: {exc}") from exc
         self._held = True
+
+    @staticmethod
+    def _holder_is_dead(text: str) -> bool:
+        """True if the lock names this host and that pid is gone."""
+        pid = None
+        host = None
+        for line in text.splitlines():
+            if line.startswith("pid="):
+                try:
+                    pid = int(line.split("=", 1)[1].strip())
+                except ValueError:
+                    pid = None
+            elif line.startswith("host="):
+                host = line.split("=", 1)[1].strip()
+        if pid is None:
+            return False
+        if host and host != os.uname().nodename:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        return False
 
     def release(self) -> None:
         if not self._held:
@@ -182,6 +208,120 @@ def save_item_metadata(
     _touch_mtime_index(library_root, str(data.get("id") or item_dir.name.removesuffix(".info")), now)
 
 
+def sanitize_item_name(name: str, *, ext: str = "") -> str:
+    """Stem only. Strips a trailing ``.ext`` if the user typed the filename."""
+    name = (name or "").strip()
+    ext = (ext or "").lstrip(".")
+    if ext and name.lower().endswith("." + ext.lower()):
+        name = name[: -(len(ext) + 1)].rstrip()
+    cleaned: list[str] = []
+    for ch in name:
+        if ch in '/\\:\0' or ord(ch) < 32:
+            continue
+        cleaned.append(ch)
+    name = "".join(cleaned).strip(" .")
+    if not name or name in {".", ".."}:
+        raise WriteError("Name cannot be empty")
+    if len(name) > 200:
+        raise WriteError("Name is too long")
+    return name
+
+
+def _safe_rename(src: Path, dest: Path) -> None:
+    if src == dest:
+        return
+    if not src.is_file():
+        raise WriteError(f"Missing file: {src.name}")
+    try:
+        same = src.resolve() == dest.resolve()
+    except OSError:
+        same = False
+    if dest.exists() and not same:
+        raise WriteError(f"Already exists: {dest.name}")
+    if same and src.name != dest.name:
+        tmp = dest.with_name(f".{dest.name}.renametmp")
+        if tmp.exists():
+            raise WriteError("Rename temp file already exists")
+        src.rename(tmp)
+        tmp.rename(dest)
+        return
+    src.rename(dest)
+
+
+def rename_item_media(
+    library_root: Path,
+    item: Any,
+    new_name: str,
+) -> tuple[str, Path, Path | None]:
+    """Rename media + ``{name}_thumbnail.*`` and update metadata ``name``.
+
+    Returns ``(cleaned_name, new_media_path, new_thumb_path_or_None)``.
+    The ``.info`` folder id is unchanged.
+    """
+    item_dir = getattr(item, "item_dir", None)
+    if item_dir is None or not Path(item_dir).is_dir():
+        raise WriteError("No item directory")
+    item_dir = Path(item_dir)
+    old_name = str(item.name or "")
+    ext = (getattr(item, "ext", None) or Path(item.path).suffix.lstrip(".")).lstrip(".")
+    new_name = sanitize_item_name(new_name, ext=ext)
+    if new_name == old_name:
+        return new_name, Path(item.path), getattr(item, "thumb", None)
+
+    old_media = Path(item.path)
+    if not old_media.is_file():
+        raise WriteError(f"Media file missing: {old_media}")
+    new_media = item_dir / (f"{new_name}.{ext}" if ext else new_name)
+
+    thumb_moves: list[tuple[Path, Path]] = []
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    if getattr(item, "thumb", None) is not None:
+        candidates.append(Path(item.thumb))
+    for suf in (".png", ".jpg", ".jpeg", ".webp"):
+        candidates.append(item_dir / f"{old_name}_thumbnail{suf}")
+    for src_t in candidates:
+        try:
+            key = src_t.resolve()
+        except OSError:
+            key = src_t
+        if key in seen or not src_t.is_file():
+            continue
+        seen.add(key)
+        dest_t = item_dir / f"{new_name}_thumbnail{src_t.suffix}"
+        if src_t != dest_t:
+            thumb_moves.append((src_t, dest_t))
+
+    _safe_rename(old_media, new_media)
+    done_thumbs: list[tuple[Path, Path]] = []
+    try:
+        for src_t, dest_t in thumb_moves:
+            _safe_rename(src_t, dest_t)
+            done_thumbs.append((src_t, dest_t))
+        data = load_item_metadata(item_dir)
+        data["name"] = new_name
+        save_item_metadata(library_root, item_dir, data)
+    except Exception:
+        for src_t, dest_t in reversed(done_thumbs):
+            try:
+                dest_t.rename(src_t)
+            except OSError:
+                pass
+        try:
+            if new_media.is_file() and not old_media.is_file():
+                new_media.rename(old_media)
+        except OSError:
+            pass
+        raise
+
+    new_thumb: Path | None = None
+    if done_thumbs:
+        new_thumb = done_thumbs[0][1]
+    elif getattr(item, "thumb", None) is not None and Path(item.thumb).is_file():
+        new_thumb = Path(item.thumb)
+    return new_name, new_media, new_thumb
+
+
 def _touch_mtime_index(library_root: Path, item_id: str, when_ms: int) -> None:
     """Update mtime.json entry for this item if the file exists and is a dict."""
     mtime_path = library_root / "mtime.json"
@@ -214,6 +354,26 @@ def apply_star(data: dict[str, Any], star: int | None) -> dict[str, Any]:
     return data
 
 
+def normalize_tag(tag: str) -> str:
+    """Tags are case-insensitive. Store and compare as lowercase."""
+    return (tag or "").strip().lower()
+
+
+def canonicalize_tags(tags: Any) -> list[str]:
+    """Unique lowercase tags, first-seen order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    if not tags:
+        return out
+    for raw in tags:
+        t = normalize_tag(str(raw) if raw is not None else "")
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
 def apply_tags(
     data: dict[str, Any],
     *,
@@ -222,16 +382,17 @@ def apply_tags(
     remove_tags: list[str] | None = None,
 ) -> dict[str, Any]:
     if set_tags is not None:
-        tags = list(dict.fromkeys(t.strip() for t in set_tags if t and t.strip()))
+        tags = canonicalize_tags(set_tags)
     else:
-        tags = list(data.get("tags") or [])
+        tags = canonicalize_tags(data.get("tags") or [])
         if add_tags:
-            for t in add_tags:
-                t = t.strip()
-                if t and t not in tags:
+            existing = set(tags)
+            for t in canonicalize_tags(add_tags):
+                if t not in existing:
                     tags.append(t)
+                    existing.add(t)
         if remove_tags:
-            remove = {t.strip() for t in remove_tags if t and t.strip()}
+            remove = set(canonicalize_tags(remove_tags))
             tags = [t for t in tags if t not in remove]
     data["tags"] = tags
     return data
@@ -304,7 +465,7 @@ def folder_auto_tags_from_metadata(
             if not fid:
                 continue
             raw = node.get("tags") or []
-            tags = [str(t) for t in raw if t] if isinstance(raw, list) else []
+            tags = canonicalize_tags(raw) if isinstance(raw, list) else []
             index[str(fid)] = (parent_id, tags)
             children = node.get("children")
             if isinstance(children, list):
@@ -684,7 +845,7 @@ def set_folder_auto_tags(
     if not isinstance(meta, dict):
         raise WriteError("metadata.json root must be an object")
 
-    cleaned = list(dict.fromkeys(t.strip() for t in tags if t and str(t).strip()))
+    cleaned = canonicalize_tags(tags)
     now = int(time.time() * 1000)
     found = False
 

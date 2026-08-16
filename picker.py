@@ -18,6 +18,23 @@ RECENT_PATH = Path.home() / ".config" / "eagle-browse" / "recent.json"
 RECENT_MAX = 20
 
 
+def _filter_rank(value: str, q: str) -> tuple:
+    """Lower is better: exact, prefix, after a separator, then substring."""
+    vl = value.lower()
+    leaf = vl.rsplit(" / ", 1)[-1]
+    if vl == q or leaf == q:
+        return (0, 0, vl)
+    if vl.startswith(q) or leaf.startswith(q):
+        return (1, len(leaf), vl)
+    for sep in ("-", "_", " ", "/"):
+        token = f"{sep}{q}"
+        if token in vl:
+            return (2, vl.index(token), vl)
+    if q in vl:
+        return (3, vl.index(q), vl)
+    return (9, 0, vl)
+
+
 def load_recent(kind: str) -> list[str]:
     try:
         data = json.loads(RECENT_PATH.read_text(encoding="utf-8"))
@@ -305,19 +322,24 @@ class TogglePicker(Gtk.Window):
                 for v in self._all:
                     add_row(v)
             else:
-                starts = [v for v in self._all if v.lower().startswith(q_lower)]
-                contains = [
-                    v
-                    for v in self._all
-                    if q_lower in v.lower() and not v.lower().startswith(q_lower)
-                ]
-                for v in self._recent:
-                    if q_lower in v.lower():
+                # Exact / prefix before substring so "fanvue" beats
+                # "published-fanvue". Recents stay in the list but do not
+                # jump ahead of a better match.
+                seen: set[str] = set()
+                hits: list[str] = []
+                for group in (self._active, self._recent, self._all):
+                    for v in group:
+                        if q_lower in v.lower() and v not in seen:
+                            seen.add(v)
+                            hits.append(v)
+                hits.sort(key=lambda v: _filter_rank(v, q_lower))
+                for v in hits:
+                    if v in self._active:
+                        add_row(v, "active")
+                    elif v in self._recent:
                         add_row(v, "recent")
-                for v in sorted(starts, key=str.lower):
-                    add_row(v)
-                for v in sorted(contains, key=str.lower):
-                    add_row(v)
+                    else:
+                        add_row(v)
                 if self._allow_create:
                     exact = any(v.lower() == q_lower for v in self._all) or q in self._active
                     if not exact and q:
@@ -368,7 +390,23 @@ class TogglePicker(Gtk.Window):
                 return
         self._toggle_value(value, exclude=exclude)
 
+    def _canonical_value(self, value: str) -> str:
+        """Prefer the existing list form; otherwise lowercase (tags)."""
+        raw = (value or "").strip()
+        if not raw:
+            return raw
+        if self._recent_kind in ("tags", "filter_tags"):
+            key = raw.lower()
+            for existing in list(self._all) + list(self._active) + list(self._excluded):
+                if existing.lower() == key:
+                    return existing.lower()
+            return key
+        return raw
+
     def _toggle_value(self, value: str, *, exclude: bool = False) -> None:
+        value = self._canonical_value(value)
+        if not value:
+            return
         if exclude and self._allow_exclude and self._on_exclude:
             currently_ex = value in self._excluded
             turn_on = not currently_ex
@@ -390,23 +428,34 @@ class TogglePicker(Gtk.Window):
             currently_on = value in self._active and value not in self._partial
             turn_on = not currently_on
             try:
-                self._on_toggle(value, turn_on)
+                result = self._on_toggle(value, turn_on)
             except Exception:
                 return
-            if turn_on:
-                self._active.add(value)
-                self._partial.discard(value)
-                self._excluded.discard(value)
-                if value not in self._all:
-                    self._all.append(value)
-                push_recent(self._recent_kind, value)
-                self._recent = [value] + [x for x in self._recent if x != value]
-            else:
-                self._active.discard(value)
-                self._partial.discard(value)
+            if result is False:
+                return
+            self.note_toggled(value, turn_on)
+            return
 
         # Clear filter after assign so the next tag/folder can be typed immediately
         # (type Eunbi → Enter → type inspo → Enter).
+        self._finish_toggle_ui(value)
+
+    def note_toggled(self, value: str, turn_on: bool) -> None:
+        """Apply chip state after a successful toggle (including delayed confirm)."""
+        if turn_on:
+            self._active.add(value)
+            self._partial.discard(value)
+            self._excluded.discard(value)
+            if value not in self._all:
+                self._all.append(value)
+            push_recent(self._recent_kind, value)
+            self._recent = [value] + [x for x in self._recent if x != value]
+        else:
+            self._active.discard(value)
+            self._partial.discard(value)
+        self._finish_toggle_ui(value)
+
+    def _finish_toggle_ui(self, value: str) -> None:
         self._rebuilding = True
         try:
             self.entry.set_text("")

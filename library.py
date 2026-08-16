@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from config import DEFAULT_LIBRARY, inbox_path, library_path  # noqa: F401
+from write import canonicalize_tags
 
 VIDEO_EXTS = frozenset({"mp4", "mov", "webm", "mkv", "m4v", "avi", "wmv", "flv"})
 AUDIO_EXTS = frozenset({"mp3", "wav", "flac", "aac", "m4a", "ogg", "wma", "aiff", "aif"})
@@ -113,7 +114,7 @@ def _parse_folders(
     by_id: dict[str, Folder] = {}
     for node in nodes:
         raw_tags = node.get("tags") or []
-        tags = [str(t) for t in raw_tags if t] if isinstance(raw_tags, list) else []
+        tags = canonicalize_tags(raw_tags) if isinstance(raw_tags, list) else []
         folder = Folder(
             id=node["id"],
             name=node.get("name") or "(unnamed)",
@@ -225,7 +226,7 @@ def _item_from_dir(item_dir: Path) -> Item | None:
     except (TypeError, ValueError):
         duration = None
 
-    tags = list(raw.get("tags") or [])
+    tags = canonicalize_tags(raw.get("tags") or [])
     folders = list(raw.get("folders") or [])
     return Item(
         id=raw.get("id") or item_dir.name.removesuffix(".info"),
@@ -288,7 +289,7 @@ def _eval_rule(item: Item, property_name: str, method: str, value: Any) -> bool:
     prop = (property_name or "").lower()
 
     if prop == "tags":
-        vals = set(_as_str_list(value))
+        vals = set(canonicalize_tags(_as_str_list(value)))
         tags = item.tag_set
         if method in ("intersection", "union"):
             return not tags.isdisjoint(vals)
@@ -741,19 +742,19 @@ class EagleLibrary:
         self._query_cache.clear()
 
     def _refresh_item_derived(self, item: Item) -> None:
+        item.tags = canonicalize_tags(item.tags)
         item.tag_set = frozenset(item.tags)
         item.folder_set = frozenset(item.folders)
         item.name_lower = item.name.lower()
         item.ext_lower = item.ext.lower()
 
     def all_tags(self) -> list[str]:
-        tags: set[str] = set()
+        tags: list[str] = []
         for it in self.items:
-            tags.update(it.tags)
-        # Include folder auto-tags (may not be used on any item yet)
+            tags.extend(it.tags)
         for folder in self.folders_by_id.values():
-            tags.update(folder.tags)
-        return sorted(tags, key=str.lower)
+            tags.extend(folder.tags)
+        return canonicalize_tags(tags)
 
     def folder_ancestor_ids(self, folder_id: str) -> list[str]:
         """Root → … → folder_id (inclusive)."""
@@ -782,7 +783,7 @@ class EagleLibrary:
                 folder = self.folders_by_id.get(aid)
                 if not folder:
                     continue
-                for t in folder.tags:
+                for t in canonicalize_tags(folder.tags):
                     if t and t not in seen:
                         seen.add(t)
                         out.append(t)
@@ -794,7 +795,7 @@ class EagleLibrary:
 
         if folder_id not in self.folders_by_id:
             raise WriteError(f"Unknown folder id: {folder_id}")
-        cleaned = list(dict.fromkeys(t.strip() for t in tags if t and t.strip()))
+        cleaned = canonicalize_tags(tags)
         with write_session(self.root):
             set_folder_auto_tags(self.root, folder_id, cleaned)
         folder = self.folders_by_id[folder_id]
@@ -937,6 +938,30 @@ class EagleLibrary:
         ):
             item.folders = list(data.get("folders") or [])
         item.modification_time = int(data.get("modificationTime") or item.modification_time)
+        self._refresh_item_derived(item)
+        self._invalidate_caches()
+        return item
+
+    def rename_item(self, item_id: str, new_name: str) -> Item:
+        """Rename the item stem. Media file and matching thumbnails move with it."""
+        from write import WriteError, rename_item_media, write_session
+
+        item = self.items_by_id.get(item_id)
+        if item is None:
+            raise WriteError(f"Unknown item id: {item_id}")
+        if item.item_dir is None or not item.item_dir.is_dir():
+            raise WriteError(f"No item directory for {item_id}")
+
+        with write_session(self.root):
+            cleaned, new_path, new_thumb = rename_item_media(
+                self.root, item, new_name
+            )
+
+        item.name = cleaned
+        item.path = new_path
+        if new_thumb is not None:
+            item.thumb = new_thumb
+        item.modification_time = int(time.time() * 1000)
         self._refresh_item_derived(item)
         self._invalidate_caches()
         return item
