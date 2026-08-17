@@ -13,9 +13,10 @@
   <header class="top">
     <button type="button" id="btn-nav" class="icon-btn" aria-label="Folders">☰</button>
     <div class="title-block">
-      <div class="title">Eagle</div>
+      <div id="page-title" class="title">Eagle</div>
       <div id="status" class="status">Loading…</div>
     </div>
+    <button type="button" id="btn-smart" class="icon-btn" aria-label="Smart folders">◈</button>
     <button type="button" id="btn-search" class="icon-btn" aria-label="Search">⌕</button>
   </header>
 
@@ -38,7 +39,12 @@
       <button type="button" id="btn-close-nav" class="icon-btn" aria-label="Close">✕</button>
     </div>
     <div class="drawer-section">
+      <div class="section-label">Views</div>
+      <nav id="view-list" class="folder-tree"></nav>
+    </div>
+    <div class="drawer-section">
       <div class="section-label">Smart folders</div>
+      <button type="button" id="btn-smart-all" class="text-btn">Open full list…</button>
       <nav id="smart-tree" class="folder-tree"></nav>
     </div>
     <div class="drawer-section">
@@ -59,6 +65,16 @@
     </div>
   </aside>
   <div id="scrim" class="scrim hidden"></div>
+
+  <div id="smart-picker" class="smart-picker hidden" role="dialog" aria-modal="true" aria-label="Smart folders">
+    <div class="smart-picker-head">
+      <strong>Smart folders</strong>
+      <button type="button" id="btn-close-smart" class="icon-btn" aria-label="Close">✕</button>
+    </div>
+    <input id="smart-filter" class="smart-filter" type="search" placeholder="Filter folders…" autocomplete="off" />
+    <div id="smart-picker-views" class="smart-picker-views"></div>
+    <nav id="smart-picker-list" class="smart-picker-list"></nav>
+  </div>
 
   <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true">
     <button type="button" id="lb-close" class="icon-btn lb-close" aria-label="Close">✕</button>

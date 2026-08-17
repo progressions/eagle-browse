@@ -31,6 +31,7 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from sounds import gui_is_running, play_sound  # noqa: E402
 from import_media import (  # noqa: E402
     DEFAULT_INBOX,
     check_zip_complete,
@@ -46,7 +47,6 @@ from write import WriteError, write_session  # noqa: E402
 
 LOG = logging.getLogger("eagle-inbox-watch")
 STATE_DIR = Path.home() / ".local" / "state" / "eagle-browse"
-SOUNDS_DIR = _ROOT / "sounds"
 DUP_QUEUE_DIRNAME = ".dup-queue"
 
 
@@ -71,38 +71,23 @@ def _notify(title: str, body: str) -> None:
     if shutil.which("notify-send"):
         try:
             subprocess.Popen(
-                ["notify-send", "-a", "Eagle Inbox", "-u", "low", title, body],
+                [
+                    "notify-send",
+                    "-a",
+                    "Eagle Inbox",
+                    "-u",
+                    "low",
+                    "-h",
+                    "int:suppress-sound:1",
+                    title,
+                    body,
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
         except OSError:
             pass
-
-
-def _play_sound(name: str = "notification") -> None:
-    path = SOUNDS_DIR / f"{name}.wav"
-    if name == "notification":
-        boosted = SOUNDS_DIR / "notification_play.wav"
-        if boosted.is_file():
-            path = boosted
-    if not path.is_file():
-        return
-    path_s = str(path)
-    for cmd in (
-        ["pw-play", path_s],
-        ["paplay", path_s],
-        ["mpv", "--no-video", "--really-quiet", "--volume=130", path_s],
-    ):
-        if shutil.which(cmd[0]):
-            try:
-                subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                return
-            except OSError:
-                continue
 
 
 def _stable_ready(
@@ -330,15 +315,17 @@ def process_ready(
     )
 
     total_ok = new_n + reused_n
-    if total_ok and notify:
+    gui_up = gui_is_running()
+    if total_ok and notify and not gui_up:
         parts = []
         if new_n:
             parts.append(f"{new_n} new")
         if reused_n:
             parts.append(f"{reused_n} existing")
         _notify("Eagle inbox", " · ".join(parts) or f"{total_ok} imported")
-    if total_ok and sound:
-        _play_sound("notification")
+    if total_ok and sound and not gui_up:
+        # GUI plays the chime when it ingests the new item.
+        play_sound("notification", once=True)
     return new_n, reused_n, fail_n
 
 

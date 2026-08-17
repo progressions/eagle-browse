@@ -308,6 +308,59 @@ def new_eagle_id() -> str:
     return "M" + "".join(secrets.choice(ID_ALPHABET) for _ in range(12))
 
 
+def sniff_media_ext(path: Path) -> str | None:
+    """Guess a dotted ext from magic bytes. Used when the filename has no suffix."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(16)
+    except OSError:
+        return None
+    if len(head) < 12:
+        return None
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in (b"M4A ", b"M4B ", b"M4P "):
+            return ".m4a"
+        if brand == b"M4V ":
+            return ".m4v"
+        if brand == b"qt  ":
+            return ".mov"
+        if brand in (b"mp42", b"isom", b"iso2", b"avc1", b"mp41"):
+            return ".mp4"
+    if head.startswith(b"ID3") or head[:2] in (
+        b"\xff\xfb",
+        b"\xff\xfa",
+        b"\xff\xf3",
+        b"\xff\xf2",
+    ):
+        return ".mp3"
+    if head.startswith(b"RIFF") and head[8:12] == b"WAVE":
+        return ".wav"
+    if head.startswith(b"fLaC"):
+        return ".flac"
+    if head.startswith(b"OggS"):
+        return ".ogg"
+    if head[:2] == b"\xff\xd8":
+        return ".jpg"
+    if head.startswith(b"\x89PNG"):
+        return ".png"
+    if head.startswith(b"GIF8"):
+        return ".gif"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def media_ext(path: Path) -> str:
+    """Dotted lowercase ext. Sniffs the file if the name has no suffix."""
+    suf = path.suffix.lower()
+    if suf in MEDIA_EXTS:
+        return suf
+    if not suf:
+        return sniff_media_ext(path) or ""
+    return suf
+
+
 def is_importable(path: Path) -> bool:
     if not path.is_file():
         return False
@@ -315,16 +368,14 @@ def is_importable(path: Path) -> bool:
         return False
     if path.name.lower() in SKIP_NAMES:
         return False
-    if path.suffix.lower() not in MEDIA_EXTS:
-        return False
     # Ignore incomplete downloads
     if path.suffix.lower() in {".crdownload", ".part", ".tmp"}:
         return False
-    return True
+    return media_ext(path) in MEDIA_EXTS
 
 
 def _media_kind(path: Path) -> str:
-    ext = path.suffix.lower()
+    ext = media_ext(path)
     if ext in VIDEO_EXTS:
         return "video"
     if ext in AUDIO_EXTS:
@@ -993,8 +1044,8 @@ def import_file(
     images_dir = library_root / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    ext = source.suffix.lower().lstrip(".")
-    name = source.stem
+    ext = media_ext(source).lstrip(".")
+    name = source.stem if source.suffix else source.name
     # Eagle stores name without problematic path chars; keep stem
     name = name.replace("/", "-").replace("\\", "-")
     size = source.stat().st_size

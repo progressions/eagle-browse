@@ -20,11 +20,13 @@
     smartFolderId: null,
     smartConditions: null, // inherited condition groups
     smartFolderName: null,
+    specialView: null, // null | "untagged" | "uncategorized"
     tag: null,
     search: "",
     filtered: [],
     shown: 0,
     smartById: {}, // id -> node with path name
+    lbIndex: -1,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -35,7 +37,13 @@
     drawerChars: $("drawer-chars"),
     folderTree: $("folder-tree"),
     smartTree: $("smart-tree"),
+    viewList: $("view-list"),
     tagList: $("tag-list"),
+    pageTitle: $("page-title"),
+    smartPicker: $("smart-picker"),
+    smartPickerList: $("smart-picker-list"),
+    smartPickerViews: $("smart-picker-views"),
+    smartFilter: $("smart-filter"),
     drawer: $("drawer"),
     scrim: $("scrim"),
     searchBar: $("search-bar"),
@@ -244,9 +252,26 @@
     state.smartConditions = node.inherited;
     state.smartFolderName = node.path;
     // Smart folder is the primary Eagle-like view; drop competing scope filters
+    state.specialView = null;
     state.character = null;
     state.folderId = null;
     state.folderDescendants = null;
+  }
+
+  function selectSpecialView(view) {
+    state.specialView = view || null;
+    if (view) {
+      selectSmartFolder(null);
+      state.folderId = null;
+      state.folderDescendants = null;
+    }
+  }
+
+  function scopeTitle() {
+    if (state.smartFolderName) return state.smartFolderName;
+    if (state.specialView === "untagged") return "Untagged";
+    if (state.specialView === "uncategorized") return "Uncategorized";
+    return "Eagle";
   }
 
   function applyFilters() {
@@ -260,6 +285,12 @@
 
     const out = [];
     for (const item of state.catalog.items) {
+      if (state.specialView === "untagged") {
+        if ((item.tags || []).length) continue;
+      } else if (state.specialView === "uncategorized") {
+        if ((item.folders || []).length) continue;
+      }
+
       if (state.smartConditions) {
         if (!evalSmartConditions(item, state.smartConditions)) continue;
       }
@@ -306,6 +337,7 @@
     el.grid.innerHTML = "";
     renderFilterChips();
     highlightNav();
+    if (el.pageTitle) el.pageTitle.textContent = scopeTitle();
     appendPage();
     setStatus(
       `${out.length.toLocaleString()} items` +
@@ -315,6 +347,12 @@
 
   function renderFilterChips() {
     const bits = [];
+    if (state.specialView === "untagged") {
+      bits.push(chipHtml("Untagged", "special"));
+    }
+    if (state.specialView === "uncategorized") {
+      bits.push(chipHtml("Uncategorized", "special"));
+    }
     if (state.smartFolderId) {
       bits.push(
         chipHtml(`◈ ${state.smartFolderName || "smart"}`, "smart")
@@ -339,6 +377,7 @@
       btn.addEventListener("click", () => {
         const kind = btn.getAttribute("data-clear");
         if (kind === "smart") selectSmartFolder(null);
+        if (kind === "special") selectSpecialView(null);
         if (kind === "character") state.character = null;
         if (kind === "folder") {
           state.folderId = null;
@@ -406,8 +445,23 @@
     state.shown += slice.length;
   }
 
+  function lightboxIndexOf(item) {
+    if (!item) return -1;
+    return state.filtered.findIndex((it) => it.id === item.id);
+  }
+
   function openLightbox(item) {
+    const idx = lightboxIndexOf(item);
+    state.lbIndex = idx >= 0 ? idx : 0;
+    const show = state.filtered[state.lbIndex] || item;
+    renderLightbox(show);
+    el.lightbox.classList.remove("hidden");
+    if (!history.state || !history.state.lb) history.pushState({ lb: true }, "");
+  }
+
+  function renderLightbox(item) {
     el.lbStage.innerHTML = "";
+    el.lbStage.style.transform = "";
     const url = `/media/${encodeURIComponent(item.id)}`;
     if (isVideo(item.ext)) {
       const v = document.createElement("video");
@@ -423,18 +477,41 @@
       el.lbStage.appendChild(img);
     }
     const tags = (item.tags || []).join(", ");
+    const pos =
+      state.lbIndex >= 0
+        ? `${state.lbIndex + 1} / ${state.filtered.length}`
+        : "";
     el.lbMeta.innerHTML = `
       <div class="name">${escapeHtml(item.name)}.${escapeHtml(item.ext || "")}</div>
-      <div>${item.w || "?"}×${item.h || "?"} · ${formatBytes(item.size || 0)}</div>
+      <div>${item.w || "?"}×${item.h || "?"} · ${formatBytes(item.size || 0)}${
+        pos ? ` · ${pos}` : ""
+      }</div>
       <div class="tags">${escapeHtml(tags || "(no tags)")}</div>
     `;
-    el.lightbox.classList.remove("hidden");
-    history.pushState({ lb: true }, "");
+  }
+
+  function stepLightbox(delta) {
+    if (el.lightbox.classList.contains("hidden")) return;
+    const next = state.lbIndex + delta;
+    if (next < 0) {
+      dismissLightbox();
+      return;
+    }
+    if (next >= state.filtered.length) return;
+    state.lbIndex = next;
+    renderLightbox(state.filtered[next]);
+  }
+
+  function dismissLightbox() {
+    closeLightbox();
+    if (history.state && history.state.lb) history.back();
   }
 
   function closeLightbox() {
     el.lightbox.classList.add("hidden");
     el.lbStage.innerHTML = "";
+    el.lbStage.style.transform = "";
+    state.lbIndex = -1;
   }
 
   function formatBytes(n) {
@@ -452,8 +529,23 @@
   }
 
   function highlightNav() {
+    document.querySelectorAll("[data-special]").forEach((btn) => {
+      const v = btn.getAttribute("data-special") || "";
+      const on = v
+        ? state.specialView === v
+        : !state.specialView && !state.smartFolderId;
+      btn.classList.toggle("on", on);
+    });
     if (el.smartTree) {
       el.smartTree.querySelectorAll(".folder-item").forEach((btn) => {
+        btn.classList.toggle(
+          "on",
+          btn.dataset.smartId === state.smartFolderId
+        );
+      });
+    }
+    if (el.smartPickerList) {
+      el.smartPickerList.querySelectorAll(".folder-item").forEach((btn) => {
         btn.classList.toggle(
           "on",
           btn.dataset.smartId === state.smartFolderId
@@ -465,6 +557,108 @@
         btn.classList.toggle("on", btn.dataset.folderId === state.folderId);
       });
     }
+  }
+
+  function flattenSmart(nodes, depth, acc) {
+    for (const n of nodes || []) {
+      acc.push({ node: n, depth });
+      flattenSmart(n.children, depth + 1, acc);
+    }
+    return acc;
+  }
+
+  function chooseSmart(id) {
+    selectSmartFolder(id);
+    closeSmartPicker();
+    openDrawer(false);
+    syncCharChips();
+    applyFilters();
+  }
+
+  function chooseSpecial(view) {
+    if (view) selectSpecialView(view);
+    else {
+      selectSpecialView(null);
+      selectSmartFolder(null);
+    }
+    closeSmartPicker();
+    openDrawer(false);
+    syncCharChips();
+    applyFilters();
+  }
+
+  function openSmartPicker() {
+    if (!el.smartPicker) return;
+    openDrawer(false);
+    renderSmartPicker();
+    el.smartPicker.classList.remove("hidden");
+    if (!history.state || !history.state.sf) history.pushState({ sf: true }, "");
+    if (el.smartFilter) {
+      el.smartFilter.value = "";
+      el.smartFilter.focus();
+    }
+  }
+
+  function closeSmartPicker() {
+    if (!el.smartPicker) return;
+    el.smartPicker.classList.add("hidden");
+  }
+
+  function renderSmartPicker() {
+    if (!el.smartPickerViews || !el.smartPickerList) return;
+    el.smartPickerViews.innerHTML = "";
+    const views = [
+      { id: "", label: "All" },
+      { id: "untagged", label: "Untagged" },
+      { id: "uncategorized", label: "Uncategorized" },
+    ];
+    for (const v of views) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chip";
+      btn.dataset.special = v.id;
+      btn.textContent = v.label;
+      btn.addEventListener("click", () => chooseSpecial(v.id || null));
+      el.smartPickerViews.appendChild(btn);
+    }
+
+    const q = (el.smartFilter && el.smartFilter.value.trim().toLowerCase()) || "";
+    el.smartPickerList.innerHTML = "";
+    const rows = flattenSmart(state.catalog.smart_folders || [], 0, []);
+    let shown = 0;
+    for (const { node, depth } of rows) {
+      const path = (state.smartById[node.id] || {}).path || node.name;
+      if (q && !path.toLowerCase().includes(q) && !String(node.name).toLowerCase().includes(q)) {
+        continue;
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "folder-item picker-row";
+      if (depth === 0) btn.classList.add("smart-root");
+      if ((node.children || []).length) btn.classList.add("has-kids");
+      btn.dataset.smartId = node.id;
+      const name = document.createElement("span");
+      name.className = "picker-name";
+      name.textContent = node.name;
+      btn.appendChild(name);
+      if (depth > 0) {
+        const sub = document.createElement("span");
+        sub.className = "picker-path";
+        sub.textContent = path;
+        btn.appendChild(sub);
+      }
+      btn.style.paddingLeft = `${12 + depth * 16}px`;
+      btn.addEventListener("click", () => chooseSmart(node.id));
+      el.smartPickerList.appendChild(btn);
+      shown += 1;
+    }
+    if (!shown) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = q ? "No folders match." : "No smart folders in the index.";
+      el.smartPickerList.appendChild(empty);
+    }
+    highlightNav();
   }
 
   function renderChrome() {
@@ -509,6 +703,23 @@
     make(el.chars);
     make(el.drawerChars);
     syncCharChips();
+
+    // Virtual views (same as desktop sidebar)
+    if (el.viewList) {
+      el.viewList.innerHTML = "";
+      const addView = (id, label) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "folder-item";
+        btn.dataset.special = id;
+        btn.textContent = label;
+        btn.addEventListener("click", () => chooseSpecial(id || null));
+        el.viewList.appendChild(btn);
+      };
+      addView("", "All");
+      addView("untagged", "Untagged");
+      addView("uncategorized", "Uncategorized");
+    }
 
     // Smart folder tree
     el.smartTree.innerHTML = "";
@@ -558,6 +769,7 @@
         const fmap = folderMap(state.catalog.folders);
         state.folderDescendants = descendants(node.id, fmap);
         selectSmartFolder(null);
+        selectSpecialView(null);
         openDrawer(false);
         applyFilters();
       });
@@ -618,6 +830,16 @@
   $("btn-nav").addEventListener("click", () => openDrawer(true));
   $("btn-close-nav").addEventListener("click", () => openDrawer(false));
   el.scrim.addEventListener("click", () => openDrawer(false));
+  $("btn-smart").addEventListener("click", () => openSmartPicker());
+  $("btn-close-smart").addEventListener("click", () => {
+    closeSmartPicker();
+    if (history.state && history.state.sf) history.back();
+  });
+  const btnSmartAll = $("btn-smart-all");
+  if (btnSmartAll) btnSmartAll.addEventListener("click", () => openSmartPicker());
+  if (el.smartFilter) {
+    el.smartFilter.addEventListener("input", () => renderSmartPicker());
+  }
   $("btn-search").addEventListener("click", () => {
     el.searchBar.classList.toggle("hidden");
     if (!el.searchBar.classList.contains("hidden")) el.search.focus();
@@ -635,12 +857,100 @@
       applyFilters();
     }, 200);
   });
-  $("lb-close").addEventListener("click", () => {
-    closeLightbox();
-    if (history.state && history.state.lb) history.back();
+  $("lb-close").addEventListener("click", () => dismissLightbox());
+
+  // Swipe: left = next; right = previous (first image closes back to the grid).
+  {
+    const SWIPE_MIN = 56;
+    let sx = 0;
+    let sy = 0;
+    let tracking = false;
+    let locked = "";
+
+    const onStart = (x, y) => {
+      sx = x;
+      sy = y;
+      tracking = true;
+      locked = "";
+      el.lbStage.style.transition = "none";
+    };
+
+    const onMove = (x, y, ev) => {
+      if (!tracking) return;
+      const dx = x - sx;
+      const dy = y - sy;
+      if (!locked) {
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+        locked = Math.abs(dx) > Math.abs(dy) * 1.15 ? "h" : "v";
+      }
+      if (locked === "h") {
+        ev.preventDefault();
+        el.lbStage.style.transform = `translateX(${dx}px)`;
+      }
+    };
+
+    const onEnd = (x, y) => {
+      if (!tracking) return;
+      tracking = false;
+      const dx = x - sx;
+      const dy = y - sy;
+      el.lbStage.style.transition = "";
+      el.lbStage.style.transform = "";
+      if (locked !== "h") return;
+      if (Math.abs(dx) < SWIPE_MIN || Math.abs(dx) < Math.abs(dy)) return;
+      if (dx < 0) stepLightbox(1);
+      else stepLightbox(-1);
+    };
+
+    el.lightbox.addEventListener(
+      "touchstart",
+      (e) => {
+        if (e.touches.length !== 1) return;
+        onStart(e.touches[0].clientX, e.touches[0].clientY);
+      },
+      { passive: true }
+    );
+    el.lightbox.addEventListener(
+      "touchmove",
+      (e) => {
+        if (!tracking || e.touches.length !== 1) return;
+        onMove(e.touches[0].clientX, e.touches[0].clientY, e);
+      },
+      { passive: false }
+    );
+    el.lightbox.addEventListener("touchend", (e) => {
+      const t = e.changedTouches[0];
+      if (t) onEnd(t.clientX, t.clientY);
+      else {
+        tracking = false;
+        el.lbStage.style.transform = "";
+      }
+    });
+    el.lightbox.addEventListener("touchcancel", () => {
+      tracking = false;
+      el.lbStage.style.transition = "";
+      el.lbStage.style.transform = "";
+    });
+  }
+
+  window.addEventListener("keydown", (e) => {
+    if (el.lightbox.classList.contains("hidden")) return;
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      stepLightbox(-1);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      stepLightbox(1);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      dismissLightbox();
+    }
   });
   window.addEventListener("popstate", () => {
     if (!el.lightbox.classList.contains("hidden")) closeLightbox();
+    if (el.smartPicker && !el.smartPicker.classList.contains("hidden")) {
+      closeSmartPicker();
+    }
   });
   $("btn-reload").addEventListener("click", async () => {
     setStatus("Reloading index…");

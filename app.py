@@ -42,6 +42,7 @@ from library import (  # noqa: E402
     SmartFolder,
     eval_smart_conditions,
 )
+from sounds import mark_gui_running, mark_gui_stopped, play_sound  # noqa: E402
 from write import INBOX_SIGNAL_FILENAME  # noqa: E402
 
 APP_ID = "cool.eagle.Browse"
@@ -57,8 +58,6 @@ BULK_EDIT_CONFIRM = 100  # confirm tag/folder writes above this many items
 SEARCH_DEBOUNCE_MS = 150
 # Staging handoff (copy out of library — never writes into .library)
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
-# UI sounds extracted from Eagle.app (app/sounds/*.wav)
-_SOUNDS_DIR = Path(__file__).resolve().parent / "sounds"
 # Sidebar expand/selection — survives close / crash
 _UI_STATE_PATH = Path.home() / ".config" / "eagle-browse" / "ui-state.json"
 # Grid sort options: (id, label) — applied after folder/smart/search filters
@@ -86,57 +85,6 @@ def _cell_w(thumb: int) -> int:
 
 def _cell_h(thumb: int) -> int:
     return thumb + 36
-
-
-def _sound_path(name: str) -> Path | None:
-    """Resolve WAV path; prefer louder stereo notification variant."""
-    if name == "notification":
-        boosted = _SOUNDS_DIR / "notification_play.wav"
-        if boosted.is_file():
-            return boosted
-    path = _SOUNDS_DIR / f"{name}.wav"
-    return path if path.is_file() else None
-
-
-def play_sound(name: str = "notification") -> None:
-    """Play an Eagle UI sound (notification / remove / duplicate / error).
-
-    Always out-of-process. In-process Gtk.MediaFile / GStreamer has SIGSEGV'd
-    the whole app (GstPlay teardown); short UI clips are not worth that risk.
-    Safe to call from the GTK main loop (e.g. GLib.idle_add).
-    """
-    path = _sound_path(name)
-    if path is None:
-        return
-    path_s = str(path)
-
-    env = os.environ.copy()
-    players: list[list[str]] = []
-    if shutil.which("canberra-gtk-play"):
-        players.append(["canberra-gtk-play", "-f", path_s])
-    if shutil.which("pw-play"):
-        players.append(["pw-play", path_s])
-    if shutil.which("paplay"):
-        players.append(["paplay", path_s])
-    if shutil.which("mpv"):
-        players.append(
-            [
-                "mpv",
-                "--no-video",
-                "--really-quiet",
-                "--volume=150",
-                "--audio-display=no",
-                path_s,
-            ]
-        )
-    if shutil.which("ffplay"):
-        players.append(
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path_s]
-        )
-
-    for cmd in players:
-        if _spawn_detached(cmd, env=env):
-            return
 
 
 def _spawn_detached(cmd: list[str], env: dict[str, str] | None = None) -> bool:
@@ -234,6 +182,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # made the window wider than the column and clipped the inspector.
         super().__init__(application=app, title="Eagle Browse", default_width=1200, default_height=800)
         self.set_size_request(720, 400)
+        mark_gui_running()
         self.library = library
         self.current_folder_id: str | None = None
         self.current_smart_folder_id: str | None = None
@@ -499,12 +448,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # so Space/p can read the current timestamp.
         self._viewer_open = False
         self._viewer_item_id: str | None = None
-        self._viewer_mode: str = "image"  # "image" | "video"
+        self._viewer_mode: str = "image"  # "image" | "video" | "compare"
         self._viewer_fit = True  # True = contain; False = scaled
         self._viewer_scale: float | None = None  # None = fit pane; else × native
         self._viewer_zoom_steps = 0  # 0 = fit; each notch is +1
         self._viewer_pane: tuple[int, int] | None = None
         self._viewer_src_pixbuf: GdkPixbuf.Pixbuf | None = None
+        self._compare_a_id: str | None = None
+        self._compare_b_id: str | None = None
+        self._compare_a_pixbuf: GdkPixbuf.Pixbuf | None = None
+        self._compare_b_pixbuf: GdkPixbuf.Pixbuf | None = None
+        self._compare_split = 0.5
+        self._compare_dragging = False
+        self._compare_drag_x0 = 0.0
         self._viewer_zoom_last = 0.0
         self._viewer_drag_h0 = 0.0
         self._viewer_drag_v0 = 0.0
@@ -643,7 +599,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         vclick.set_button(1)
 
         def on_viewer_click(_g, n_press: int, _x, _y) -> None:
-            if n_press == 2 and self._viewer_mode == "image":
+            if n_press == 2 and self._viewer_mode in ("image", "compare"):
                 self.close_inline_viewer()
 
         vclick.connect("pressed", on_viewer_click)
@@ -1122,6 +1078,62 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_path.add_css_class("insp-path")
         box.append(self.insp_path)
 
+        # ── Compare slots (A / B stills, then open the slider) ────────
+        cmp_lbl = Gtk.Label(label="Compare", xalign=0)
+        cmp_lbl.add_css_class("insp-section-title")
+        box.append(cmp_lbl)
+
+        def _slot_btn(letter: str) -> tuple[Gtk.Button, Gtk.Picture, Gtk.Label]:
+            btn = Gtk.Button()
+            btn.add_css_class("flat")
+            btn.add_css_class("insp-cmp-slot")
+            btn.set_halign(Gtk.Align.FILL)
+            btn.set_hexpand(True)
+            btn.set_tooltip_text(f"Park the current still as {letter}")
+            btn.connect("clicked", lambda *_ , s=letter.lower(): self._compare_set_slot(s))
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            pic = Gtk.Picture()
+            pic.set_size_request(36, 36)
+            pic.set_content_fit(Gtk.ContentFit.COVER)
+            pic.add_css_class("insp-cmp-thumb")
+            tag = Gtk.Label(label=letter, xalign=0)
+            tag.add_css_class("heading")
+            name = Gtk.Label(label="(empty)", xalign=0)
+            name.add_css_class("caption")
+            name.add_css_class("dim-label")
+            name.set_ellipsize(3)
+            name.set_hexpand(True)
+            name.set_max_width_chars(16)
+            row.append(tag)
+            row.append(pic)
+            row.append(name)
+            btn.set_child(row)
+            box.append(btn)
+            return btn, pic, name
+
+        self.insp_cmp_a_btn, self.insp_cmp_a_pic, self.insp_cmp_a_name = _slot_btn("A")
+        self.insp_cmp_b_btn, self.insp_cmp_b_pic, self.insp_cmp_b_name = _slot_btn("B")
+
+        act_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.insp_cmp_go = Gtk.Button(label="Compare")
+        self.insp_cmp_go.add_css_class("suggested-action")
+        self.insp_cmp_go.set_sensitive(False)
+        self.insp_cmp_go.connect("clicked", lambda *_: self.open_compare_viewer())
+        self.insp_cmp_swap = Gtk.Button(label="Swap")
+        self.insp_cmp_swap.add_css_class("flat")
+        self.insp_cmp_swap.add_css_class("insp-quiet-btn")
+        self.insp_cmp_swap.set_sensitive(False)
+        self.insp_cmp_swap.connect("clicked", lambda *_: self._compare_swap_slots())
+        self.insp_cmp_clear = Gtk.Button(label="Clear")
+        self.insp_cmp_clear.add_css_class("flat")
+        self.insp_cmp_clear.add_css_class("insp-quiet-btn")
+        self.insp_cmp_clear.set_sensitive(False)
+        self.insp_cmp_clear.connect("clicked", lambda *_: self._compare_clear_slots())
+        act_row.append(self.insp_cmp_go)
+        act_row.append(self.insp_cmp_swap)
+        act_row.append(self.insp_cmp_clear)
+        box.append(act_row)
+
         # ── Inspector CSS (one provider) ──────────────────────────────
         css = Gtk.CssProvider()
         css.load_from_data(
@@ -1211,6 +1223,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             box.insp-preview {
                 border-radius: 8px;
             }
+            picture.insp-cmp-thumb {
+                min-width: 36px;
+                min-height: 36px;
+            }
+            button.insp-cmp-slot {
+                padding: 4px 2px;
+                min-height: 0;
+            }
+            button.insp-cmp-slot:hover {
+                background-color: alpha(@theme_fg_color, 0.10);
+            }
             """
         )
         Gtk.StyleContext.add_provider_for_display(
@@ -1282,6 +1305,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.insp_notes_btn.set_sensitive(False)
             self.insp_notes_btn.set_tooltip_text("Select an asset to add a note")
         self.insp_path.set_text("")
+        if hasattr(self, "insp_cmp_a_btn"):
+            self.insp_cmp_a_btn.set_sensitive(False)
+            self.insp_cmp_b_btn.set_sensitive(False)
+            self._sync_compare_ui()
 
     @staticmethod
     def _clear_box(box: Gtk.Widget) -> None:
@@ -1445,6 +1472,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         else:
             self.insp_notes.set_text("Mixed notes — click to set for all")
 
+        still = self._compare_current_still()
+        if hasattr(self, "insp_cmp_a_btn"):
+            self.insp_cmp_a_btn.set_sensitive(still is not None)
+            self.insp_cmp_b_btn.set_sensitive(still is not None)
+            self._sync_compare_ui()
+
     def _paint_insp_stars(self, rating: int) -> None:
         """Filled stars full-opacity ★; empty stars faded ☆."""
         for i, b in enumerate(self.insp_star_buttons, start=1):
@@ -1497,6 +1530,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _shutdown_background(self) -> None:
         """Stop timers / workers so the process can actually exit."""
+        mark_gui_stopped()
         if self._search_timeout_id:
             try:
                 GLib.source_remove(self._search_timeout_id)
@@ -5368,6 +5402,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._refresh_special_counts()
         if toast and items:
             self._toast(f"{len(items)} new")
+            # Watcher skips its chime while the GUI pid file is live.
+            play_sound("notification", once=True)
 
     def _restore_selection_after_grid_insert(self) -> None:
         """After prepending store rows, re-pin selection by item id (not index).
@@ -5603,7 +5639,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             def done() -> bool:
                 self._inbox_importing = False
                 if ok:
-                    play_sound("notification")
+                    play_sound("notification", once=True)
                     new_items: list[Item] = []
                     for r in results:
                         if (
@@ -5940,6 +5976,171 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except Exception:  # noqa: BLE001
                 pass
 
+    def _compare_current_still(self) -> Item | None:
+        """The still the inspector is showing — focused item if it is an image."""
+        it = self.selected_item
+        if it is None:
+            items = self._effective_hand_off_items()
+            if len(items) == 1:
+                it = items[0]
+        if it is None or not it.is_image or not it.path.is_file():
+            return None
+        return it
+
+    def _compare_item(self, slot: str) -> Item | None:
+        iid = self._compare_a_id if slot == "a" else self._compare_b_id
+        if not iid:
+            return None
+        it = self.library.items_by_id.get(iid)
+        if it is None or it.is_deleted or not it.is_image or not it.path.is_file():
+            if slot == "a":
+                self._compare_a_id = None
+            else:
+                self._compare_b_id = None
+            return None
+        return it
+
+    def _compare_set_slot(self, slot: str) -> None:
+        it = self._compare_current_still()
+        if it is None:
+            self._toast("Select a still")
+            return
+        other = "b" if slot == "a" else "a"
+        other_id = self._compare_a_id if other == "a" else self._compare_b_id
+        if other_id == it.id:
+            if other == "a":
+                self._compare_a_id = None
+            else:
+                self._compare_b_id = None
+        if slot == "a":
+            self._compare_a_id = it.id
+        else:
+            self._compare_b_id = it.id
+        self._sync_compare_ui()
+        self._toast(f"Compare {slot.upper()} · {it.display_name}")
+
+    def _compare_swap_slots(self) -> None:
+        self._compare_a_id, self._compare_b_id = self._compare_b_id, self._compare_a_id
+        if self.is_viewer_open() and self._viewer_mode == "compare":
+            self._compare_a_pixbuf, self._compare_b_pixbuf = (
+                self._compare_b_pixbuf,
+                self._compare_a_pixbuf,
+            )
+            self.viewer_picture.queue_draw()
+            self._sync_compare_viewer_title()
+        self._sync_compare_ui()
+
+    def _compare_clear_slots(self) -> None:
+        self._compare_a_id = None
+        self._compare_b_id = None
+        if self.is_viewer_open() and self._viewer_mode == "compare":
+            self.close_inline_viewer()
+        self._sync_compare_ui()
+
+    def _sync_compare_ui(self) -> None:
+        if not hasattr(self, "insp_cmp_go"):
+            return
+        a = self._compare_item("a")
+        b = self._compare_item("b")
+
+        def fill(pic: Gtk.Picture, lbl: Gtk.Label, item: Item | None, empty: str) -> None:
+            if item is None:
+                pic.set_paintable(None)
+                lbl.set_text(empty)
+                return
+            lbl.set_text(item.display_name)
+            path = _thumb_path_for(item)
+            pix = _pixbuf_from_path(path, 36, 36) if path else None
+            if pix is None:
+                pic.set_paintable(None)
+            else:
+                pic.set_paintable(Gdk.Texture.new_for_pixbuf(pix))
+
+        fill(self.insp_cmp_a_pic, self.insp_cmp_a_name, a, "(empty)")
+        fill(self.insp_cmp_b_pic, self.insp_cmp_b_name, b, "(empty)")
+        ready = a is not None and b is not None and a.id != b.id
+        self.insp_cmp_go.set_sensitive(ready)
+        self.insp_cmp_swap.set_sensitive(a is not None or b is not None)
+        self.insp_cmp_clear.set_sensitive(a is not None or b is not None)
+
+    def _sync_compare_viewer_title(self) -> None:
+        a = self._compare_item("a")
+        b = self._compare_item("b")
+        left = a.display_name if a else "?"
+        right = b.display_name if b else "?"
+        self.viewer_title.set_text(f"{left}  |  {right}")
+        self.viewer_hint.set_text("Drag the line · Esc close")
+
+    def open_compare_viewer(self) -> None:
+        """Open the center viewer with A | B and a drag split."""
+        a = self._compare_item("a")
+        b = self._compare_item("b")
+        if a is None or b is None:
+            self._toast("Set both A and B stills first")
+            return
+        if a.id == b.id:
+            self._toast("A and B are the same image")
+            return
+        pa = _pixbuf_from_path(str(a.path), 4096, 4096)
+        pb = _pixbuf_from_path(str(b.path), 4096, 4096)
+        if pa is None:
+            self._toast(f"Could not load A · {a.display_name}")
+            return
+        if pb is None:
+            self._toast(f"Could not load B · {b.display_name}")
+            return
+
+        if not self.is_viewer_open():
+            self._saved_grid_scroll = {
+                "value": self._grid_scroll_value(),
+                "loaded": len(self._items),
+                "focus_id": (self.selected_item.id if self.selected_item else a.id),
+            }
+            self._snapshot_viewer_pane()
+
+        self._stop_inline_video()
+        self._viewer_src_pixbuf = None
+        self._compare_a_pixbuf = pa
+        self._compare_b_pixbuf = pb
+        self._compare_split = 0.5
+        self._compare_dragging = False
+        self._viewer_item_id = a.id
+        self._viewer_open = True
+        self._viewer_mode = "compare"
+        self._viewer_zoom_steps = 0
+        self._viewer_fit = True
+        self._sync_viewer_toolbar()
+        self._sync_compare_viewer_title()
+        self.viewer_body.set_visible_child_name("image")
+        self.center_stack.set_visible_child_name("viewer")
+        cw, ch = self._viewer_fit_canvas_size()
+        self.viewer_picture.set_content_width(cw)
+        self.viewer_picture.set_content_height(ch)
+        self.viewer_picture.set_hexpand(True)
+        self.viewer_picture.set_vexpand(True)
+        self.viewer_picture.set_halign(Gtk.Align.FILL)
+        self.viewer_picture.set_valign(Gtk.Align.FILL)
+        try:
+            self.viewer_picture.set_cursor_from_name("col-resize")
+            self.viewer_scroll.set_cursor_from_name("col-resize")
+        except Exception:
+            pass
+        self.viewer_picture.queue_draw()
+        self.viewer_picture.grab_focus()
+
+        def _after_map() -> bool:
+            if not self.is_viewer_open() or self._viewer_mode != "compare":
+                return False
+            self._snapshot_viewer_pane()
+            cw2, ch2 = self._viewer_fit_canvas_size()
+            self.viewer_picture.set_content_width(cw2)
+            self.viewer_picture.set_content_height(ch2)
+            self.viewer_picture.queue_draw()
+            return False
+
+        GLib.idle_add(_after_map)
+        GLib.timeout_add(30, _after_map)
+
     def open_inline_viewer(self, item: Item | None = None) -> None:
         """Show a still or video in the center pane (Eagle-style detail view).
 
@@ -6021,6 +6222,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._viewer_item_id = None
         self._viewer_mode = "image"
         self._viewer_src_pixbuf = None
+        self._compare_a_pixbuf = None
+        self._compare_b_pixbuf = None
+        self._compare_dragging = False
         self._viewer_zoom_steps = 0
         self._viewer_scale = None
         self._viewer_lock_center = False
@@ -6165,7 +6369,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def viewer_navigate(self, delta: int) -> None:
         """Prev/next image or video while the inline viewer is open."""
-        if not self.is_viewer_open() or not self._items:
+        if not self.is_viewer_open() or self._viewer_mode == "compare":
+            return
+        if not self._items:
             return
         # Find current index by id
         cur = 0
@@ -6223,7 +6429,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return max(32, pw), max(32, ph)
 
     def _on_viewer_scroll_resized(self, *_a) -> None:
-        if not self.is_viewer_open() or self._viewer_mode != "image":
+        if not self.is_viewer_open() or self._viewer_mode not in ("image", "compare"):
             return
         if self._viewer_zoom_steps > 0:
             return
@@ -6252,25 +6458,77 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _sync_viewer_toolbar(self) -> None:
         """Image tools vs video save-frame on the focused-item bar."""
         video = self._viewer_mode == "video"
+        compare = self._viewer_mode == "compare"
         if hasattr(self, "viewer_zoom_in_btn"):
-            self.viewer_zoom_in_btn.set_visible(not video)
-            self.viewer_zoom_out_btn.set_visible(not video)
+            self.viewer_zoom_in_btn.set_visible(not video and not compare)
+            self.viewer_zoom_out_btn.set_visible(not video and not compare)
         if hasattr(self, "viewer_save_frame_btn"):
             self.viewer_save_frame_btn.set_visible(video)
         if hasattr(self, "crop_btn"):
             item = self.selected_item
             can_crop = bool(
                 not video
+                and not compare
                 and item is not None
                 and (item.is_image or item.is_audio)
                 and item.path.is_file()
             )
-            self.crop_btn.set_visible(not video)
+            self.crop_btn.set_visible(not video and not compare)
             self.crop_btn.set_sensitive(can_crop)
 
+    @staticmethod
+    def _fit_pixbuf_rect(
+        nw: int, nh: int, dw: int, dh: int
+    ) -> tuple[float, float, float, float]:
+        """Letterbox (nw×nh) into (dw×dh). Returns (x, y, tw, th)."""
+        if nw <= 0 or nh <= 0 or dw <= 0 or dh <= 0:
+            return 0.0, 0.0, float(max(1, dw)), float(max(1, dh))
+        scale = min(dw / nw, dh / nh)
+        tw = nw * scale
+        th = nh * scale
+        return (dw - tw) / 2.0, (dh - th) / 2.0, tw, th
+
+    def _paint_fitted_pixbuf(self, cr, pb: GdkPixbuf.Pixbuf, dw: int, dh: int) -> None:
+        nw, nh = int(pb.get_width()), int(pb.get_height())
+        x, y, tw, th = self._fit_pixbuf_rect(nw, nh, dw, dh)
+        if tw <= 0 or th <= 0:
+            return
+        cr.save()
+        cr.translate(x, y)
+        cr.scale(tw / max(1, nw), th / max(1, nh))
+        Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
+        cr.paint()
+        cr.restore()
+
     def _on_viewer_draw(self, _area, cr, width: int, height: int, _data) -> None:
+        if width <= 0 or height <= 0:
+            return
+        if self._viewer_mode == "compare":
+            pa = self._compare_a_pixbuf
+            pb = self._compare_b_pixbuf
+            if pa is None or pb is None:
+                return
+            split_x = max(1.0, min(float(width - 1), width * float(self._compare_split)))
+            self._paint_fitted_pixbuf(cr, pa, width, height)
+            cr.save()
+            cr.rectangle(split_x, 0, width - split_x, height)
+            cr.clip()
+            self._paint_fitted_pixbuf(cr, pb, width, height)
+            cr.restore()
+            cr.set_source_rgba(1, 1, 1, 0.92)
+            cr.set_line_width(2)
+            cr.move_to(split_x, 0)
+            cr.line_to(split_x, height)
+            cr.stroke()
+            cr.arc(split_x, height / 2.0, 7, 0, 6.28318)
+            cr.set_source_rgba(1, 1, 1, 0.95)
+            cr.fill_preserve()
+            cr.set_source_rgba(0, 0, 0, 0.45)
+            cr.set_line_width(1)
+            cr.stroke()
+            return
         pb = self._viewer_src_pixbuf
-        if pb is None or width <= 0 or height <= 0:
+        if pb is None:
             return
         nw, nh = int(pb.get_width()), int(pb.get_height())
         if nw <= 0 or nh <= 0:
@@ -6398,7 +6656,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except Exception:
             pass
 
-    def _on_viewer_drag_begin(self, gesture: Gtk.GestureDrag, _x: float, _y: float) -> None:
+    def _on_viewer_drag_begin(self, gesture: Gtk.GestureDrag, x: float, _y: float) -> None:
+        if self._viewer_mode == "compare":
+            w = max(1, int(self.viewer_picture.get_allocated_width()))
+            self._compare_dragging = True
+            self._compare_drag_x0 = x
+            self._compare_split = max(0.02, min(0.98, x / w))
+            self.viewer_picture.queue_draw()
+            try:
+                self.viewer_picture.set_cursor_from_name("col-resize")
+            except Exception:
+                pass
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            return
         if not self._viewer_can_pan():
             gesture.set_state(Gtk.EventSequenceState.DENIED)
             return
@@ -6415,14 +6685,33 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
 
     def _on_viewer_drag_update(self, _g: Gtk.GestureDrag, dx: float, dy: float) -> None:
+        if self._viewer_mode == "compare" and self._compare_dragging:
+            w = max(1, int(self.viewer_picture.get_allocated_width()))
+            self._compare_split = max(
+                0.02, min(0.98, (self._compare_drag_x0 + dx) / w)
+            )
+            self.viewer_picture.queue_draw()
+            return
         self._set_scroll_adj(self.viewer_scroll.get_hadjustment(), self._viewer_drag_h0 - dx)
         self._set_scroll_adj(self.viewer_scroll.get_vadjustment(), self._viewer_drag_v0 - dy)
 
     def _on_viewer_drag_end(self, _g: Gtk.GestureDrag, _dx: float, _dy: float) -> None:
+        self._compare_dragging = False
+        if self._viewer_mode == "compare":
+            try:
+                self.viewer_picture.set_cursor_from_name("col-resize")
+                self.viewer_scroll.set_cursor_from_name("col-resize")
+            except Exception:
+                pass
+            return
         self._viewer_set_pan_cursor()
 
     def _on_viewer_scroll(self, _c, _dx: float, dy: float) -> bool:
-        if not self.is_viewer_open() or self._viewer_mode != "image":
+        if not self.is_viewer_open():
+            return False
+        if self._viewer_mode == "compare":
+            return True
+        if self._viewer_mode != "image":
             return False
         if dy == 0:
             return False
@@ -7063,6 +7352,7 @@ class EagleBrowseApp(Adw.Application):
         self.connect("shutdown", self._on_shutdown)
 
     def _on_shutdown(self, *_args) -> None:
+        mark_gui_stopped()
         try:
             _thumb_executor.shutdown(wait=False, cancel_futures=True)
         except TypeError:

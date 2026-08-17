@@ -250,6 +250,60 @@ body {
 }
 .scrim.hidden { display: none; }
 
+.smart-picker {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  padding: calc(var(--safe-top) + 8px) 0 calc(var(--safe-bottom) + 12px);
+}
+.smart-picker.hidden { display: none; }
+.smart-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px 8px 16px;
+  flex: 0 0 auto;
+}
+.smart-picker-head strong { font-size: 17px; }
+.smart-filter {
+  margin: 0 12px 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 16px;
+  flex: 0 0 auto;
+}
+.smart-picker-views {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 12px;
+  overflow-x: auto;
+  flex: 0 0 auto;
+}
+.smart-picker-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 8px 16px;
+}
+.picker-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding-top: 12px;
+  padding-bottom: 12px;
+  min-height: 48px;
+}
+.picker-name { font-size: 16px; }
+.picker-path { font-size: 11px; color: var(--muted); }
+
 .lightbox {
   position: fixed;
   inset: 0;
@@ -272,6 +326,8 @@ body {
   display: grid;
   place-items: center;
   padding: calc(var(--safe-top) + 48px) 8px 8px;
+  touch-action: pan-y;
+  transition: transform 0.12s ease-out;
 }
 .lb-stage img, .lb-stage video {
   max-width: 100%;
