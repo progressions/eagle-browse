@@ -1039,8 +1039,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             btn.add_css_class("flat")
             btn.add_css_class("circular")
             btn.add_css_class("insp-star-btn")
+            btn.add_css_class("insp-star-off")
             btn.set_tooltip_text(f"Set {n} star(s)")
-            btn.set_size_request(26, 26)
+            btn.set_size_request(32, 32)
             btn.set_hexpand(False)
             btn.connect("clicked", lambda _b, s=n: self.set_rating(s))
             self.insp_star_buttons.append(btn)
@@ -1127,7 +1128,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             }
             scrolledwindow.inspector-sidebar button.insp-star-btn {
                 padding: 0;
-                font-size: 14px;
+                font-size: 18px;
+            }
+            scrolledwindow.inspector-sidebar button.insp-star-btn.insp-star-off {
+                opacity: 0.32;
+            }
+            scrolledwindow.inspector-sidebar button.insp-star-btn.insp-star-on {
+                opacity: 1;
+            }
+            scrolledwindow.inspector-sidebar button.insp-star-btn:hover {
+                opacity: 1;
+                background-color: alpha(@theme_fg_color, 0.12);
+            }
+            scrolledwindow.inspector-sidebar button.insp-star-btn.insp-star-off:hover {
+                opacity: 0.72;
             }
             scrolledwindow.inspector-sidebar button.insp-quiet-btn {
                 padding: 2px 6px;
@@ -1248,8 +1262,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_picture.set_paintable(None)
         self.insp_rating_note.set_text("")
         self.insp_rating_note.set_visible(False)
-        for b in self.insp_star_buttons:
-            b.set_label("☆")
+        self._paint_insp_stars(0)
         self._clear_box(self.insp_tags)
         self._clear_box(self.insp_folders)
         if hasattr(self, "insp_notes"):
@@ -1348,13 +1361,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             rating = s if s else 0
             self.insp_rating_note.set_text("")
             self.insp_rating_note.set_visible(False)
-            for i, b in enumerate(self.insp_star_buttons, start=1):
-                b.set_label("★" if rating and i <= rating else "☆")
+            self._paint_insp_stars(rating)
         else:
             self.insp_rating_note.set_text("Mixed ratings")
             self.insp_rating_note.set_visible(True)
-            for b in self.insp_star_buttons:
-                b.set_label("☆")
+            self._paint_insp_stars(0)
 
         # Tags: intersection (common) and partial — pill chips
         tag_sets = [set(it.tags) for it in items]
@@ -1415,6 +1426,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.insp_notes.set_text("Add a note…")
         else:
             self.insp_notes.set_text("Mixed notes — click to set for all")
+
+    def _paint_insp_stars(self, rating: int) -> None:
+        """Filled stars full-opacity ★; empty stars faded ☆."""
+        for i, b in enumerate(self.insp_star_buttons, start=1):
+            on = bool(rating) and i <= rating
+            b.set_label("★" if on else "☆")
+            if on:
+                b.add_css_class("insp-star-on")
+                b.remove_css_class("insp-star-off")
+            else:
+                b.add_css_class("insp-star-off")
+                b.remove_css_class("insp-star-on")
 
     def _install_keybinds(self) -> None:
         controller = Gtk.EventControllerKey()
