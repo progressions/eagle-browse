@@ -269,6 +269,7 @@ examples:
   eagle-api note MXXXXXXXXXXXX "use for fanvue PPV"
   eagle-api note MXXXXXXXXXXXX --clear
   eagle-api crop MXXXXXXXXXXXX --aspect 9:16 --mode new
+  eagle-api crop MXXXXXXXXXXXX --aspect 9:16   # videos always save as new
   eagle-api crop MXXXXXXXXXXXX --width 1080 --height 1440 --anchor top --mode overwrite
   eagle-api smart-folder list
   eagle-api smart-folder show Eunbi/images

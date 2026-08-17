@@ -355,6 +355,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.rename_btn.connect("clicked", lambda *_: self.open_rename_dialog())
         header.pack_end(self.rename_btn)
 
+        self.crop_916_btn = Gtk.Button(label="9:16")
+        self.crop_916_btn.add_css_class("flat")
+        self.crop_916_btn.set_tooltip_text(
+            "Center-crop selected video(s) to 9:16 as new items (ffmpeg)"
+        )
+        self.crop_916_btn.set_sensitive(False)
+        self.crop_916_btn.connect("clicked", lambda *_: self.crop_selected_videos_916())
+        header.pack_end(self.crop_916_btn)
+
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         body.set_vexpand(True)
         root.append(body)
@@ -1257,6 +1266,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.crop_btn.set_sensitive(False)
         if hasattr(self, "rename_btn"):
             self.rename_btn.set_sensitive(False)
+        if hasattr(self, "crop_916_btn"):
+            self.crop_916_btn.set_sensitive(False)
         if hasattr(self, "insp_rename_btn"):
             self.insp_rename_btn.set_sensitive(False)
         self.insp_picture.set_paintable(None)
@@ -1333,6 +1344,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.rename_btn.set_sensitive(can_rename)
             if hasattr(self, "insp_rename_btn"):
                 self.insp_rename_btn.set_sensitive(can_rename)
+            if hasattr(self, "crop_916_btn"):
+                self.crop_916_btn.set_sensitive(
+                    bool(it.is_video and it.path.is_file())
+                )
         else:
             self.insp_title.set_text(f"{n} assets selected")
             # Show size range when multi-selected and dimensions differ
@@ -1353,6 +1368,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.rename_btn.set_sensitive(False)
             if hasattr(self, "insp_rename_btn"):
                 self.insp_rename_btn.set_sensitive(False)
+            if hasattr(self, "crop_916_btn"):
+                vids = [it for it in items if it.is_video and it.path.is_file()]
+                self.crop_916_btn.set_sensitive(bool(vids))
 
         # Rating commonality — stars carry the value; note only for mixed
         stars = {it.star for it in items}
@@ -3884,6 +3902,53 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         win.connect("close-request", lambda *_: False)
         win.present()
         text.grab_focus()
+
+    def crop_selected_videos_916(self) -> None:
+        """Center-crop selected videos to 9:16 as new untagged items."""
+        if self._picker_blocking:
+            return
+        items = self._effective_hand_off_items()
+        videos = [it for it in items if it.is_video and it.path.is_file()]
+        if not videos:
+            self._toast("Select a video")
+            return
+        from crop import resolve_crop_rect, save_video_crop_as_new_item
+        from import_media import _video_meta
+        from write import WriteError
+
+        created: list[Item] = []
+        skipped = 0
+        errors: list[str] = []
+        for it in videos:
+            w, h = int(it.width or 0), int(it.height or 0)
+            if w <= 0 or h <= 0:
+                w, h, _ = _video_meta(it.path)
+            if w > 0 and h > 0 and abs((w / h) - (9 / 16)) < 0.02:
+                skipped += 1
+                continue
+            try:
+                rect = resolve_crop_rect(w or 0, h or 0, aspect="9:16", anchor="center")
+                new = save_video_crop_as_new_item(self.library.root, it, rect)
+                self.library.upsert_item(new)
+                created.append(new)
+            except WriteError as exc:
+                errors.append(f"{it.display_name}: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{it.display_name}: {exc}")
+
+        if created:
+            last = created[-1]
+            self.selected_item = last
+            self._marked = {last.id}
+            self.refresh_items(reset_selection=False)
+            msg = f"9:16 × {len(created)} · {last.width}×{last.height}"
+            if skipped:
+                msg += f" · skipped {skipped} already 9:16"
+            self._toast(msg)
+        elif skipped and not errors:
+            self._toast("Already 9:16")
+        if errors:
+            self._toast(errors[0])
 
     def open_crop_dialog(self) -> None:
         """Open the crop editor for the focused image or audio file."""

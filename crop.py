@@ -752,6 +752,187 @@ def save_crop_as_new_item(
     )
 
 
+def _even(n: int) -> int:
+    return int(n) - (int(n) % 2)
+
+
+def write_video_crop(src: Path, dest: Path, rect: CropRect) -> None:
+    """ffmpeg crop → H.264 + copy audio (AAC fallback)."""
+    from write import WriteError
+
+    w, h = _even(rect.w), _even(rect.h)
+    x, y = _even(rect.x), _even(rect.y)
+    if w < MIN_CROP or h < MIN_CROP:
+        raise WriteError("Crop region too small")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    vf = f"crop={w}:{h}:{x}:{y}"
+    common = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(src),
+        "-filter:v",
+        vf,
+        "-c:v",
+        "libx264",
+        "-crf",
+        "18",
+        "-preset",
+        "fast",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+    ]
+    last_err = ""
+    for audio in (["-c:a", "copy"], ["-c:a", "aac", "-b:a", "192k"]):
+        cmd = common + audio + [str(dest)]
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=600,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise WriteError("ffmpeg is not installed") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise WriteError("ffmpeg timed out cropping the video") from exc
+        if proc.returncode == 0 and dest.is_file() and dest.stat().st_size > 0:
+            return
+        last_err = (proc.stderr or "").strip()
+        if dest.is_file():
+            dest.unlink(missing_ok=True)
+    raise WriteError(f"ffmpeg crop failed · {last_err[:400]}")
+
+
+def save_video_crop_as_new_item(
+    library_root: Path,
+    item: Any,
+    rect: CropRect,
+) -> Any:
+    """Write a video crop as a new library item (no tags, no folders)."""
+    from import_media import (
+        _make_video_thumbnail,
+        _now_ms,
+        _unique_item_dir,
+        _video_meta,
+    )
+    from library import Item
+    from write import WriteError, atomic_write_json
+
+    src = Path(getattr(item, "path", "") or "")
+    if not src.is_file():
+        raise WriteError(f"Video file missing: {src}")
+    vw = int(item.width or 0)
+    vh = int(item.height or 0)
+    if vw <= 0 or vh <= 0:
+        vw, vh, _ = _video_meta(src)
+    if vw <= 0 or vh <= 0:
+        raise WriteError("Video has no usable dimensions")
+    rect = rect.clamp_to(vw, vh)
+    if _is_full_frame(rect, vw, vh):
+        raise WriteError("Crop matches full frame — nothing to do")
+
+    stem = str(item.name or src.stem).replace("/", "-").replace("\\", "-")
+    if not stem:
+        stem = "crop"
+    if not stem.endswith("-9x16"):
+        stem = f"{stem}-9x16"
+    ext = (item.ext or src.suffix.lstrip(".") or "mp4").lstrip(".")
+
+    with write_session(library_root):
+        images_dir = Path(library_root) / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        iid, item_dir = _unique_item_dir(images_dir)
+        try:
+            item_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise WriteError(f"Item dir already exists: {item_dir}") from exc
+
+        dest_media = item_dir / f"{stem}.{ext}"
+        try:
+            write_video_crop(src, dest_media, rect)
+        except Exception:
+            try:
+                if dest_media.is_file():
+                    dest_media.unlink()
+                item_dir.rmdir()
+            except OSError:
+                pass
+            raise
+
+        new_w, new_h, duration = _video_meta(dest_media)
+        if new_w <= 0:
+            new_w, new_h = _even(rect.w), _even(rect.h)
+        new_size = dest_media.stat().st_size
+        thumb_path = item_dir / f"{stem}_thumbnail.png"
+        thumb_ok = _make_video_thumbnail(dest_media, thumb_path)
+        now = _now_ms()
+        meta: dict[str, Any] = {
+            "id": iid,
+            "name": stem,
+            "size": new_size,
+            "btime": now,
+            "mtime": now,
+            "ext": ext,
+            "tags": [],
+            "folders": [],
+            "isDeleted": False,
+            "url": "",
+            "annotation": "",
+            "modificationTime": now,
+            "width": new_w,
+            "height": new_h,
+            "lastModified": now,
+            "palettes": [],
+            "duration": duration,
+            "resolutionWidth": new_w,
+            "resolutionHeight": new_h,
+        }
+        atomic_write_json(item_dir / "metadata.json", meta)
+
+        mtime_path = Path(library_root) / "mtime.json"
+        if mtime_path.is_file():
+            try:
+                with mtime_path.open("r", encoding="utf-8") as f:
+                    mt = json.load(f)
+                if isinstance(mt, dict):
+                    mt[iid] = now
+                    backup_file(library_root, mtime_path)
+                    atomic_write_json(mtime_path, mt)
+            except (OSError, json.JSONDecodeError):
+                pass
+
+    return Item(
+        id=iid,
+        name=stem,
+        ext=ext,
+        tags=[],
+        folders=[],
+        path=dest_media.resolve(),
+        thumb=thumb_path.resolve() if thumb_ok else None,
+        is_deleted=False,
+        size=new_size,
+        width=new_w,
+        height=new_h,
+        annotation="",
+        modification_time=now,
+        btime=now,
+        star=None,
+        duration=duration or None,
+        item_dir=item_dir.resolve(),
+        tag_set=frozenset(),
+        folder_set=frozenset(),
+        name_lower=stem.lower(),
+        ext_lower=ext.lower(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # GTK crop dialog
 # ---------------------------------------------------------------------------

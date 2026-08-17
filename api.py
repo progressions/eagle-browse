@@ -425,7 +425,8 @@ class EagleAPI:
         anchor: str = "center",
     ) -> dict[str, Any]:
         """
-        Crop an image item.
+        Crop an image or video item. Videos are always saved as a new item
+        (H.264 via ffmpeg). Images support overwrite or new.
 
         Parameters
         ----------
@@ -454,7 +455,9 @@ class EagleAPI:
             apply_crop_to_item,
             resolve_crop_rect,
             save_crop_as_new_item,
+            save_video_crop_as_new_item,
         )
+        from import_media import _video_meta
 
         iid = (item_id or "").strip()
         if not iid:
@@ -462,8 +465,8 @@ class EagleAPI:
         item = self.library.items_by_id.get(iid)
         if item is None:
             return {"ok": False, "error": f"Unknown item id: {iid}"}
-        if not item.is_image:
-            return {"ok": False, "error": "Crop only works on images"}
+        if not (item.is_image or item.is_video):
+            return {"ok": False, "error": "Crop only works on images and videos"}
 
         mode_l = (mode or "overwrite").strip().lower().replace("_", "-")
         if mode_l in ("overwrite", "save", "original", "in-place", "inplace"):
@@ -477,9 +480,13 @@ class EagleAPI:
             }
 
         try:
+            src_w = int(item.width or 0)
+            src_h = int(item.height or 0)
+            if item.is_video and (src_w <= 0 or src_h <= 0):
+                src_w, src_h, _ = _video_meta(item.path)
             rect = resolve_crop_rect(
-                int(item.width or 0),
-                int(item.height or 0),
+                src_w,
+                src_h,
                 x=x,
                 y=y,
                 width=width,
@@ -487,7 +494,13 @@ class EagleAPI:
                 aspect=aspect,
                 anchor=anchor,
             )
-            if mode_l == "overwrite":
+            if item.is_video:
+                # Never overwrite the 1:1 source — always write a new item.
+                mode_l = "new"
+                out = save_video_crop_as_new_item(self.library.root, item, rect)
+                self.library.items_by_id[out.id] = out
+                self.library.items.insert(0, out)
+            elif mode_l == "overwrite":
                 out = apply_crop_to_item(self.library.root, item, rect)
                 # Keep map pointer (mutated in place)
                 self.library.items_by_id[out.id] = out
