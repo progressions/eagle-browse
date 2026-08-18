@@ -3721,9 +3721,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         cancel = Gtk.Button(label="Cancel")
         save = Gtk.Button(label="Rename")
         save.add_css_class("suggested-action")
+        save.set_can_default(True)
         btns.append(cancel)
         btns.append(save)
         box.append(btns)
+        win.set_default_widget(save)
 
         def close_win(*_a) -> None:
             if self._open_dialog is win:
