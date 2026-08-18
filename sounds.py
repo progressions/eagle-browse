@@ -21,6 +21,8 @@ _ONCE_WINDOW_S = 2.0
 
 
 def _sound_path(name: str) -> Path | None:
+    # notification_play.wav is the louder stereo chime. Keep it one ding —
+    # a later copy concatenated two hits 0.4s apart.
     if name == "notification":
         boosted = SOUNDS_DIR / "notification_play.wav"
         if boosted.is_file():
