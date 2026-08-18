@@ -664,6 +664,7 @@ class EagleLibrary:
             if tokens:
                 hay = " ".join(
                     [
+                        item.id.lower(),
                         item.name_lower,
                         item.ext_lower,
                         item.annotation.lower(),

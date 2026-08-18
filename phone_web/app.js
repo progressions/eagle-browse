@@ -323,7 +323,7 @@
       }
 
       if (tokens.length) {
-        const hay = [item.name, item.ext, ...(item.tags || [])]
+        const hay = [item.id, item.name, item.ext, ...(item.tags || [])]
           .join(" ")
           .toLowerCase();
         if (!tokens.every((t) => hay.includes(t))) continue;

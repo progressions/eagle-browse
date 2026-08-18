@@ -44,6 +44,11 @@ def _item_to_dict(it: Item, *, library: EagleLibrary | None = None) -> dict[str,
     if library is not None:
         for fid in it.folders:
             folder_names.append(library.folder_paths.get(fid, fid))
+    marks: dict[str, float] = {}
+    if it.is_video:
+        from video_trim import load_marks
+
+        marks = load_marks(it)
     return {
         "id": it.id,
         "name": it.name,
@@ -66,6 +71,8 @@ def _item_to_dict(it: Item, *, library: EagleLibrary | None = None) -> dict[str,
         "is_image": it.is_image,
         "is_video": it.is_video,
         "is_audio": it.is_audio,
+        "in": marks.get("in"),
+        "out": marks.get("out"),
     }
 
 
@@ -519,6 +526,94 @@ class EagleAPI:
             "mode": mode_l,
             "source_id": iid,
             "rect": {"x": rect.x, "y": rect.y, "width": rect.w, "height": rect.h},
+            "item": _item_to_dict(out, library=self.library),
+        }
+
+    def set_marks(
+        self,
+        item_id: str,
+        *,
+        start: float | None | object = _UNSET,
+        end: float | None | object = _UNSET,
+        clear: bool = False,
+    ) -> dict[str, Any]:
+        """Set or clear video in/out marks on the item sidecar."""
+        from video_trim import clear_marks, load_marks, save_marks
+
+        iid = (item_id or "").strip()
+        if not iid:
+            return {"ok": False, "error": "item id required"}
+        item = self.library.items_by_id.get(iid)
+        if item is None:
+            return {"ok": False, "error": f"Unknown item id: {iid}"}
+        if not item.is_video:
+            return {"ok": False, "error": "Marks only work on videos"}
+        try:
+            if clear:
+                clear_marks(item)
+                marks: dict[str, float] = {}
+            else:
+                if start is _UNSET and end is _UNSET:
+                    marks = load_marks(item)
+                    return {
+                        "ok": True,
+                        "id": iid,
+                        "in": marks.get("in"),
+                        "out": marks.get("out"),
+                    }
+                kwargs: dict[str, Any] = {}
+                if start is not _UNSET:
+                    kwargs["start"] = start
+                if end is not _UNSET:
+                    kwargs["end"] = end
+                marks = save_marks(item, **kwargs)
+        except WriteError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {
+            "ok": True,
+            "id": iid,
+            "in": marks.get("in"),
+            "out": marks.get("out"),
+        }
+
+    def trim(
+        self,
+        item_id: str,
+        *,
+        start: float | None = None,
+        end: float | None = None,
+    ) -> dict[str, Any]:
+        """Cut [start, end] to a new H.264 item. Omitted times use sidecar marks."""
+        from video_trim import load_marks, save_marks, save_video_trim_as_new_item
+
+        iid = (item_id or "").strip()
+        if not iid:
+            return {"ok": False, "error": "item id required"}
+        item = self.library.items_by_id.get(iid)
+        if item is None:
+            return {"ok": False, "error": f"Unknown item id: {iid}"}
+        if not item.is_video:
+            return {"ok": False, "error": "Trim only works on videos"}
+        marks = load_marks(item)
+        in_s = float(start) if start is not None else marks.get("in")
+        out_s = float(end) if end is not None else marks.get("out")
+        if in_s is None or out_s is None:
+            return {"ok": False, "error": "need in and out"}
+        try:
+            save_marks(item, start=in_s, end=out_s)
+            out = save_video_trim_as_new_item(self.library.root, item, in_s, out_s)
+            self.library.items_by_id[out.id] = out
+            self.library.items.insert(0, out)
+            self.library._invalidate_caches()  # noqa: SLF001
+        except WriteError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        return {
+            "ok": True,
+            "source_id": iid,
+            "in": in_s,
+            "out": out_s,
             "item": _item_to_dict(out, library=self.library),
         }
 
@@ -1000,6 +1095,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument("--anchor", default="center")
 
+    mk = sub.add_parser(
+        "mark",
+        parents=[shared],
+        help="Show or set video in/out marks (sidecar, not notes)",
+    )
+    mk.add_argument("id", help="Item id")
+    mk.add_argument("--in", dest="in_s", type=float, default=None, help="In point seconds")
+    mk.add_argument("--out", dest="out_s", type=float, default=None, help="Out point seconds")
+    mk.add_argument("--clear", action="store_true", help="Remove marks")
+
+    tr = sub.add_parser(
+        "trim",
+        parents=[shared],
+        help="Cut video [start, end] to a new H.264 item",
+    )
+    tr.add_argument("id", help="Item id")
+    tr.add_argument("--start", type=float, default=None, help="In seconds (else sidecar)")
+    tr.add_argument("--end", type=float, default=None, help="Out seconds (else sidecar)")
+
     sub.add_parser("tags", parents=[shared], help="List all tags")
     sub.add_parser("folders", parents=[shared], help="List folders/categories")
     sub.add_parser("reload", parents=[shared], help="Reload library from disk")
@@ -1176,6 +1290,26 @@ def main(argv: list[str] | None = None) -> int:
                 aspect=args.aspect or None,
                 anchor=args.anchor,
             )
+            _json_out(result, pretty=pretty)
+            return 0 if result.get("ok") else 2
+
+        if args.cmd == "mark":
+            if args.clear:
+                result = api.set_marks(args.id, clear=True)
+            elif args.in_s is None and args.out_s is None:
+                result = api.set_marks(args.id)
+            else:
+                kwargs = {}
+                if args.in_s is not None:
+                    kwargs["start"] = args.in_s
+                if args.out_s is not None:
+                    kwargs["end"] = args.out_s
+                result = api.set_marks(args.id, **kwargs)
+            _json_out(result, pretty=pretty)
+            return 0 if result.get("ok") else 2
+
+        if args.cmd == "trim":
+            result = api.trim(args.id, start=args.start, end=args.end)
             _json_out(result, pretty=pretty)
             return 0 if result.get("ok") else 2
 

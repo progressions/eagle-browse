@@ -81,6 +81,8 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `x` | **Crop** focused image (also the crop icon on the viewer toolbar) |
 | `F2` / `n` | **Rename** focused file (media + matching thumbnail; Eagle id unchanged) |
 | `p` (video playing) | **Save frame** at the current playhead; ffmpeg writes a new untagged still |
+| `i` / `o` (video playing) | Mark **in** / **out** at the playhead (sidecar `eagle-browse.json`; Esc still closes) |
+| `x` (video playing) | **Cut** the marked range to a new untagged H.264/AAC clip |
 | `Ctrl+A` | **Select all** assets in the current grid view |
 | `Delete` / `Backspace` | **Soft-delete** selection (Eagle trash — files stay on disk) |
 | `Ctrl+Z` | **Undo** last delete batch (restore items) |
@@ -327,9 +329,12 @@ Browsers open the system file picker (GTK portal). It does **not** auto-jump to 
 
 | Key | Action |
 |-----|--------|
-| **`Enter`** / **`o`** / double-click | Play in the center pane |
+| **`Enter`** / **`o`** (grid) / double-click | Play in the center pane (`o` while playing marks **out**) |
 | **`Space`** | Play / pause |
 | **`p`** or camera button | Save the current frame as a new still |
+| **`i`** | Mark **in** at the playhead (written immediately) |
+| **`o`** | Mark **out** at the playhead (Esc still closes the viewer) |
+| **`x`** or scissors button | Cut `[in, out]` via ffmpeg to a new untagged H.264/AAC clip (Buffer-safe) |
 | **`Esc`** | Close the viewer |
 | `←` / `→` | Previous / next image or video |
 

@@ -43,6 +43,15 @@ eagle-api crop MXXXXXXXXXXXX --width 1080 --height 1440 --anchor top
 eagle-api crop MXXXXXXXXXXXX --x 100 --y 50 --width 800 --height 1200 --mode new
 eagle-api crop MXXXXXXXXXXXX --aspect 9:16 --mode new --json   # agent output
 
+# Video in/out + trim (ffmpeg H.264/AAC; source unchanged)
+eagle-api mark MXXXXXXXXXXXX                    # show stored marks
+eagle-api mark MXXXXXXXXXXXX --in 3.2 --out 8.05
+eagle-api mark MXXXXXXXXXXXX --in 3.2           # set in only
+eagle-api mark MXXXXXXXXXXXX --clear
+eagle-api trim MXXXXXXXXXXXX                    # use sidecar marks
+eagle-api trim MXXXXXXXXXXXX --start 3.2 --end 8.05
+eagle-api trim MXXXXXXXXXXXX --json
+
 # Catalog
 eagle-api tags
 eagle-api folders

@@ -87,6 +87,9 @@ def _fmt_get(data: dict[str, Any]) -> None:
     print(f"  size:     {it.get('width')}×{it.get('height')}  {it.get('size')} bytes")
     if it.get("duration"):
         print(f"  duration: {it.get('duration')}s")
+    if it.get("in") is not None or it.get("out") is not None:
+        print(f"  in:       {it.get('in') if it.get('in') is not None else '—'}")
+        print(f"  out:      {it.get('out') if it.get('out') is not None else '—'}")
     print(f"  path:     {it.get('path')}")
 
 
@@ -238,6 +241,30 @@ def _fmt_crop(data: dict[str, Any]) -> None:
         print(f"  source: {data.get('source_id')} (unchanged)")
 
 
+def _fmt_mark(data: dict[str, Any]) -> None:
+    if not data.get("ok"):
+        _err(data.get("error") or "mark failed")
+        return
+    in_s = data.get("in")
+    out_s = data.get("out")
+    print(f"mark · {data.get('id')}")
+    print(f"  in:  {in_s if in_s is not None else '—'}")
+    print(f"  out: {out_s if out_s is not None else '—'}")
+
+
+def _fmt_trim(data: dict[str, Any]) -> None:
+    if not data.get("ok"):
+        _err(data.get("error") or "trim failed")
+        return
+    it = data.get("item") or {}
+    print(f"trim · {data.get('in')}s → {data.get('out')}s")
+    print(f"  id:       {it.get('id')}")
+    print(f"  duration: {it.get('duration')}s")
+    print(f"  size:     {it.get('width')}×{it.get('height')}")
+    print(f"  path:     {it.get('path')}")
+    print(f"  source:   {data.get('source_id')} (unchanged)")
+
+
 def _fmt_reload(data: dict[str, Any]) -> None:
     if not data.get("ok"):
         _err(data.get("error") or "failed")
@@ -271,6 +298,9 @@ examples:
   eagle-api crop MXXXXXXXXXXXX --aspect 9:16 --mode new
   eagle-api crop MXXXXXXXXXXXX --aspect 9:16   # videos always save as new
   eagle-api crop MXXXXXXXXXXXX --width 1080 --height 1440 --anchor top --mode overwrite
+  eagle-api mark MXXXXXXXXXXXX --in 3.2 --out 8.05
+  eagle-api trim MXXXXXXXXXXXX
+  eagle-api trim MXXXXXXXXXXXX --start 3.2 --end 8.05
   eagle-api smart-folder list
   eagle-api smart-folder show Eunbi/images
   eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
@@ -393,6 +423,25 @@ environment:
         help="Placement when --x/--y omitted (center, top, bottom, left, right, "
         "top-left, top-right, bottom-left, bottom-right)",
     )
+
+    mk = sub.add_parser(
+        "mark",
+        parents=[shared],
+        help="Show or set video in/out marks (sidecar, not notes)",
+    )
+    mk.add_argument("id", help="Item id")
+    mk.add_argument("--in", dest="in_s", type=float, default=None, help="In point seconds")
+    mk.add_argument("--out", dest="out_s", type=float, default=None, help="Out point seconds")
+    mk.add_argument("--clear", action="store_true", help="Remove marks")
+
+    tr = sub.add_parser(
+        "trim",
+        parents=[shared],
+        help="Cut video [start, end] to a new H.264 item",
+    )
+    tr.add_argument("id", help="Item id")
+    tr.add_argument("--start", type=float, default=None, help="In seconds (else sidecar)")
+    tr.add_argument("--end", type=float, default=None, help="Out seconds (else sidecar)")
 
     sub.add_parser("tags", parents=[shared], help="List all tags")
     sub.add_parser("folders", parents=[shared], help="List categories (tree)")
@@ -573,6 +622,24 @@ def main(argv: list[str] | None = None) -> int:
                 anchor=args.anchor,
             )
             return out(result, _fmt_crop)
+
+        if args.cmd == "mark":
+            if args.clear:
+                result = api.set_marks(args.id, clear=True)
+            elif args.in_s is None and args.out_s is None:
+                result = api.set_marks(args.id)
+            else:
+                kwargs = {}
+                if args.in_s is not None:
+                    kwargs["start"] = args.in_s
+                if args.out_s is not None:
+                    kwargs["end"] = args.out_s
+                result = api.set_marks(args.id, **kwargs)
+            return out(result, _fmt_mark)
+
+        if args.cmd == "trim":
+            result = api.trim(args.id, start=args.start, end=args.end)
+            return out(result, _fmt_trim)
 
         if args.cmd == "tags":
             return out(api.list_tags(), _fmt_tags)

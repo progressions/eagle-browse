@@ -250,6 +250,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._sf_editor = None
         self._sf_drop_row: Gtk.ListBoxRow | None = None
         self._frame_saving = False
+        self._trim_exporting = False
+        self._viewer_in: float | None = None
+        self._viewer_out: float | None = None
         # Inbox signal: watcher writes this after each new import
         self._inbox_signal_path = self.library.root / INBOX_SIGNAL_FILENAME
         self._inbox_signal_ts = 0.0
@@ -286,7 +289,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         root.append(header)
 
-        self.search = Gtk.SearchEntry(placeholder_text="Search name, tags, folders…  (/)")
+        self.search = Gtk.SearchEntry(placeholder_text="Search name, tags, folders, id…  (/)")
         self.search.set_hexpand(True)
         self.search.set_sensitive(False)
         self.search.connect("search-changed", self._on_search_changed)
@@ -295,23 +298,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         reload_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Reload library (r)")
         reload_btn.connect("clicked", lambda *_: self.reload_library())
         header.pack_end(reload_btn)
-
-        self.rename_btn = Gtk.Button(
-            icon_name="document-edit-symbolic",
-            tooltip_text="Rename file (F2)",
-        )
-        self.rename_btn.set_sensitive(False)
-        self.rename_btn.connect("clicked", lambda *_: self.open_rename_dialog())
-        header.pack_end(self.rename_btn)
-
-        self.crop_916_btn = Gtk.Button(label="9:16")
-        self.crop_916_btn.add_css_class("flat")
-        self.crop_916_btn.set_tooltip_text(
-            "Center-crop selected video(s) to 9:16 as new items (ffmpeg)"
-        )
-        self.crop_916_btn.set_sensitive(False)
-        self.crop_916_btn.connect("clicked", lambda *_: self.crop_selected_videos_916())
-        header.pack_end(self.crop_916_btn)
 
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         body.set_vexpand(True)
@@ -510,6 +496,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.save_viewer_frame,
         )
         self.viewer_save_frame_btn.set_visible(False)
+        self.viewer_trim_btn = _tool_icon(
+            "edit-cut-symbolic",
+            "Cut marked range (x)",
+            self._export_viewer_trim,
+        )
+        self.viewer_trim_btn.set_visible(False)
+        self.crop_916_btn = Gtk.Button(label="9:16")
+        self.crop_916_btn.add_css_class("flat")
+        self.crop_916_btn.set_tooltip_text(
+            "Center-crop this video to 9:16 as a new item"
+        )
+        self.crop_916_btn.set_sensitive(False)
+        self.crop_916_btn.set_visible(False)
+        self.crop_916_btn.connect("clicked", lambda *_: self.crop_selected_videos_916())
         self.viewer_prev_btn = _tool_icon(
             "go-previous-symbolic", "Previous (←)", lambda: self.viewer_navigate(-1)
         )
@@ -524,6 +524,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.viewer_zoom_out_btn,
             self.viewer_zoom_in_btn,
             self.viewer_save_frame_btn,
+            self.viewer_trim_btn,
+            self.crop_916_btn,
             self.viewer_prev_btn,
             self.viewer_next_btn,
             self.viewer_close_btn,
@@ -707,7 +709,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints = Gtk.Label(
             label=(
                 "Enter open (image inline · video/audio mpv) · Esc close viewer · "
-                "p save video frame · t tags · f folders · Ctrl+A all · Del · Ctrl+Z · Super+W"
+                "i/o video marks · x cut · p save frame · t tags · f folders · Ctrl+A all · Del · Ctrl+Z · Super+W"
             ),
             xalign=0,
         )
@@ -1287,12 +1289,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_subtitle.set_text("Select an asset in the grid")
         if hasattr(self, "crop_btn"):
             self.crop_btn.set_sensitive(False)
-        if hasattr(self, "rename_btn"):
-            self.rename_btn.set_sensitive(False)
-        if hasattr(self, "crop_916_btn"):
-            self.crop_916_btn.set_sensitive(False)
         if hasattr(self, "insp_rename_btn"):
             self.insp_rename_btn.set_sensitive(False)
+        if hasattr(self, "crop_916_btn"):
+            self.crop_916_btn.set_sensitive(False)
         self.insp_picture.set_paintable(None)
         self.insp_rating_note.set_text("")
         self.insp_rating_note.set_visible(False)
@@ -1367,8 +1367,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     bool((it.is_image or it.is_audio) and it.path.is_file())
                 )
             can_rename = bool(it.item_dir and it.path.is_file())
-            if hasattr(self, "rename_btn"):
-                self.rename_btn.set_sensitive(can_rename)
             if hasattr(self, "insp_rename_btn"):
                 self.insp_rename_btn.set_sensitive(can_rename)
             if hasattr(self, "crop_916_btn"):
@@ -1391,8 +1389,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._set_inspector_preview(_thumb_path_for(items[0]))
             if hasattr(self, "crop_btn"):
                 self.crop_btn.set_sensitive(False)
-            if hasattr(self, "rename_btn"):
-                self.rename_btn.set_sensitive(False)
             if hasattr(self, "insp_rename_btn"):
                 self.insp_rename_btn.set_sensitive(False)
             if hasattr(self, "crop_916_btn"):
@@ -5336,6 +5332,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             tokens = [t for t in search.split() if t]
             hay = " ".join(
                 [
+                    item.id.lower(),
                     item.name_lower,
                     item.ext_lower,
                     (item.annotation or "").lower(),
@@ -6222,6 +6219,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return False
         self._viewer_open = False
         self._viewer_item_id = None
+        self._viewer_in = None
+        self._viewer_out = None
         self._viewer_mode = "image"
         self._viewer_src_pixbuf = None
         self._compare_a_pixbuf = None
@@ -6275,10 +6274,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
 
         self.viewer_title.set_text(item.display_name)
-        self.viewer_hint.set_text("Space play/pause · p save frame")
         self._viewer_item_id = item.id
         self._viewer_open = True
         self._viewer_mode = "video"
+        self._load_viewer_marks(item)
+        self._sync_viewer_mark_hint()
         self._sync_viewer_toolbar()
         self.viewer_body.set_visible_child_name("video")
         self.center_stack.set_visible_child_name("viewer")
@@ -6296,6 +6296,142 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         stream.set_playing(not stream.get_playing())
 
+    def _viewer_item(self) -> Item | None:
+        item = None
+        if self._viewer_item_id:
+            item = self.library.items_by_id.get(self._viewer_item_id)
+        return item or self.selected_item
+
+    def _viewer_seconds(self) -> float | None:
+        """Current playhead in seconds, or None. Pauses playback."""
+        if not self.is_viewer_open() or self._viewer_mode != "video":
+            return None
+        stream = self.viewer_video.get_media_stream()
+        if stream is None:
+            return None
+        try:
+            stream.set_playing(False)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            ts_us = int(stream.get_timestamp())
+        except Exception:  # noqa: BLE001
+            return None
+        return max(0.0, ts_us / 1_000_000.0)
+
+    def _load_viewer_marks(self, item: Item) -> None:
+        from video_trim import load_marks
+
+        marks = load_marks(item)
+        self._viewer_in = marks.get("in")
+        self._viewer_out = marks.get("out")
+
+    def _sync_viewer_mark_hint(self) -> None:
+        from audio_crop import format_time
+
+        bits = ["Space play/pause · i in · o out · x cut · p frame"]
+        if self._viewer_in is not None or self._viewer_out is not None:
+            inn = format_time(self._viewer_in) if self._viewer_in is not None else "—"
+            out = format_time(self._viewer_out) if self._viewer_out is not None else "—"
+            bits.append(f"in {inn} → out {out}")
+        self.viewer_hint.set_text("  ·  ".join(bits))
+
+    def _mark_viewer(self, which: str) -> None:
+        from video_trim import save_marks
+        from write import WriteError
+
+        if not self.is_viewer_open() or self._viewer_mode != "video":
+            self._toast("Play the video first")
+            return
+        item = self._viewer_item()
+        if item is None or not item.is_video:
+            self._toast("No video to mark")
+            return
+        seconds = self._viewer_seconds()
+        if seconds is None:
+            self._toast("Could not read time")
+            return
+        try:
+            if which == "in":
+                save_marks(item, start=seconds)
+                self._viewer_in = seconds
+            else:
+                save_marks(item, end=seconds)
+                self._viewer_out = seconds
+        except WriteError as exc:
+            self._toast(str(exc))
+            return
+        self._sync_viewer_mark_hint()
+        label = "in" if which == "in" else "out"
+        extra = ""
+        if (
+            self._viewer_in is not None
+            and self._viewer_out is not None
+            and self._viewer_out <= self._viewer_in
+        ):
+            extra = " · out must be after in"
+        self._toast(f"{label} {seconds:.2f}s{extra}")
+
+    def _export_viewer_trim(self) -> None:
+        from audio_crop import MIN_CROP_S
+        from video_trim import save_video_trim_as_new_item
+        from write import WriteError
+
+        if self._trim_exporting:
+            return
+        if not self.is_viewer_open() or self._viewer_mode != "video":
+            self._toast("Play the video first")
+            return
+        item = self._viewer_item()
+        if item is None or not item.is_video:
+            self._toast("No video to cut")
+            return
+        in_s, out_s = self._viewer_in, self._viewer_out
+        if in_s is None or out_s is None:
+            self._toast("Mark in and out first")
+            return
+        if out_s <= in_s + MIN_CROP_S:
+            self._toast("out must be after in")
+            return
+        self._trim_exporting = True
+        if hasattr(self, "viewer_trim_btn"):
+            self.viewer_trim_btn.set_sensitive(False)
+        self._toast(f"Cutting · {in_s:.2f}s → {out_s:.2f}s…")
+
+        def work() -> None:
+            try:
+                new_item = save_video_trim_as_new_item(
+                    self.library.root, item, in_s, out_s
+                )
+                err = None
+            except WriteError as exc:
+                new_item = None
+                err = exc
+            except Exception as exc:  # noqa: BLE001
+                new_item = None
+                err = exc
+
+            def apply() -> bool:
+                self._trim_exporting = False
+                if hasattr(self, "viewer_trim_btn"):
+                    self.viewer_trim_btn.set_sensitive(True)
+                if err is not None or new_item is None:
+                    self._toast(f"Cut failed: {err}")
+                    return False
+                self.library.upsert_item(new_item)
+                self.selected_item = new_item
+                self._marked = {new_item.id}
+                self.refresh_items(reset_selection=False)
+                dur = float(new_item.duration or 0)
+                self._toast(
+                    f"Cut · {dur:.2f}s · {new_item.width}×{new_item.height} · untagged"
+                )
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(target=work, name="eagle-video-trim", daemon=True).start()
+
     def save_viewer_frame(self) -> None:
         """Grab the current playhead frame as a new untagged still."""
         from import_media import save_video_frame_as_item
@@ -6306,30 +6442,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if not self.is_viewer_open() or self._viewer_mode != "video":
             self._toast("Play the video first")
             return
-        item = None
-        if self._viewer_item_id:
-            item = self.library.items_by_id.get(self._viewer_item_id)
-        item = item or self.selected_item
+        item = self._viewer_item()
         if item is None or not item.is_video:
             self._toast("No video to grab from")
             return
         if not item.path.is_file():
             self._toast(f"Missing file: {item.path}")
             return
-        stream = self.viewer_video.get_media_stream()
-        if stream is None:
-            self._toast("Video is not ready")
+        seconds = self._viewer_seconds()
+        if seconds is None:
+            self._toast("Could not read time")
             return
-        try:
-            stream.set_playing(False)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            ts_us = int(stream.get_timestamp())
-        except Exception as exc:  # noqa: BLE001
-            self._toast(f"Could not read time: {exc}")
-            return
-        seconds = max(0.0, ts_us / 1_000_000.0)
         dur_s = float(item.duration or 0.0)
         last_frame = bool(dur_s > 0 and seconds >= max(0.0, dur_s - 0.12))
         where = "last frame" if last_frame else f"{seconds:.2f}s"
@@ -6466,6 +6589,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.viewer_zoom_out_btn.set_visible(not video and not compare)
         if hasattr(self, "viewer_save_frame_btn"):
             self.viewer_save_frame_btn.set_visible(video)
+        if hasattr(self, "viewer_trim_btn"):
+            self.viewer_trim_btn.set_visible(video)
+        if hasattr(self, "crop_916_btn"):
+            self.crop_916_btn.set_visible(video)
         if hasattr(self, "crop_btn"):
             item = self.selected_item
             can_crop = bool(
@@ -7097,6 +7224,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 return True
             if self.selected_item is not None and self.selected_item.is_video:
                 self._toast("Play the video first")
+                return True
+        if (
+            not in_sidebar
+            and not in_search
+            and not ctrl
+            and not alt
+            and not super_mod
+            and self.is_viewer_open()
+            and self._viewer_mode == "video"
+        ):
+            if keyval in (Gdk.KEY_i, Gdk.KEY_I):
+                self._mark_viewer("in")
+                return True
+            if keyval in (Gdk.KEY_o, Gdk.KEY_O):
+                self._mark_viewer("out")
+                return True
+            if keyval in (Gdk.KEY_x, Gdk.KEY_X):
+                self._export_viewer_trim()
                 return True
         # Ctrl+A — select all assets in the current view
         if (
