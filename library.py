@@ -737,6 +737,12 @@ class EagleLibrary:
             return sum(1 for it in self.items if not it.is_deleted and not it.folders)
         raise ValueError(f"unknown special view: {view}")
 
+    def items_in_set(self, tag: str) -> list[Item]:
+        """Non-deleted items that carry this set: tag."""
+        from sets import items_with_set_tag
+
+        return items_with_set_tag(self.items, tag)
+
     # ── Writes (tags, ratings) ────────────────────────────────────────
 
     def _invalidate_caches(self) -> None:
