@@ -6965,15 +6965,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             cr.clip()
             self._paint_fitted_pixbuf(cr, pb, width, height)
             cr.restore()
-            cr.set_source_rgba(1, 1, 1, 0.92)
+            from theme import cairo_rgba  # noqa: PLC0415
+
+            cr.set_source_rgba(*cairo_rgba("foreground", 0.92))
             cr.set_line_width(2)
             cr.move_to(split_x, 0)
             cr.line_to(split_x, height)
             cr.stroke()
             cr.arc(split_x, height / 2.0, 7, 0, 6.28318)
-            cr.set_source_rgba(1, 1, 1, 0.95)
+            cr.set_source_rgba(*cairo_rgba("foreground", 0.95))
             cr.fill_preserve()
-            cr.set_source_rgba(0, 0, 0, 0.45)
+            cr.set_source_rgba(*cairo_rgba("background", 0.55))
             cr.set_line_width(1)
             cr.stroke()
             return
@@ -7857,6 +7859,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     Adw.init()
+    from theme import apply_omarchy_theme  # noqa: PLC0415
+
+    apply_omarchy_theme()
     app = EagleBrowseApp(Path(args.library).expanduser())
     return app.run(None)
 

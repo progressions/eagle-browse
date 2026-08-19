@@ -1154,7 +1154,9 @@ class CropWindow(Gtk.Window):
     def _draw(self, _area: Gtk.DrawingArea, cr, width: int, height: int) -> None:
         self._update_transform(float(width), float(height))
         # Background
-        cr.set_source_rgb(0.12, 0.12, 0.12)
+        from theme import cairo_rgb, cairo_rgba  # noqa: PLC0415
+
+        cr.set_source_rgb(*cairo_rgb("background", (0.12, 0.12, 0.12)))
         cr.rectangle(0, 0, width, height)
         cr.fill()
 
@@ -1192,13 +1194,13 @@ class CropWindow(Gtk.Window):
         cr.fill()
 
         # Crop border
-        cr.set_source_rgb(1, 1, 1)
+        cr.set_source_rgb(*cairo_rgb("foreground"))
         cr.set_line_width(1.5)
         cr.rectangle(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
         cr.stroke()
 
         # Rule-of-thirds guides
-        cr.set_source_rgba(1, 1, 1, 0.35)
+        cr.set_source_rgba(*cairo_rgba("foreground", 0.35))
         cr.set_line_width(1.0)
         for i in (1, 2):
             cr.move_to(rx + rw * i / 3, ry)
@@ -1220,11 +1222,11 @@ class CropWindow(Gtk.Window):
             (rx, ry + rh / 2),
             (rx + rw, ry + rh / 2),
         ]
-        cr.set_source_rgb(1, 1, 1)
+        cr.set_source_rgb(*cairo_rgb("foreground"))
         for px, py in points:
             cr.rectangle(px - hs / 2, py - hs / 2, hs, hs)
             cr.fill()
-        cr.set_source_rgb(0.15, 0.45, 0.95)
+        cr.set_source_rgb(*cairo_rgb("accent", (0.15, 0.45, 0.95)))
         cr.set_line_width(1.0)
         for px, py in points:
             cr.rectangle(px - hs / 2, py - hs / 2, hs, hs)
@@ -1232,10 +1234,10 @@ class CropWindow(Gtk.Window):
 
         # Size badge
         label = f"{self._rect.w} × {self._rect.h}"
-        cr.set_source_rgba(0, 0, 0, 0.65)
+        cr.set_source_rgba(*cairo_rgba("background", 0.75, (0.0, 0.0, 0.0)))
         cr.rectangle(rx + 6, ry + 6, 8 + 8 * len(label), 18)
         cr.fill()
-        cr.set_source_rgb(1, 1, 1)
+        cr.set_source_rgb(*cairo_rgb("foreground"))
         cr.select_font_face("Sans", 0, 0)
         cr.set_font_size(12)
         cr.move_to(rx + 10, ry + 19)
