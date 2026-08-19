@@ -14,7 +14,7 @@ import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import gi
 
@@ -83,6 +83,17 @@ SORT_OPTIONS: list[tuple[str, str]] = [
 ]
 SORT_IDS = [s[0] for s in SORT_OPTIONS]
 SORT_LABELS = [s[1] for s in SORT_OPTIONS]
+NAV_HISTORY_MAX = 80
+
+
+class _ViewLoc(NamedTuple):
+    """One grid scope: sidebar row, set view, descendant toggle."""
+
+    smart_id: str | None
+    folder_id: str | None
+    special: str | None
+    set_tag: str | None
+    descendants: bool
 
 
 def _cell_w(thumb: int) -> int:
@@ -196,6 +207,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._special_view: str | None = None
         self._set_view_tag: str | None = None
         self._set_counts: dict[str, int] = {}
+        self._nav_back: list[_ViewLoc] = []
+        self._nav_forward: list[_ViewLoc] = []
+        self._nav_restoring = False
         self.include_descendants = True
         self.selected_item: Item | None = None
         self._items: list[Item] = []  # prefix currently in the GridView store
@@ -296,6 +310,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         header = Adw.HeaderBar()
         root.append(header)
+
+        nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        nav.add_css_class("linked")
+        self.nav_back_btn = Gtk.Button(icon_name="go-previous-symbolic")
+        self.nav_back_btn.set_tooltip_text("Back (Alt+←)")
+        self.nav_back_btn.set_sensitive(False)
+        self.nav_back_btn.connect("clicked", lambda *_: self.nav_back())
+        self.nav_fwd_btn = Gtk.Button(icon_name="go-next-symbolic")
+        self.nav_fwd_btn.set_tooltip_text("Forward (Alt+→)")
+        self.nav_fwd_btn.set_sensitive(False)
+        self.nav_fwd_btn.connect("clicked", lambda *_: self.nav_forward())
+        nav.append(self.nav_back_btn)
+        nav.append(self.nav_fwd_btn)
+        header.pack_start(nav)
 
         self.search = Gtk.SearchEntry(placeholder_text="Search name, tags, folders, id…  (/)")
         self.search.set_hexpand(True)
@@ -2363,6 +2391,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if same_place and kind != "smart" and not was_viewing:
             return
 
+        before = self._view_loc()
         self.current_smart_folder_id = new_smart
         self.current_folder_id = new_folder
         self._special_view = new_special
@@ -2376,11 +2405,22 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             scroll_to_top=True,
         )
         self._save_sidebar_state()
+        self._record_view_change(before)
 
     def _restore_sidebar_selection(self) -> None:
         target_smart = self.current_smart_folder_id
         target_folder = self.current_folder_id
         target_special = self._special_view
+        if target_special == "set":
+            locked = self._sidebar_nav_lock
+            self._sidebar_nav_lock = True
+            try:
+                self.folder_list.unselect_all()
+            except Exception:  # noqa: BLE001
+                pass
+            if not locked:
+                GLib.idle_add(self._unlock_sidebar_nav)
+            return
         # Expand ancestors / Folders section, rebuild if the tree shape must change
         before_smart = set(self._smart_expanded)
         before_folders = self._folders_section_expanded
@@ -2497,11 +2537,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Collapse parent path: select parent if any
         sf = self.library.smart_folders_by_id.get(sid)
         if sf and sf.parent_id:
+            before = self._view_loc()
             self.current_smart_folder_id = sf.parent_id
             self.current_folder_id = None
             # Ensure parent visible; collapse is optional
             self._repopulate_sidebar_keep_selection()
             self.refresh_items()
+            self._record_view_change(before)
             return True
         return False
 
@@ -6205,25 +6247,30 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         """Temporary grid of every item with this set: tag."""
         if self.is_viewer_open():
             self.close_inline_viewer(restore_scroll=False)
+        before = self._view_loc()
         self._rebuild_set_counts()
         self._set_view_tag = tag
         self._special_view = "set"
         self.current_folder_id = None
         self.current_smart_folder_id = None
+        self._sidebar_nav_lock = True
         try:
             self.folder_list.unselect_all()
         except Exception:  # noqa: BLE001
             pass
+        GLib.idle_add(self._unlock_sidebar_nav)
         if keep_id:
             item = self.library.items_by_id.get(keep_id)
             if item is not None:
                 self.selected_item = item
                 self._marked = {keep_id}
         self.refresh_items(reset_selection=False, scroll_to_top=True)
+        self._record_view_change(before)
         n = self._set_counts.get(tag, 0)
         self._toast(f"Set · {n}")
 
     def _leave_set_view(self) -> None:
+        before = self._view_loc()
         self._set_view_tag = None
         self._special_view = None
         self.current_folder_id = None
@@ -6231,6 +6278,66 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.refresh_items(reset_selection=False, scroll_to_top=False)
         self._restore_sidebar_selection()
         self._save_sidebar_state()
+        self._record_view_change(before)
+
+    def _view_loc(self) -> _ViewLoc:
+        return _ViewLoc(
+            smart_id=self.current_smart_folder_id,
+            folder_id=self.current_folder_id,
+            special=self._special_view,
+            set_tag=self._set_view_tag if self._special_view == "set" else None,
+            descendants=self.include_descendants,
+        )
+
+    def _sync_nav_buttons(self) -> None:
+        if hasattr(self, "nav_back_btn"):
+            self.nav_back_btn.set_sensitive(bool(self._nav_back))
+            self.nav_fwd_btn.set_sensitive(bool(self._nav_forward))
+
+    def _record_view_change(self, before: _ViewLoc) -> None:
+        if self._nav_restoring:
+            return
+        after = self._view_loc()
+        if after == before:
+            return
+        self._nav_back.append(before)
+        if len(self._nav_back) > NAV_HISTORY_MAX:
+            self._nav_back = self._nav_back[-NAV_HISTORY_MAX:]
+        self._nav_forward.clear()
+        self._sync_nav_buttons()
+
+    def _apply_view_loc(self, loc: _ViewLoc) -> None:
+        if self.is_viewer_open():
+            self.close_inline_viewer(restore_scroll=False)
+        self._nav_restoring = True
+        self._sidebar_nav_lock = True
+        try:
+            self.current_smart_folder_id = loc.smart_id
+            self.current_folder_id = loc.folder_id
+            self._special_view = loc.special
+            self._set_view_tag = loc.set_tag if loc.special == "set" else None
+            self.include_descendants = loc.descendants
+            self._restore_sidebar_selection()
+            self.refresh_items(reset_selection=True, scroll_to_top=True)
+            self._save_sidebar_state()
+        finally:
+            self._nav_restoring = False
+            GLib.idle_add(self._unlock_sidebar_nav)
+            self._sync_nav_buttons()
+
+    def nav_back(self) -> None:
+        if not self._nav_back:
+            return
+        self._nav_forward.append(self._view_loc())
+        loc = self._nav_back.pop()
+        self._apply_view_loc(loc)
+
+    def nav_forward(self) -> None:
+        if not self._nav_forward:
+            return
+        self._nav_back.append(self._view_loc())
+        loc = self._nav_forward.pop()
+        self._apply_view_loc(loc)
 
     def group_selection_into_set(self) -> None:
         from write import WriteError
@@ -7320,10 +7427,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.grid.grab_focus()
 
     def toggle_descendants(self) -> None:
+        before = self._view_loc()
         self.include_descendants = not self.include_descendants
         state = "including subfolders" if self.include_descendants else "folder only"
         self._toast(state)
         self.refresh_items()
+        self._record_view_change(before)
 
     def move_selection(
         self, delta: int, *, extend: bool = False, keep_selection: bool = False
@@ -7419,6 +7528,22 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Alt+letter must not fire single-letter hotkeys (mnemonics / OS binds).
         alt = bool(state & Gdk.ModifierType.ALT_MASK)
 
+        if (
+            alt
+            and not ctrl
+            and not super_mod
+            and keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left)
+        ):
+            self.nav_back()
+            return True
+        if (
+            alt
+            and not ctrl
+            and not super_mod
+            and keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right)
+        ):
+            self.nav_forward()
+            return True
         # Undo soft-delete — Ctrl+Z (standard Omarchy / Linux app undo)
         if keyval in (Gdk.KEY_z, Gdk.KEY_Z) and ctrl and not super_mod and not in_search:
             self.undo_delete()

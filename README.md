@@ -81,6 +81,7 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `x` | **Crop** focused image (also the crop icon on the viewer toolbar) |
 | `F2` / `n` | **Rename** focused file (media + matching thumbnail; Eagle id unchanged) |
 | `g` | **Group** selected items into a set |
+| `Alt+←` / `Alt+→` | **Back** / **Forward** through views (also header buttons) |
 | `G` | **Remove** selection from its set |
 | `p` (video playing) | **Save frame** at the current playhead; ffmpeg writes a new untagged still |
 | `i` / `o` (video playing) | Mark **in** / **out** at the playhead (sidecar `eagle-browse.json`; Esc still closes) |
