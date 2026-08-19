@@ -42,6 +42,12 @@ from library import (  # noqa: E402
     SmartFolder,
     eval_smart_conditions,
 )
+from sets import (  # noqa: E402
+    SET_PREFIX,
+    mint_set_tag,
+    set_tag_of,
+    set_tags_of,
+)
 from sounds import mark_gui_running, mark_gui_stopped, play_sound  # noqa: E402
 from write import INBOX_SIGNAL_FILENAME  # noqa: E402
 
@@ -186,8 +192,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.library = library
         self.current_folder_id: str | None = None
         self.current_smart_folder_id: str | None = None
-        # Virtual views: None | "untagged" | "uncategorized"
+        # Virtual views: None | "untagged" | "uncategorized" | "set"
         self._special_view: str | None = None
+        self._set_view_tag: str | None = None
+        self._set_counts: dict[str, int] = {}
         self.include_descendants = True
         self.selected_item: Item | None = None
         self._items: list[Item] = []  # prefix currently in the GridView store
@@ -741,6 +749,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 if self.center_stack.get_visible_child_name() == "loading":
                     self.center_stack.set_visible_child_name("grid")
                 self._load_sidebar_state()
+                self._rebuild_set_counts()
                 self._populate_sidebar(select_current=True)
                 self.refresh_items()
                 self._start_inbox_watch()
@@ -1080,6 +1089,35 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_path.add_css_class("insp-path")
         box.append(self.insp_path)
 
+        # ── Set (family joined by a set: tag) ─────────────────────────
+        self.insp_set_title = Gtk.Label(label="Set", xalign=0)
+        self.insp_set_title.add_css_class("insp-section-title")
+        box.append(self.insp_set_title)
+        self.insp_set_thumbs = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=4
+        )
+        self.insp_set_thumbs.set_halign(Gtk.Align.START)
+        box.append(self.insp_set_thumbs)
+        set_act = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.insp_set_open = Gtk.Button(label="Open set")
+        self.insp_set_open.add_css_class("suggested-action")
+        self.insp_set_open.set_sensitive(False)
+        self.insp_set_open.connect("clicked", lambda *_: self.open_focused_set())
+        self.insp_set_group = Gtk.Button(label="Group")
+        self.insp_set_group.add_css_class("flat")
+        self.insp_set_group.add_css_class("insp-quiet-btn")
+        self.insp_set_group.set_sensitive(False)
+        self.insp_set_group.connect("clicked", lambda *_: self.group_selection_into_set())
+        self.insp_set_remove = Gtk.Button(label="Remove")
+        self.insp_set_remove.add_css_class("flat")
+        self.insp_set_remove.add_css_class("insp-quiet-btn")
+        self.insp_set_remove.set_sensitive(False)
+        self.insp_set_remove.connect("clicked", lambda *_: self.remove_selection_from_set())
+        set_act.append(self.insp_set_open)
+        set_act.append(self.insp_set_group)
+        set_act.append(self.insp_set_remove)
+        box.append(set_act)
+
         # ── Compare slots (A / B stills, then open the slider) ────────
         cmp_lbl = Gtk.Label(label="Compare", xalign=0)
         cmp_lbl.add_css_class("insp-section-title")
@@ -1236,6 +1274,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             button.insp-cmp-slot:hover {
                 background-color: alpha(@theme_fg_color, 0.10);
             }
+            button.insp-set-thumb {
+                padding: 0;
+                min-width: 36px;
+                min-height: 36px;
+            }
+            label.insp-set-more {
+                font-size: 0.82em;
+                opacity: 0.7;
+            }
             """
         )
         Gtk.StyleContext.add_provider_for_display(
@@ -1309,6 +1356,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.insp_cmp_a_btn.set_sensitive(False)
             self.insp_cmp_b_btn.set_sensitive(False)
             self._sync_compare_ui()
+        self._sync_set_ui([])
 
     @staticmethod
     def _clear_box(box: Gtk.Widget) -> None:
@@ -1473,6 +1521,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.insp_cmp_a_btn.set_sensitive(still is not None)
             self.insp_cmp_b_btn.set_sensitive(still is not None)
             self._sync_compare_ui()
+        self._sync_set_ui(items)
 
     def _paint_insp_stars(self, rating: int) -> None:
         """Filled stars full-opacity ★; empty stars faded ☆."""
@@ -2189,12 +2238,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _on_sidebar_pressed(
         self, _gesture: Gtk.GestureClick, n_press: int, x: float, y: float
     ) -> None:
-        """While the inline viewer is open, a sidebar click must close it and switch views.
+        """Force a view switch when row-selected would not fire.
 
-        ``row-selected`` does not fire when the clicked row is already selected,
-        which is the usual case (same smart folder / Uncategorized you opened from).
+        ``row-selected`` does not fire when the clicked row is already selected.
+        That happens with the inline viewer, and with a set view that left the
+        previous Uncategorized / smart-folder row highlighted.
         """
-        if n_press != 1 or not self.is_viewer_open():
+        if n_press != 1:
+            return
+        if not self.is_viewer_open() and self._special_view != "set":
             return
         widget = self.folder_list.pick(x, y, Gtk.PickFlags.DEFAULT)
         w = widget
@@ -2244,7 +2296,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             new_folder = None
 
         same_place = (
-            new_smart == self.current_smart_folder_id
+            self._special_view != "set"
+            and new_smart == self.current_smart_folder_id
             and new_folder == self.current_folder_id
             and new_special == self._special_view
         )
@@ -2311,6 +2364,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.current_smart_folder_id = new_smart
         self.current_folder_id = new_folder
         self._special_view = new_special
+        if new_special != "set":
+            self._set_view_tag = None
         # Reset selection when changing scope, or after closing a preview from the sidebar
         # Sidebar click always starts at the top. Dialogs still pass
         # reset_selection=False so tag/folder pickers keep their offset.
@@ -2473,6 +2528,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     # ── Grid ──────────────────────────────────────────────────────────
 
     def _scope_label(self) -> str:
+        if self._special_view == "set":
+            tag = self._set_view_tag or "set"
+            n = self._set_counts.get(tag, 0)
+            return f"Set · {n}" if n else "Set"
         if self._special_view == "untagged":
             return "Untagged"
         if self._special_view == "uncategorized":
@@ -2694,6 +2753,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         folder_id = self.current_folder_id
         smart_id = self.current_smart_folder_id
         special = self._special_view
+        set_tag = self._set_view_tag if special == "set" else None
         descendants = self.include_descendants
         search = self._filter_text
         # Snapshot filters for the worker thread
@@ -2723,7 +2783,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 except Exception:  # noqa: BLE001
                     pass
             self.library._invalidate_caches()  # noqa: SLF001
-            if special in ("untagged", "uncategorized"):
+            if special == "set":
+                items = self.library.query(
+                    search=search,
+                    include_deleted=False,
+                )
+                if set_tag:
+                    items = [it for it in items if set_tag in it.tag_set]
+                else:
+                    items = []
+            elif special in ("untagged", "uncategorized"):
                 items = self.library.query(
                     search=search,
                     include_deleted=False,
@@ -2768,6 +2837,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             def apply() -> bool:
                 if gen != self._query_gen:
                     return False  # stale
+                self._rebuild_set_counts()
                 if smart_id and not search and not vf.active() and special is None:
                     self._update_smart_count_label(smart_id, total)
                 if (
@@ -2999,6 +3069,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         badge.set_margin_bottom(2)
         tile.add_overlay(badge)
 
+        # Set member count (bottom-left)
+        set_badge = Gtk.Label(xalign=0.0)
+        set_badge.add_css_class("osd")
+        set_badge.add_css_class("caption")
+        set_badge.set_halign(Gtk.Align.START)
+        set_badge.set_valign(Gtk.Align.END)
+        set_badge.set_margin_start(4)
+        set_badge.set_margin_bottom(2)
+        set_badge.set_visible(False)
+        tile.add_overlay(set_badge)
+
         # Fallback icon when no thumb decodes
         icon = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
         icon.set_pixel_size(48)
@@ -3017,6 +3098,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         list_item.picture = picture  # type: ignore[attr-defined]
         list_item.label = label  # type: ignore[attr-defined]
         list_item.badge = badge  # type: ignore[attr-defined]
+        list_item.set_badge = set_badge  # type: ignore[attr-defined]
         list_item.icon = icon  # type: ignore[attr-defined]
         list_item.mark = mark  # type: ignore[attr-defined]
         list_item.stars = stars  # type: ignore[attr-defined]
@@ -3050,6 +3132,28 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         click.connect("pressed", on_click)
         card.add_controller(click)
+
+        set_click = Gtk.GestureClick()
+        set_click.set_button(1)
+
+        def on_set_badge(
+            gesture: Gtk.GestureClick,
+            _n: int,
+            _x: float,
+            _y: float,
+            li: Gtk.ListItem = list_item,
+        ) -> None:
+            obj = li.get_item()
+            if obj is None:
+                return
+            tag = set_tag_of(obj.item)
+            if not tag:
+                return
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            self.open_set_view(tag, keep_id=obj.item.id)
+
+        set_click.connect("pressed", on_set_badge)
+        set_badge.add_controller(set_click)
 
     def _on_factory_unbind(
         self, _factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem
@@ -3101,6 +3205,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         badge_text = _type_badge(item)
         badge.set_text(badge_text)
         badge.set_visible(bool(badge_text))
+
+        set_badge: Gtk.Label = list_item.set_badge  # type: ignore[attr-defined]
+        stag = set_tag_of(item)
+        scount = self._set_counts.get(stag, 0) if stag else 0
+        if stag and scount:
+            set_badge.set_text(str(scount))
+            set_badge.set_visible(True)
+            set_badge.set_tooltip_text(f"{stag} · {scount}")
+        else:
+            set_badge.set_text("")
+            set_badge.set_visible(False)
+            set_badge.set_tooltip_text("")
 
         # Generation token so recycled list items don't get the wrong late-arriving thumb
         list_item._thumb_gen = getattr(list_item, "_thumb_gen", 0) + 1  # type: ignore[attr-defined]
@@ -3962,6 +4078,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 rect = resolve_crop_rect(w or 0, h or 0, aspect="9:16", anchor="center")
                 new = save_video_crop_as_new_item(self.library.root, it, rect)
                 self.library.upsert_item(new)
+                new = self._auto_join_set(it, new)
                 created.append(new)
             except WriteError as exc:
                 errors.append(f"{it.display_name}: {exc}")
@@ -4016,6 +4133,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     mode, it = saved[-1]
                     if mode == "new":
                         self.library.upsert_item(it)
+                        it = self._auto_join_set(item, it)
                         self.selected_item = it
                         self._marked = {it.id}
                         self.refresh_items(reset_selection=False)
@@ -4023,7 +4141,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                             detail = f"{it.duration:.2f}s"
                         else:
                             detail = f"{it.width}×{it.height}"
-                        self._toast(f"Saved as new · {detail} · untagged / uncategorized")
+                        self._toast(f"Saved as new · {detail}")
                     else:
                         self._refresh_after_in_place_edit(it)
                         if it.is_audio and it.duration:
@@ -5345,6 +5463,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             item, self._view_filters
         ):
             return False
+        if self._special_view == "set":
+            tag = self._set_view_tag
+            return bool(tag) and tag in item.tag_set
         if self._special_view == "untagged":
             return not item.tags
         if self._special_view == "uncategorized":
@@ -5646,7 +5767,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                             and getattr(r, "item_id", None)
                             and not getattr(r, "reused", False)
                         ):
-                            item = self.library.load_item(r.item_id)
+                            item = self.library.ingest_imported(r.item_id)
                             if item is not None:
                                 new_items.append(item)
                     if new_items:
@@ -5974,6 +6095,205 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 video.set_media_stream(None)
             except Exception:  # noqa: BLE001
                 pass
+
+    SET_STRIP_MAX = 8
+
+    def _rebuild_set_counts(self) -> None:
+        counts: dict[str, int] = {}
+        for it in self.library.items:
+            if it.is_deleted:
+                continue
+            for t in it.tags:
+                if t.startswith(SET_PREFIX):
+                    counts[t] = counts.get(t, 0) + 1
+        self._set_counts = counts
+
+    def _sync_set_ui(self, items: list[Item]) -> None:
+        if not hasattr(self, "insp_set_open"):
+            return
+        self._rebuild_set_counts()
+        n_sel = len(items)
+        tag: str | None = None
+        if n_sel == 1:
+            tag = set_tag_of(items[0])
+        elif n_sel > 1:
+            tags = {set_tag_of(it) for it in items}
+            tags.discard(None)
+            if len(tags) == 1:
+                tag = next(iter(tags))  # type: ignore[assignment]
+        count = self._set_counts.get(tag, 0) if tag else 0
+        if tag:
+            token = tag[len(SET_PREFIX) :] or tag
+            self.insp_set_title.set_text(f"Set · {count}" if count else "Set")
+            self.insp_set_open.set_tooltip_text(tag)
+        else:
+            self.insp_set_title.set_text("Set")
+            self.insp_set_open.set_tooltip_text("Open the set this item belongs to")
+        self.insp_set_open.set_sensitive(bool(tag))
+        self.insp_set_group.set_sensitive(n_sel >= 2)
+        self.insp_set_remove.set_sensitive(
+            any(set_tag_of(it) for it in items)
+        )
+        self._fill_set_thumbs(tag)
+
+    def _fill_set_thumbs(self, tag: str | None) -> None:
+        box = getattr(self, "insp_set_thumbs", None)
+        if box is None:
+            return
+        self._clear_box(box)
+        if not tag:
+            return
+        members = self.library.items_in_set(tag)
+        members = self._sort_items(members)
+        extra = max(0, len(members) - self.SET_STRIP_MAX)
+        for it in members[: self.SET_STRIP_MAX]:
+            btn = Gtk.Button()
+            btn.add_css_class("flat")
+            btn.add_css_class("insp-set-thumb")
+            btn.set_tooltip_text(it.display_name)
+            pic = Gtk.Picture()
+            pic.set_size_request(36, 36)
+            pic.set_content_fit(Gtk.ContentFit.COVER)
+            path = _thumb_path_for(it)
+            pix = _pixbuf_from_path(path, 72, 72) if path else None
+            if pix is not None:
+                pic.set_paintable(Gdk.Texture.new_for_pixbuf(pix))
+            btn.set_child(pic)
+            iid = it.id
+            btn.connect("clicked", lambda *_a, i=iid: self._focus_set_member(i))
+            box.append(btn)
+        if extra:
+            more = Gtk.Label(label=f"+{extra}")
+            more.add_css_class("insp-set-more")
+            more.add_css_class("caption")
+            more.set_valign(Gtk.Align.CENTER)
+            box.append(more)
+
+    def _focus_set_member(self, iid: str) -> None:
+        item = self.library.items_by_id.get(iid)
+        if item is None or item.is_deleted:
+            return
+        tag = set_tag_of(item)
+        if tag and (self._special_view != "set" or self._set_view_tag != tag):
+            self.open_set_view(tag, keep_id=iid)
+            return
+        self.selected_item = item
+        self._marked = {iid}
+        for i, it in enumerate(self._items):
+            if it.id == iid:
+                self._select_index(i)
+                break
+        self.update_inspector()
+
+    def open_focused_set(self) -> None:
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        tag = set_tag_of(items[0])
+        if not tag:
+            self._toast("Not in a set")
+            return
+        keep = items[0].id if len(items) == 1 else (
+            self.selected_item.id if self.selected_item else items[0].id
+        )
+        self.open_set_view(tag, keep_id=keep)
+
+    def open_set_view(self, tag: str, *, keep_id: str | None = None) -> None:
+        """Temporary grid of every item with this set: tag."""
+        self._rebuild_set_counts()
+        self._set_view_tag = tag
+        self._special_view = "set"
+        self.current_folder_id = None
+        self.current_smart_folder_id = None
+        try:
+            self.folder_list.unselect_all()
+        except Exception:  # noqa: BLE001
+            pass
+        if keep_id:
+            item = self.library.items_by_id.get(keep_id)
+            if item is not None:
+                self.selected_item = item
+                self._marked = {keep_id}
+        self.refresh_items(reset_selection=False, scroll_to_top=True)
+        n = self._set_counts.get(tag, 0)
+        self._toast(f"Set · {n}")
+
+    def _leave_set_view(self) -> None:
+        self._set_view_tag = None
+        self._special_view = None
+        self.current_folder_id = None
+        self.current_smart_folder_id = None
+        self.refresh_items(reset_selection=False, scroll_to_top=False)
+        self._restore_sidebar_selection()
+        self._save_sidebar_state()
+
+    def group_selection_into_set(self) -> None:
+        from write import WriteError
+
+        items = self._effective_hand_off_items()
+        if len(items) < 2:
+            self._toast("Select at least two items")
+            return
+        tag = set_tag_of(items[0])
+        if tag is None:
+            for it in items[1:]:
+                tag = set_tag_of(it)
+                if tag:
+                    break
+        if tag is None:
+            tag = mint_set_tag(items[0].id)
+        ids = [it.id for it in items if tag not in it.tag_set]
+        if not ids:
+            self._toast("Already grouped")
+            return
+        try:
+            _ok, errors = self.library.update_items_batch(ids, add_tags=[tag])
+        except WriteError as exc:
+            self._toast(str(exc))
+            return
+        self._rebuild_set_counts()
+        self.refresh_items(reset_selection=False)
+        n = self._set_counts.get(tag, 0)
+        msg = f"Set · {n}"
+        if errors:
+            msg += f" · {len(errors)} failed"
+        self._toast(msg)
+
+    def remove_selection_from_set(self) -> None:
+        from write import WriteError
+
+        items = self._effective_hand_off_items()
+        drop = list(dict.fromkeys(t for it in items for t in set_tags_of(it)))
+        if not drop:
+            self._toast("Not in a set")
+            return
+        ids = [it.id for it in items if set_tags_of(it)]
+        try:
+            _ok, errors = self.library.update_items_batch(ids, remove_tags=drop)
+        except WriteError as exc:
+            self._toast(str(exc))
+            return
+        self._rebuild_set_counts()
+        if self._special_view == "set":
+            still = self._set_counts.get(self._set_view_tag or "", 0)
+            if still < 1:
+                self._leave_set_view()
+                self._toast("Set empty")
+                return
+        self.refresh_items(reset_selection=False)
+        msg = "Removed from set"
+        if errors:
+            msg += f" · {len(errors)} failed"
+        self._toast(msg)
+
+    def _auto_join_set(self, source: Item, new_item: Item) -> Item:
+        """Put a browse-created derivative in the source's set (mint if needed)."""
+        from sets import join_into_set
+
+        join_into_set(self.library, source, new_item)
+        self._rebuild_set_counts()
+        return self.library.items_by_id.get(new_item.id) or new_item
 
     def _compare_current_still(self) -> Item | None:
         """The still the inspector is showing — focused item if it is an image."""
@@ -6419,12 +6739,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._toast(f"Cut failed: {err}")
                     return False
                 self.library.upsert_item(new_item)
+                new_item = self._auto_join_set(item, new_item)
                 self.selected_item = new_item
                 self._marked = {new_item.id}
                 self.refresh_items(reset_selection=False)
                 dur = float(new_item.duration or 0)
                 self._toast(
-                    f"Cut · {dur:.2f}s · {new_item.width}×{new_item.height} · untagged"
+                    f"Cut · {dur:.2f}s · {new_item.width}×{new_item.height}"
                 )
                 return False
 
@@ -6482,9 +6803,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._toast(f"Save frame failed: {err}")
                     return False
                 self.library.upsert_item(new_item)
+                new_item = self._auto_join_set(item, new_item)
                 self._toast(
-                    f"Saved frame · {where} · {new_item.width}×{new_item.height} · "
-                    "untagged / uncategorized"
+                    f"Saved frame · {where} · {new_item.width}×{new_item.height}"
                 )
                 return False
 
@@ -6644,15 +6965,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             cr.clip()
             self._paint_fitted_pixbuf(cr, pb, width, height)
             cr.restore()
-            cr.set_source_rgba(1, 1, 1, 0.92)
+            from theme import cairo_rgba  # noqa: PLC0415
+
+            cr.set_source_rgba(*cairo_rgba("foreground", 0.92))
             cr.set_line_width(2)
             cr.move_to(split_x, 0)
             cr.line_to(split_x, height)
             cr.stroke()
             cr.arc(split_x, height / 2.0, 7, 0, 6.28318)
-            cr.set_source_rgba(1, 1, 1, 0.95)
+            cr.set_source_rgba(*cairo_rgba("foreground", 0.95))
             cr.fill_preserve()
-            cr.set_source_rgba(0, 0, 0, 0.45)
+            cr.set_source_rgba(*cairo_rgba("background", 0.55))
             cr.set_line_width(1)
             cr.stroke()
             return
@@ -7112,6 +7435,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 return True
             if self.clear_marks():
                 return True
+            if self._special_view == "set":
+                self._leave_set_view()
+                return True
             if self._view_filters.active():
                 self.clear_view_filters()
                 return True
@@ -7533,6 +7859,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     Adw.init()
+    from theme import apply_omarchy_theme  # noqa: PLC0415
+
+    apply_omarchy_theme()
     app = EagleBrowseApp(Path(args.library).expanduser())
     return app.run(None)
 

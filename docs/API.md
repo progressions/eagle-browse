@@ -29,6 +29,7 @@ eagle-api get MXXXXXXXXXXXX
 # Tags / categories / rating / notes
 eagle-api tag add MXXXXXXXXXXXX sofie,raw
 eagle-api tag remove MXXXXXXXXXXXX raw
+eagle-api group MXXXXXXXXXXXX MYYYYYYYYYYYY   # join child into source's set
 eagle-api folder add MXXXXXXXXXXXX Eunbi
 eagle-api folder remove MXXXXXXXXXXXX Eunbi
 eagle-api rate MXXXXXXXXXXXX 4

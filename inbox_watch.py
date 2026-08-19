@@ -299,9 +299,11 @@ def process_ready(
         return new_n, reused_n, fail_n + 1
 
     # Incremental: only the new items, not a 25k-item rescan.
+    # ingest_imported also joins a source set when the filename contains
+    # an existing Eagle id (animation of a still, upscale-of, etc.).
     for iid in new_ids:
         try:
-            library.load_item(iid)
+            library.ingest_imported(iid)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("ingest %s after import failed: %s", iid, exc)
 

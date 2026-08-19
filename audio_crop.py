@@ -296,6 +296,9 @@ def save_audio_crop_as_new_item(
 
         new_size = dest_media.stat().st_size
         new_dur = probe_duration(dest_media)
+        from sets import ensure_set_tag
+
+        set_tags = [t for t in [ensure_set_tag(library_root, item)] if t]
         now = _now_ms()
         meta: dict[str, Any] = {
             "id": iid,
@@ -304,7 +307,7 @@ def save_audio_crop_as_new_item(
             "btime": now,
             "mtime": now,
             "ext": ext,
-            "tags": [],
+            "tags": list(set_tags),
             "folders": [],
             "isDeleted": False,
             "url": "",
@@ -332,7 +335,7 @@ def save_audio_crop_as_new_item(
         id=iid,
         name=name,
         ext=ext,
-        tags=[],
+        tags=list(set_tags),
         folders=[],
         path=dest_media.resolve(),
         thumb=None,
@@ -346,7 +349,7 @@ def save_audio_crop_as_new_item(
         star=None,
         duration=new_dur,
         item_dir=item_dir.resolve(),
-        tag_set=frozenset(),
+        tag_set=frozenset(set_tags),
         folder_set=frozenset(),
         name_lower=name.lower(),
         ext_lower=ext.lower(),
@@ -625,7 +628,9 @@ class AudioCropWindow(Gtk.Window):
         self._drag = ""
 
     def _draw(self, _area, cr, width: int, height: int) -> None:
-        cr.set_source_rgb(0.12, 0.12, 0.13)
+        from theme import cairo_rgb, cairo_rgba  # noqa: PLC0415
+
+        cr.set_source_rgb(*cairo_rgb("background", (0.12, 0.12, 0.13)))
         cr.rectangle(0, 0, width, height)
         cr.fill()
         mid = height / 2.0
@@ -633,7 +638,7 @@ class AudioCropWindow(Gtk.Window):
         peaks = self._peaks
         if peaks:
             n = len(peaks)
-            cr.set_source_rgb(0.45, 0.48, 0.52)
+            cr.set_source_rgb(*cairo_rgb("muted", (0.45, 0.48, 0.52)))
             cr.set_line_width(1.0)
             for i, p in enumerate(peaks):
                 x = (i + 0.5) * width / n
@@ -642,7 +647,7 @@ class AudioCropWindow(Gtk.Window):
                 cr.line_to(x, mid + h)
             cr.stroke()
         else:
-            cr.set_source_rgb(0.3, 0.3, 0.32)
+            cr.set_source_rgb(*cairo_rgb("muted", (0.3, 0.3, 0.32)))
             cr.set_line_width(2)
             cr.move_to(0, mid)
             cr.line_to(width, mid)
@@ -650,10 +655,10 @@ class AudioCropWindow(Gtk.Window):
 
         xs = self._time_to_x(self._start)
         xe = self._time_to_x(self._end)
-        cr.set_source_rgba(0.25, 0.55, 0.95, 0.22)
+        cr.set_source_rgba(*cairo_rgba("accent", 0.22, (0.25, 0.55, 0.95)))
         cr.rectangle(xs, 0, max(1.0, xe - xs), height)
         cr.fill()
-        cr.set_source_rgb(0.35, 0.65, 1.0)
+        cr.set_source_rgb(*cairo_rgb("accent", (0.35, 0.65, 1.0)))
         cr.set_line_width(2)
         cr.move_to(xs, 0)
         cr.line_to(xs, height)
