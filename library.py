@@ -529,6 +529,17 @@ class EagleLibrary:
             return None
         return self.upsert_item(item)
 
+    def ingest_imported(self, item_id: str) -> Item | None:
+        """Load a newly imported item and join it to a source set if the name
+        contains an existing Eagle id (same as inspector Group)."""
+        item = self.load_item(item_id)
+        if item is None:
+            return None
+        from sets import join_imported_by_name
+
+        join_imported_by_name(self, item)
+        return self.items_by_id.get(item_id) or item
+
     def scan_new_items(self) -> list[Item]:
         """Load any .info folders that are not already in memory."""
         images_dir = self.root / "images"
@@ -1042,7 +1053,7 @@ class EagleLibrary:
         )
         for r in results:
             if getattr(r, "ok", False) and getattr(r, "item_id", None) and not getattr(r, "reused", False):
-                self.load_item(r.item_id)
+                self.ingest_imported(r.item_id)
         return results
 
     def import_path(
@@ -1063,7 +1074,7 @@ class EagleLibrary:
             move_source=move_source,
         )
         if result.ok and result.item_id and not result.reused:
-            self.load_item(result.item_id)
+            self.ingest_imported(result.item_id)
         return result
 
     def _update_item_unlocked(

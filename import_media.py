@@ -819,7 +819,7 @@ def save_video_frame_as_item(
     """
     Extract one frame from a video item and store it as a new still.
 
-    New item has no tags and no folders (same as crop Save as). Source video
+    New item has no folders. Joins the source set (same as crop Save as). Source video
     is unchanged. Returns a ``library.Item``.
     """
     from library import Item
@@ -856,6 +856,9 @@ def save_video_frame_as_item(
         new_size = dest_media.stat().st_size
         thumb_path = item_dir / f"{name}_thumbnail.png"
         thumb_ok = _make_image_thumbnail(dest_media, thumb_path)
+        from sets import ensure_set_tag
+
+        set_tags = [t for t in [ensure_set_tag(library_root, item)] if t]
         now = _now_ms()
         meta: dict[str, Any] = {
             "id": iid,
@@ -864,7 +867,7 @@ def save_video_frame_as_item(
             "btime": now,
             "mtime": now,
             "ext": ext,
-            "tags": [],
+            "tags": list(set_tags),
             "folders": [],
             "isDeleted": False,
             "url": "",
@@ -895,7 +898,7 @@ def save_video_frame_as_item(
         id=iid,
         name=name,
         ext=ext,
-        tags=[],
+        tags=list(set_tags),
         folders=[],
         path=dest_media.resolve(),
         thumb=thumb_path.resolve() if thumb_ok else None,
@@ -909,7 +912,7 @@ def save_video_frame_as_item(
         star=None,
         duration=None,
         item_dir=item_dir.resolve(),
-        tag_set=frozenset(),
+        tag_set=frozenset(set_tags),
         folder_set=frozenset(),
         name_lower=name.lower(),
         ext_lower=ext.lower(),

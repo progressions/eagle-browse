@@ -649,7 +649,8 @@ def save_crop_as_new_item(
     rect: CropRect,
 ) -> Any:
     """
-    Write the crop as a **new** library item (no tags, no folders).
+    Write the crop as a **new** library item (no folders).
+    Joins the source's set: tag, or mints one and tags both.
 
     Leaves the source item untouched. Returns a new ``library.Item``.
     """
@@ -693,6 +694,9 @@ def save_crop_as_new_item(
         else:
             thumb_path_resolved = thumb_path
 
+        from sets import ensure_set_tag
+
+        set_tags = [t for t in [ensure_set_tag(library_root, item)] if t]
         now = _now_ms()
         meta: dict[str, Any] = {
             "id": iid,
@@ -701,7 +705,7 @@ def save_crop_as_new_item(
             "btime": now,
             "mtime": now,
             "ext": ext,
-            "tags": [],
+            "tags": list(set_tags),
             "folders": [],
             "isDeleted": False,
             "url": "",
@@ -731,7 +735,7 @@ def save_crop_as_new_item(
         id=iid,
         name=name,
         ext=ext,
-        tags=[],
+        tags=list(set_tags),
         folders=[],
         path=dest_media.resolve(),
         thumb=thumb_path_resolved.resolve() if thumb_path_resolved else None,
@@ -745,7 +749,7 @@ def save_crop_as_new_item(
         star=None,
         duration=None,
         item_dir=item_dir.resolve(),
-        tag_set=frozenset(),
+        tag_set=frozenset(set_tags),
         folder_set=frozenset(),
         name_lower=name.lower(),
         ext_lower=ext.lower(),
@@ -815,7 +819,7 @@ def save_video_crop_as_new_item(
     item: Any,
     rect: CropRect,
 ) -> Any:
-    """Write a video crop as a new library item (no tags, no folders)."""
+    """Write a video crop as a new library item. Joins the source set."""
     from import_media import (
         _make_video_thumbnail,
         _now_ms,
@@ -872,6 +876,9 @@ def save_video_crop_as_new_item(
         new_size = dest_media.stat().st_size
         thumb_path = item_dir / f"{stem}_thumbnail.png"
         thumb_ok = _make_video_thumbnail(dest_media, thumb_path)
+        from sets import ensure_set_tag
+
+        set_tags = [t for t in [ensure_set_tag(library_root, item)] if t]
         now = _now_ms()
         meta: dict[str, Any] = {
             "id": iid,
@@ -880,7 +887,7 @@ def save_video_crop_as_new_item(
             "btime": now,
             "mtime": now,
             "ext": ext,
-            "tags": [],
+            "tags": list(set_tags),
             "folders": [],
             "isDeleted": False,
             "url": "",
@@ -912,7 +919,7 @@ def save_video_crop_as_new_item(
         id=iid,
         name=stem,
         ext=ext,
-        tags=[],
+        tags=list(set_tags),
         folders=[],
         path=dest_media.resolve(),
         thumb=thumb_path.resolve() if thumb_ok else None,
@@ -926,7 +933,7 @@ def save_video_crop_as_new_item(
         star=None,
         duration=duration or None,
         item_dir=item_dir.resolve(),
-        tag_set=frozenset(),
+        tag_set=frozenset(set_tags),
         folder_set=frozenset(),
         name_lower=stem.lower(),
         ext_lower=ext.lower(),

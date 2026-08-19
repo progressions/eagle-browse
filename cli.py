@@ -7,6 +7,7 @@ Human-readable tables by default; pass --json for machine-readable output.
   eagle-api search --tag eunbi --rating-min 3
   eagle-api search --smart-folder Eunbi/images --json
   eagle-api tag add <id> sofie
+  eagle-api group <source> <child>
   eagle-api crop <id> --aspect 9:16 --mode new
   eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
 """
@@ -114,6 +115,8 @@ def _fmt_ok_action(data: dict[str, Any]) -> None:
         parts.append(data["action"])
     if data.get("tags"):
         parts.append("tags=" + ",".join(data["tags"]))
+    if data.get("tag"):
+        parts.append("set=" + str(data["tag"]))
     if data.get("folder_ids"):
         parts.append("folders=" + ",".join(data["folder_ids"]))
     if "rating" in data:
@@ -369,6 +372,14 @@ environment:
     t.add_argument("ids", help="Item id or comma-separated ids")
     t.add_argument("tags", help="Tag or comma-separated tags")
 
+    grp = sub.add_parser(
+        "group",
+        parents=[shared],
+        help="Join items into one set (same as inspector Group)",
+    )
+    grp.add_argument("source", help="Source item id (the still)")
+    grp.add_argument("children", help="Child id or comma-separated ids")
+
     f = sub.add_parser("folder", parents=[shared], help="Add/remove categories")
     f.add_argument("action", choices=("add", "remove"))
     f.add_argument("ids", help="Item id or comma-separated ids")
@@ -581,6 +592,10 @@ def main(argv: list[str] | None = None) -> int:
                 result = api.add_tags(ids, tags)
             else:
                 result = api.remove_tags(ids, tags)
+            return out(result, _fmt_ok_action)
+
+        if args.cmd == "group":
+            result = api.group_into_set(args.source, _split_csv(args.children))
             return out(result, _fmt_ok_action)
 
         if args.cmd == "folder":

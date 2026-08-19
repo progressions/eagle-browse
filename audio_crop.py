@@ -296,6 +296,9 @@ def save_audio_crop_as_new_item(
 
         new_size = dest_media.stat().st_size
         new_dur = probe_duration(dest_media)
+        from sets import ensure_set_tag
+
+        set_tags = [t for t in [ensure_set_tag(library_root, item)] if t]
         now = _now_ms()
         meta: dict[str, Any] = {
             "id": iid,
@@ -304,7 +307,7 @@ def save_audio_crop_as_new_item(
             "btime": now,
             "mtime": now,
             "ext": ext,
-            "tags": [],
+            "tags": list(set_tags),
             "folders": [],
             "isDeleted": False,
             "url": "",
@@ -332,7 +335,7 @@ def save_audio_crop_as_new_item(
         id=iid,
         name=name,
         ext=ext,
-        tags=[],
+        tags=list(set_tags),
         folders=[],
         path=dest_media.resolve(),
         thumb=None,
@@ -346,7 +349,7 @@ def save_audio_crop_as_new_item(
         star=None,
         duration=new_dur,
         item_dir=item_dir.resolve(),
-        tag_set=frozenset(),
+        tag_set=frozenset(set_tags),
         folder_set=frozenset(),
         name_lower=name.lower(),
         ext_lower=ext.lower(),

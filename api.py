@@ -10,6 +10,7 @@ Use from Python::
 Or CLI (JSON stdout)::
 
     eagle-api search --tag eunbi --rating-min 3
+    eagle-api group <source> <child>
     eagle-api crop <id> --aspect 9:16 --mode new
     eagle-api smart-folder show "Eunbi/images"
     eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
@@ -292,6 +293,39 @@ class EagleAPI:
         return {"ok": True, "item": _item_to_dict(it, library=self.library)}
 
     # ── Mutate items ──────────────────────────────────────────────────
+
+    def group_into_set(
+        self, source_id: str, child_ids: list[str] | str
+    ) -> dict[str, Any]:
+        """Put source + children on one set: tag (inspector Group)."""
+        from sets import join_into_set
+
+        sid = (source_id or "").strip()
+        src = self.library.items_by_id.get(sid)
+        if src is None:
+            return {"ok": False, "error": f"Unknown item: {sid or '(empty)'}"}
+        raw = [child_ids] if isinstance(child_ids, str) else list(child_ids)
+        children: list[Item] = []
+        for cid in raw:
+            cid = str(cid or "").strip()
+            if not cid:
+                continue
+            it = self.library.items_by_id.get(cid)
+            if it is None:
+                return {"ok": False, "error": f"Unknown item: {cid}"}
+            children.append(it)
+        if not children:
+            return {"ok": False, "error": "need at least one child id"}
+        tag = join_into_set(self.library, src, *children)
+        if not tag:
+            return {"ok": False, "error": "could not write set tag"}
+        return {
+            "ok": True,
+            "action": "group",
+            "tag": tag,
+            "ids": [src.id] + [c.id for c in children],
+            "updated": 1 + len(children),
+        }
 
     def add_tags(self, item_ids: list[str] | str, tags: list[str] | str) -> dict[str, Any]:
         return self._batch_tag(item_ids, tags, add=True)

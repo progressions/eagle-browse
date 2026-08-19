@@ -5763,7 +5763,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                             and getattr(r, "item_id", None)
                             and not getattr(r, "reused", False)
                         ):
-                            item = self.library.load_item(r.item_id)
+                            item = self.library.ingest_imported(r.item_id)
                             if item is not None:
                                 new_items.append(item)
                     if new_items:
@@ -6281,20 +6281,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _auto_join_set(self, source: Item, new_item: Item) -> Item:
         """Put a browse-created derivative in the source's set (mint if needed)."""
-        from write import WriteError
+        from sets import join_into_set
 
-        tag = set_tag_of(source)
-        ids = [new_item.id]
-        if tag is None:
-            tag = mint_set_tag(source.id)
-            if tag not in source.tag_set:
-                ids.append(source.id)
-        elif tag not in source.tag_set:
-            ids.append(source.id)
-        try:
-            self.library.update_items_batch(ids, add_tags=[tag])
-        except WriteError:
-            return new_item
+        join_into_set(self.library, source, new_item)
         self._rebuild_set_counts()
         return self.library.items_by_id.get(new_item.id) or new_item
 
