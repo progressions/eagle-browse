@@ -6203,6 +6203,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def open_set_view(self, tag: str, *, keep_id: str | None = None) -> None:
         """Temporary grid of every item with this set: tag."""
+        if self.is_viewer_open():
+            self.close_inline_viewer(restore_scroll=False)
         self._rebuild_set_counts()
         self._set_view_tag = tag
         self._special_view = "set"
