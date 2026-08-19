@@ -1126,6 +1126,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             orientation=Gtk.Orientation.HORIZONTAL, spacing=4
         )
         self.insp_set_thumbs.set_halign(Gtk.Align.START)
+        self.insp_set_thumbs.set_hexpand(False)
         box.append(self.insp_set_thumbs)
         set_act = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         self.insp_set_open = Gtk.Button(label="Open set")
@@ -1308,11 +1309,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             button.insp-set-thumb {
                 padding: 0;
                 min-width: 36px;
+                max-width: 36px;
                 min-height: 36px;
+                max-height: 36px;
+            }
+            box.insp-set-more-veil {
+                background-color: alpha(@window_bg_color, 0.62);
             }
             label.insp-set-more {
-                font-size: 0.82em;
-                opacity: 0.7;
+                font-weight: 700;
+                font-size: 0.9em;
             }
             """
         )
@@ -6142,7 +6148,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except Exception:  # noqa: BLE001
                 pass
 
-    SET_STRIP_MAX = 8
+    SET_STRIP_MAX = 4
 
     def _rebuild_set_counts(self) -> None:
         counts: dict[str, int] = {}
@@ -6191,12 +6197,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         members = self.library.items_in_set(tag)
         members = self._sort_items(members)
-        extra = max(0, len(members) - self.SET_STRIP_MAX)
-        for it in members[: self.SET_STRIP_MAX]:
+        shown = members[: self.SET_STRIP_MAX]
+        extra = max(0, len(members) - len(shown))
+        for i, it in enumerate(shown):
             btn = Gtk.Button()
             btn.add_css_class("flat")
             btn.add_css_class("insp-set-thumb")
-            btn.set_tooltip_text(it.display_name)
             pic = Gtk.Picture()
             pic.set_size_request(36, 36)
             pic.set_content_fit(Gtk.ContentFit.COVER)
@@ -6204,16 +6210,30 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             pix = _pixbuf_from_path(path, 72, 72) if path else None
             if pix is not None:
                 pic.set_paintable(Gdk.Texture.new_for_pixbuf(pix))
-            btn.set_child(pic)
-            iid = it.id
-            btn.connect("clicked", lambda *_a, i=iid: self._focus_set_member(i))
+            overflow = extra > 0 and i == len(shown) - 1
+            if overflow:
+                overlay = Gtk.Overlay()
+                overlay.set_size_request(36, 36)
+                overlay.set_child(pic)
+                veil = Gtk.Box()
+                veil.add_css_class("insp-set-more-veil")
+                veil.set_hexpand(True)
+                veil.set_vexpand(True)
+                overlay.add_overlay(veil)
+                more = Gtk.Label(label=f"+{extra}")
+                more.add_css_class("insp-set-more")
+                more.set_halign(Gtk.Align.CENTER)
+                more.set_valign(Gtk.Align.CENTER)
+                overlay.add_overlay(more)
+                btn.set_child(overlay)
+                btn.set_tooltip_text(f"+{extra} more · Open set")
+                btn.connect("clicked", lambda *_a, t=tag: self.open_set_view(t))
+            else:
+                btn.set_child(pic)
+                btn.set_tooltip_text(it.display_name)
+                iid = it.id
+                btn.connect("clicked", lambda *_a, j=iid: self._focus_set_member(j))
             box.append(btn)
-        if extra:
-            more = Gtk.Label(label=f"+{extra}")
-            more.add_css_class("insp-set-more")
-            more.add_css_class("caption")
-            more.set_valign(Gtk.Align.CENTER)
-            box.append(more)
 
     def _focus_set_member(self, iid: str) -> None:
         item = self.library.items_by_id.get(iid)
