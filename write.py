@@ -411,8 +411,14 @@ def apply_tags(
     else:
         tags = canonicalize_tags(data.get("tags") or [])
         if add_tags:
+            added = canonicalize_tags(add_tags)
+            incoming_set = [t for t in added if t.startswith("set:")]
+            if incoming_set:
+                keep = incoming_set[-1]
+                tags = [t for t in tags if not t.startswith("set:")]
+                added = [t for t in added if not t.startswith("set:")] + [keep]
             existing = set(tags)
-            for t in canonicalize_tags(add_tags):
+            for t in added:
                 if t not in existing:
                     tags.append(t)
                     existing.add(t)

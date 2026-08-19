@@ -46,10 +46,11 @@ def ensure_set_tag(library_root: Any, source: Any) -> str:
         tag = mint_set_tag(str(getattr(source, "id", "") or ""))
     if not tag:
         return tag
+    extras = [t for t in set_tags_of(source) if t != tag]
     tag_set = getattr(source, "tag_set", None) or frozenset(
         getattr(source, "tags", None) or []
     )
-    if tag in tag_set:
+    if tag in tag_set and not extras:
         return tag
     item_dir = getattr(source, "item_dir", None)
     if item_dir is None:
@@ -114,17 +115,18 @@ def join_into_set(library: Any, source: Any, *children: Any) -> str | None:
         return None
     kids = [c for c in children if c is not None and getattr(c, "id", None)]
     tag = set_tag_of(source)
-    ids: list[str] = []
-    source_tags = getattr(source, "tag_set", None) or frozenset()
     if tag is None:
         tag = mint_set_tag(source.id)
-        if tag not in source_tags:
-            ids.append(source.id)
-    elif tag not in source_tags:
+    ids: list[str] = []
+
+    def _needs_set(it: Any) -> bool:
+        have = set_tags_of(it)
+        return have != [tag]
+
+    if _needs_set(source):
         ids.append(source.id)
     for child in kids:
-        child_tags = getattr(child, "tag_set", None) or frozenset()
-        if tag not in child_tags:
+        if _needs_set(child):
             ids.append(child.id)
     ids = list(dict.fromkeys(ids))
     if not ids:

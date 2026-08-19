@@ -6243,7 +6243,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     break
         if tag is None:
             tag = mint_set_tag(items[0].id)
-        ids = [it.id for it in items if tag not in it.tag_set]
+        ids = [
+            it.id
+            for it in items
+            if set_tags_of(it) != [tag]
+        ]
         if not ids:
             self._toast("Already grouped")
             return
