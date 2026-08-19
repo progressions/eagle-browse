@@ -1488,7 +1488,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._paint_insp_stars(0)
 
         # Tags: intersection (common) and partial — pill chips
-        tag_sets = [set(it.tags) for it in items]
+        tag_sets = [{t for t in it.tags if not is_set_tag(t)} for it in items]
         common_tags = set.intersection(*tag_sets) if tag_sets else set()
         union_tags = set.union(*tag_sets) if tag_sets else set()
         partial_tags = union_tags - common_tags
@@ -4293,17 +4293,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
 
         # Tag present on all items → active; on some → partial
-        tag_sets = [set(it.tags) for it in items]
+        # set: tags are membership, not shown in this picker (use Group / g)
+        tag_sets = [{t for t in it.tags if not is_set_tag(t)} for it in items]
         active = set.intersection(*tag_sets) if tag_sets else set()
         union = set.union(*tag_sets) if tag_sets else set()
         partial = union - active
-        all_tags = self.library.all_tags()
+        all_tags = [t for t in self.library.all_tags() if not is_set_tag(t)]
         # Ensure current tags appear even if rare
         for t in union:
             if t not in all_tags:
                 all_tags.append(t)
         all_tags = sorted(set(all_tags), key=str.lower)
-        recent = load_recent("tags")
+        recent = [t for t in load_recent("tags") if not is_set_tag(t)]
         ids = [it.id for it in items]
         n = len(items)
         picker_ref: dict[str, object] = {"p": None}
@@ -4387,11 +4388,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
 
         path = self.library.folder_paths.get(fid, folder.name)
-        active = set(folder.tags)
+        active = {t for t in folder.tags if not is_set_tag(t)}
         # Live set for toggles (written on each Enter)
         current = set(active)
-        all_tags = self.library.all_tags()
-        recent = load_recent("tags")
+        all_tags = [t for t in self.library.all_tags() if not is_set_tag(t)]
+        recent = [t for t in load_recent("tags") if not is_set_tag(t)]
 
         def on_toggle(tag: str, turn_on: bool) -> None:
             key = tag.strip().lower()
@@ -4817,8 +4818,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         from picker import TogglePicker, load_recent
 
         vf = self._view_filters
-        all_tags = self.library.all_tags()
-        recent = load_recent("filter_tags")
+        all_tags = [t for t in self.library.all_tags() if not is_set_tag(t)]
+        recent = [t for t in load_recent("filter_tags") if not is_set_tag(t)]
 
         def on_include(tag: str, turn_on: bool) -> None:
             key = tag.strip().lower()

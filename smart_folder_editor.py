@@ -21,6 +21,7 @@ from filters import (  # noqa: E402
 )
 from library import EagleLibrary  # noqa: E402
 from picker import TogglePicker, load_recent  # noqa: E402
+from sets import is_set_tag  # noqa: E402
 from smart_folder_rules import (  # noqa: E402
     GROUP_ALL,
     GROUP_ANY,
@@ -509,9 +510,9 @@ class SmartFolderEditor(Gtk.Window):
             self,
             title="Tags for this rule",
             subtitle="Enter toggles · Esc closes",
-            all_values=self.library.all_tags(),
-            active=set(rule.tags),
-            recent=load_recent("tags"),
+            all_values=[t for t in self.library.all_tags() if not is_set_tag(t)],
+            active={t for t in rule.tags if not is_set_tag(t)},
+            recent=[t for t in load_recent("tags") if not is_set_tag(t)],
             allow_create=True,
             recent_kind="tags",
             on_toggle=on_toggle,
