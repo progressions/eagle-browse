@@ -717,7 +717,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints = Gtk.Label(
             label=(
                 "Enter open (image inline · video/audio mpv) · Esc close viewer · "
-                "i/o video marks · x cut · p save frame · t tags · f folders · Ctrl+A all · Del · Ctrl+Z · Super+W"
+                "i/o video marks · x cut · p save frame · t tags · f folders · g group · G ungroup · Ctrl+A all · Del · Ctrl+Z · Super+W"
             ),
             xalign=0,
         )
@@ -1106,11 +1106,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_set_group = Gtk.Button(label="Group")
         self.insp_set_group.add_css_class("flat")
         self.insp_set_group.add_css_class("insp-quiet-btn")
+        self.insp_set_group.set_tooltip_text("Group selection (g)")
         self.insp_set_group.set_sensitive(False)
         self.insp_set_group.connect("clicked", lambda *_: self.group_selection_into_set())
         self.insp_set_remove = Gtk.Button(label="Remove")
         self.insp_set_remove.add_css_class("flat")
         self.insp_set_remove.add_css_class("insp-quiet-btn")
+        self.insp_set_remove.set_tooltip_text("Remove selection from set (G)")
         self.insp_set_remove.set_sensitive(False)
         self.insp_set_remove.connect("clicked", lambda *_: self.remove_selection_from_set())
         set_act.append(self.insp_set_open)
@@ -7698,18 +7700,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_d, Gdk.KEY_D) and not alt and not ctrl and not super_mod:
             self.toggle_descendants()
             return True
-        if keyval in (Gdk.KEY_g,) and not alt and not ctrl and not super_mod:
-            if self.store.get_n_items():
-                self._select_index(
-                    0, shift=bool(state & Gdk.ModifierType.SHIFT_MASK)
-                )
+        if (
+            keyval in (Gdk.KEY_g,)
+            and not alt
+            and not ctrl
+            and not super_mod
+            and not in_sidebar
+        ):
+            self.group_selection_into_set()
             return True
-        if keyval in (Gdk.KEY_G,) and not alt and not ctrl and not super_mod:
-            n = self.store.get_n_items()
-            if n:
-                self._select_index(
-                    n - 1, shift=bool(state & Gdk.ModifierType.SHIFT_MASK)
-                )
+        if (
+            keyval in (Gdk.KEY_G,)
+            and not alt
+            and not ctrl
+            and not super_mod
+            and not in_sidebar
+        ):
+            self.remove_selection_from_set()
             return True
 
         # Inline viewer: left/right step images in current view

@@ -80,6 +80,8 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `0` | Clear rating |
 | `x` | **Crop** focused image (also the crop icon on the viewer toolbar) |
 | `F2` / `n` | **Rename** focused file (media + matching thumbnail; Eagle id unchanged) |
+| `g` | **Group** selected items into a set |
+| `G` | **Remove** selection from its set |
 | `p` (video playing) | **Save frame** at the current playhead; ffmpeg writes a new untagged still |
 | `i` / `o` (video playing) | Mark **in** / **out** at the playhead (sidecar `eagle-browse.json`; Esc still closes) |
 | `x` (video playing) | **Cut** the marked range to a new untagged H.264/AAC clip |
@@ -359,7 +361,8 @@ The **Folders** heading starts **collapsed** (same idea as top-level smart folde
 | `d` | Toggle “include subfolders” (regular folders only) |
 
 Smart folders start **collapsed** at the top level. Expand only the category you’re working in.
-| `g` / `G` | First / last item |
+| `g` | **Group** selected items into a set (`set:` tag) |
+| `G` | **Remove** selection from its set |
 | `r` | Reload library from disk |
 | `Esc` | Clear search / leave search |
 | Super+W | Close window (Hyprland; `q` does not quit) |
