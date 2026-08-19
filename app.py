@@ -87,13 +87,14 @@ NAV_HISTORY_MAX = 80
 
 
 class _ViewLoc(NamedTuple):
-    """One grid scope: sidebar row, set view, descendant toggle."""
+    """One place in the app: sidebar scope plus optional inline viewer item."""
 
     smart_id: str | None
     folder_id: str | None
     special: str | None
     set_tag: str | None
     descendants: bool
+    viewer_id: str | None
 
 
 def _cell_w(thumb: int) -> int:
@@ -2372,6 +2373,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Leaving an inline preview via the sidebar: close it and drop selection
         # so the previously previewed asset is not still selected/marked.
         was_viewing = self.is_viewer_open()
+        before = self._view_loc()
         if was_viewing:
             self.close_inline_viewer(restore_scroll=False)
             self._marked.clear()
@@ -2391,7 +2393,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if same_place and kind != "smart" and not was_viewing:
             return
 
-        before = self._view_loc()
         self.current_smart_folder_id = new_smart
         self.current_folder_id = new_folder
         self._special_view = new_special
@@ -6245,9 +6246,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def open_set_view(self, tag: str, *, keep_id: str | None = None) -> None:
         """Temporary grid of every item with this set: tag."""
+        before = self._view_loc()
         if self.is_viewer_open():
             self.close_inline_viewer(restore_scroll=False)
-        before = self._view_loc()
         self._rebuild_set_counts()
         self._set_view_tag = tag
         self._special_view = "set"
@@ -6281,12 +6282,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._record_view_change(before)
 
     def _view_loc(self) -> _ViewLoc:
+        viewer_id = None
+        if self.is_viewer_open() and self._viewer_item_id:
+            viewer_id = self._viewer_item_id
         return _ViewLoc(
             smart_id=self.current_smart_folder_id,
             folder_id=self.current_folder_id,
             special=self._special_view,
             set_tag=self._set_view_tag if self._special_view == "set" else None,
             descendants=self.include_descendants,
+            viewer_id=viewer_id,
         )
 
     def _sync_nav_buttons(self) -> None:
@@ -6306,20 +6311,46 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._nav_forward.clear()
         self._sync_nav_buttons()
 
+    def _scope_changed(self, loc: _ViewLoc) -> bool:
+        return (
+            loc.smart_id != self.current_smart_folder_id
+            or loc.folder_id != self.current_folder_id
+            or loc.special != self._special_view
+            or (loc.set_tag if loc.special == "set" else None)
+            != (self._set_view_tag if self._special_view == "set" else None)
+            or loc.descendants != self.include_descendants
+        )
+
     def _apply_view_loc(self, loc: _ViewLoc) -> None:
-        if self.is_viewer_open():
-            self.close_inline_viewer(restore_scroll=False)
+        scope_changed = self._scope_changed(loc)
         self._nav_restoring = True
         self._sidebar_nav_lock = True
         try:
-            self.current_smart_folder_id = loc.smart_id
-            self.current_folder_id = loc.folder_id
-            self._special_view = loc.special
-            self._set_view_tag = loc.set_tag if loc.special == "set" else None
-            self.include_descendants = loc.descendants
-            self._restore_sidebar_selection()
-            self.refresh_items(reset_selection=True, scroll_to_top=True)
-            self._save_sidebar_state()
+            if scope_changed:
+                self.current_smart_folder_id = loc.smart_id
+                self.current_folder_id = loc.folder_id
+                self._special_view = loc.special
+                self._set_view_tag = loc.set_tag if loc.special == "set" else None
+                self.include_descendants = loc.descendants
+                self._restore_sidebar_selection()
+                keep = loc.viewer_id
+                if keep:
+                    item = self.library.items_by_id.get(keep)
+                    if item is not None:
+                        self.selected_item = item
+                        self._marked = {keep}
+                self.refresh_items(
+                    reset_selection=keep is None, scroll_to_top=True
+                )
+                self._save_sidebar_state()
+            if loc.viewer_id:
+                item = self.library.items_by_id.get(loc.viewer_id)
+                if item is not None and (item.is_image or item.is_video):
+                    self.open_inline_viewer(item)
+                elif self.is_viewer_open():
+                    self.close_inline_viewer(restore_scroll=not scope_changed)
+            elif self.is_viewer_open():
+                self.close_inline_viewer(restore_scroll=not scope_changed)
         finally:
             self._nav_restoring = False
             GLib.idle_add(self._unlock_sidebar_nav)
@@ -6524,6 +6555,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast(f"Could not load B · {b.display_name}")
             return
 
+        before = self._view_loc()
         if not self.is_viewer_open():
             self._saved_grid_scroll = {
                 "value": self._grid_scroll_value(),
@@ -6574,6 +6606,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         GLib.idle_add(_after_map)
         GLib.timeout_add(30, _after_map)
+        self._record_view_change(before)
 
     def open_inline_viewer(self, item: Item | None = None) -> None:
         """Show a still or video in the center pane (Eagle-style detail view).
@@ -6590,6 +6623,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._open_external_media(item)
             return
 
+        before = self._view_loc()
         # Capture grid offset before the stack unmaps it (that resets scroll).
         if not self.is_viewer_open():
             self._saved_grid_scroll = {
@@ -6601,6 +6635,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         if item.is_video:
             self._open_inline_video(item)
+            self._record_view_change(before)
             return
 
         path = item.path
@@ -6647,11 +6682,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.selected_item = item
         self.update_inspector()
         self._update_path_label()
+        self._record_view_change(before)
 
     def close_inline_viewer(self, *, restore_scroll: bool = True) -> bool:
         """Leave detail view; return True if a viewer was closed."""
         if not self.is_viewer_open():
             return False
+        before = self._view_loc()
         self._viewer_open = False
         self._viewer_item_id = None
         self._viewer_in = None
@@ -6688,6 +6725,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._restore_grid_scroll(float(snap.get("value") or 0.0))
         else:
             self._cancel_scroll_restore()
+        self._record_view_change(before)
         return True
 
     def _open_inline_video(self, item: Item) -> None:
