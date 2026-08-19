@@ -8,7 +8,7 @@ from typing import Any, Iterable
 SET_PREFIX = "set:"
 
 # Eagle item ids are M + 12 chars from 0-9A-Z (import_media / write).
-EAGLE_ID_RE = re.compile(r"(?<![0-9A-Za-z])(M[0-9A-Za-z]{12})(?![0-9A-Za-z])")
+EAGLE_ID_RE = re.compile(r"(?<![0-9A-Za-z])(M[0-9A-Za-z]{12})(?![0-9A-Za-z])", re.I)
 
 
 def is_set_tag(tag: str) -> bool:
@@ -137,20 +137,29 @@ def join_into_set(library: Any, source: Any, *children: Any) -> str | None:
 
 
 def join_imported_by_name(library: Any, new_item: Any) -> str | None:
-    """If the new item's name contains an existing Eagle id, join that set."""
+    """If the new item's name contains an existing Eagle id, join that set.
+
+    When the new item is a video and more than one id is in the name, prefer
+    an image (the still being animated) over another video.
+    """
     if new_item is None:
         return None
     name = getattr(new_item, "name", "") or ""
     self_id = getattr(new_item, "id", "")
-    source = None
+    candidates: list[Any] = []
     for iid in eagle_ids_in_text(name):
         if iid == self_id:
             continue
         it = _item_by_id(library, iid)
         if it is None or getattr(it, "is_deleted", False):
             continue
-        source = it
-        break
-    if source is None:
+        candidates.append(it)
+    if not candidates:
         return None
+    source = candidates[0]
+    if getattr(new_item, "is_video", False):
+        for it in candidates:
+            if getattr(it, "is_image", False):
+                source = it
+                break
     return join_into_set(library, source, new_item)
