@@ -2238,12 +2238,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _on_sidebar_pressed(
         self, _gesture: Gtk.GestureClick, n_press: int, x: float, y: float
     ) -> None:
-        """While the inline viewer is open, a sidebar click must close it and switch views.
+        """Force a view switch when row-selected would not fire.
 
-        ``row-selected`` does not fire when the clicked row is already selected,
-        which is the usual case (same smart folder / Uncategorized you opened from).
+        ``row-selected`` does not fire when the clicked row is already selected.
+        That happens with the inline viewer, and with a set view that left the
+        previous Uncategorized / smart-folder row highlighted.
         """
-        if n_press != 1 or not self.is_viewer_open():
+        if n_press != 1:
+            return
+        if not self.is_viewer_open() and self._special_view != "set":
             return
         widget = self.folder_list.pick(x, y, Gtk.PickFlags.DEFAULT)
         w = widget
@@ -2293,7 +2296,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             new_folder = None
 
         same_place = (
-            new_smart == self.current_smart_folder_id
+            self._special_view != "set"
+            and new_smart == self.current_smart_folder_id
             and new_folder == self.current_folder_id
             and new_special == self._special_view
         )
@@ -6202,6 +6206,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._special_view = "set"
         self.current_folder_id = None
         self.current_smart_folder_id = None
+        try:
+            self.folder_list.unselect_all()
+        except Exception:  # noqa: BLE001
+            pass
         if keep_id:
             item = self.library.items_by_id.get(keep_id)
             if item is not None:
