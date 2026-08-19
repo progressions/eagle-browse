@@ -1028,6 +1028,39 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_preview_frame.append(self.insp_picture)
         box.append(self.insp_preview_frame)
 
+        # ── Set (family joined by a set: tag) ─────────────────────────
+        self.insp_set_title = Gtk.Label(label="Set", xalign=0)
+        self.insp_set_title.add_css_class("insp-section-title")
+        box.append(self.insp_set_title)
+        self.insp_set_thumbs = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=4
+        )
+        self.insp_set_thumbs.set_halign(Gtk.Align.START)
+        self.insp_set_thumbs.set_hexpand(False)
+        self.insp_set_thumbs.set_vexpand(False)
+        box.append(self.insp_set_thumbs)
+        set_act = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.insp_set_open = Gtk.Button(label="Open set")
+        self.insp_set_open.add_css_class("suggested-action")
+        self.insp_set_open.set_sensitive(False)
+        self.insp_set_open.connect("clicked", lambda *_: self.open_focused_set())
+        self.insp_set_group = Gtk.Button(label="Group")
+        self.insp_set_group.add_css_class("flat")
+        self.insp_set_group.add_css_class("insp-quiet-btn")
+        self.insp_set_group.set_tooltip_text("Group selection (g)")
+        self.insp_set_group.set_sensitive(False)
+        self.insp_set_group.connect("clicked", lambda *_: self.group_selection_into_set())
+        self.insp_set_remove = Gtk.Button(label="Remove")
+        self.insp_set_remove.add_css_class("flat")
+        self.insp_set_remove.add_css_class("insp-quiet-btn")
+        self.insp_set_remove.set_tooltip_text("Remove selection from set (G)")
+        self.insp_set_remove.set_sensitive(False)
+        self.insp_set_remove.connect("clicked", lambda *_: self.remove_selection_from_set())
+        set_act.append(self.insp_set_open)
+        set_act.append(self.insp_set_group)
+        set_act.append(self.insp_set_remove)
+        box.append(set_act)
+
         # ── Rating: stars + Clear on one row ──────────────────────────
         rate_lbl = Gtk.Label(label="Rating", xalign=0)
         rate_lbl.add_css_class("insp-section-title")
@@ -1117,38 +1150,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_path.add_css_class("dim-label")
         self.insp_path.add_css_class("insp-path")
         box.append(self.insp_path)
-
-        # ── Set (family joined by a set: tag) ─────────────────────────
-        self.insp_set_title = Gtk.Label(label="Set", xalign=0)
-        self.insp_set_title.add_css_class("insp-section-title")
-        box.append(self.insp_set_title)
-        self.insp_set_thumbs = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL, spacing=4
-        )
-        self.insp_set_thumbs.set_halign(Gtk.Align.START)
-        self.insp_set_thumbs.set_hexpand(False)
-        box.append(self.insp_set_thumbs)
-        set_act = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        self.insp_set_open = Gtk.Button(label="Open set")
-        self.insp_set_open.add_css_class("suggested-action")
-        self.insp_set_open.set_sensitive(False)
-        self.insp_set_open.connect("clicked", lambda *_: self.open_focused_set())
-        self.insp_set_group = Gtk.Button(label="Group")
-        self.insp_set_group.add_css_class("flat")
-        self.insp_set_group.add_css_class("insp-quiet-btn")
-        self.insp_set_group.set_tooltip_text("Group selection (g)")
-        self.insp_set_group.set_sensitive(False)
-        self.insp_set_group.connect("clicked", lambda *_: self.group_selection_into_set())
-        self.insp_set_remove = Gtk.Button(label="Remove")
-        self.insp_set_remove.add_css_class("flat")
-        self.insp_set_remove.add_css_class("insp-quiet-btn")
-        self.insp_set_remove.set_tooltip_text("Remove selection from set (G)")
-        self.insp_set_remove.set_sensitive(False)
-        self.insp_set_remove.connect("clicked", lambda *_: self.remove_selection_from_set())
-        set_act.append(self.insp_set_open)
-        set_act.append(self.insp_set_group)
-        set_act.append(self.insp_set_remove)
-        box.append(set_act)
 
         # ── Compare slots (A / B stills, then open the slider) ────────
         cmp_lbl = Gtk.Label(label="Compare", xalign=0)
@@ -1313,12 +1314,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 min-height: 36px;
                 max-height: 36px;
             }
-            box.insp-set-more-veil {
-                background-color: alpha(@window_bg_color, 0.62);
-            }
             label.insp-set-more {
                 font-weight: 700;
                 font-size: 0.9em;
+                min-width: 36px;
+                min-height: 36px;
+                background-color: alpha(@window_bg_color, 0.7);
             }
             """
         )
@@ -3366,9 +3367,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.update_inspector()
 
     def _on_grid_activate(self, _grid: Gtk.GridView, _position: int) -> None:
-        # Do not open here. Card GestureClick handles double-click (n_press==2).
-        # Calling open_selected from both paths opened two imv/mpv windows.
-        return
+        self.open_selected()
 
     def _picked_is_grid_item(self, widget: Gtk.Widget | None) -> bool:
         """True if pick() landed on a thumb cell, not the grid background."""
@@ -6210,29 +6209,29 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             pix = _pixbuf_from_path(path, 72, 72) if path else None
             if pix is not None:
                 pic.set_paintable(Gdk.Texture.new_for_pixbuf(pix))
+            host = Gtk.Overlay()
+            host.set_size_request(36, 36)
+            host.set_hexpand(False)
+            host.set_vexpand(False)
+            try:
+                host.set_overflow(Gtk.Overflow.HIDDEN)
+            except (AttributeError, TypeError):
+                pass
+            host.set_child(pic)
             overflow = extra > 0 and i == len(shown) - 1
             if overflow:
-                overlay = Gtk.Overlay()
-                overlay.set_size_request(36, 36)
-                overlay.set_child(pic)
-                veil = Gtk.Box()
-                veil.add_css_class("insp-set-more-veil")
-                veil.set_hexpand(True)
-                veil.set_vexpand(True)
-                overlay.add_overlay(veil)
                 more = Gtk.Label(label=f"+{extra}")
                 more.add_css_class("insp-set-more")
                 more.set_halign(Gtk.Align.CENTER)
                 more.set_valign(Gtk.Align.CENTER)
-                overlay.add_overlay(more)
-                btn.set_child(overlay)
+                host.add_overlay(more)
                 btn.set_tooltip_text(f"+{extra} more · Open set")
                 btn.connect("clicked", lambda *_a, t=tag: self.open_set_view(t))
             else:
-                btn.set_child(pic)
                 btn.set_tooltip_text(it.display_name)
                 iid = it.id
                 btn.connect("clicked", lambda *_a, j=iid: self._focus_set_member(j))
+            btn.set_child(host)
             box.append(btn)
 
     def _focus_set_member(self, iid: str) -> None:
