@@ -1069,6 +1069,8 @@ def import_file(
         width, height = _image_size(source)
     elif kind == "video":
         width, height, duration = _video_meta(source)
+    elif kind == "audio":
+        _w, _h, duration = _video_meta(source)
 
     def _do() -> ImportResult:
         iid, item_dir = _unique_item_dir(images_dir)

@@ -44,6 +44,7 @@ from library import (  # noqa: E402
 )
 from sets import (  # noqa: E402
     SET_PREFIX,
+    is_set_tag,
     mint_set_tag,
     set_tag_of,
     set_tags_of,
@@ -174,11 +175,24 @@ def _thumb_cache_key(path: str, size: int) -> str:
     return f"{path}@{size}@{mt:.3f}"
 
 
+def _fmt_grid_duration(seconds: float) -> str:
+    """Compact clock for a thumb overlay: 0:12, 3:05, 1:02:05."""
+    total = int(round(max(0.0, float(seconds))))
+    h, rem = divmod(total, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"
+
+
 def _type_badge(item: Item) -> str:
+    dur = ""
+    if (item.is_video or item.is_audio) and item.duration:
+        dur = _fmt_grid_duration(item.duration)
     if item.is_video:
-        return "▶"
+        return f"▶ {dur}" if dur else "▶"
     if item.is_audio:
-        return "♪"
+        return f"♪ {dur}" if dur else "♪"
     if not item.is_image:
         return item.ext.upper()[:4] if item.ext else "·"
     return ""
@@ -208,6 +222,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._special_view: str | None = None
         self._set_view_tag: str | None = None
         self._set_counts: dict[str, int] = {}
+        self._set_counts_ready = False
         self._nav_back: list[_ViewLoc] = []
         self._nav_forward: list[_ViewLoc] = []
         self._nav_restoring = False
@@ -265,6 +280,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Non-modal dialogs often do not get keyboard focus on Hyprland, so
         # Esc is handled here against this reference.
         self._open_dialog: Gtk.Window | None = None
+        self._handling_escape = False
         # Ignore the row-selected that follows a viewer-open sidebar click
         self._sidebar_nav_lock = False
         # Soft-delete undo: each entry is a batch of item ids (newest last)
@@ -330,6 +346,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.search.set_hexpand(True)
         self.search.set_sensitive(False)
         self.search.connect("search-changed", self._on_search_changed)
+        # SearchEntry binds Esc to stop-search and can swallow it before
+        # window key-pressed. Close the viewer from that signal too.
+        self.search.connect("stop-search", self._on_search_escape)
         header.set_title_widget(self.search)
 
         reload_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Reload library (r)")
@@ -632,6 +651,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.viewer_video.set_valign(Gtk.Align.FILL)
         self.viewer_body.add_named(self.viewer_video, "video")
         viewer.append(self.viewer_body)
+        # Gtk.Video (and its seek bar) can eat Esc before the window handler.
+        for host in (viewer, self.viewer_picture, self.viewer_video):
+            v_esc = Gtk.EventControllerKey()
+            v_esc.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            v_esc.connect("key-pressed", self._on_viewer_escape)
+            host.add_controller(v_esc)
 
         # Double-click still image to close (video uses its own controls)
         vclick = Gtk.GestureClick()
@@ -778,15 +803,36 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 if self.center_stack.get_visible_child_name() == "loading":
                     self.center_stack.set_visible_child_name("grid")
                 self._load_sidebar_state()
-                self._rebuild_set_counts()
+                self._rebuild_set_counts(force=True)
                 self._populate_sidebar(select_current=True)
                 self.refresh_items()
                 self._start_inbox_watch()
+                self._start_duration_backfill()
                 return False
 
             GLib.idle_add(apply)
 
         threading.Thread(target=work, name="eagle-library-load", daemon=True).start()
+
+    def _start_duration_backfill(self) -> None:
+        """ffprobe audio/video that Eagle stored without duration; then refresh."""
+
+        def work() -> None:
+            try:
+                written = self.library.backfill_missing_durations()
+            except Exception:  # noqa: BLE001
+                written = []
+
+            def apply() -> bool:
+                if written:
+                    self.refresh_items(reset_selection=False, scroll_to_top=False)
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(
+            target=work, name="eagle-duration-fill", daemon=True
+        ).start()
 
     def _on_library_load_failed(self, exc: BaseException) -> None:
         self.status_left.set_text("Library failed to load")
@@ -1321,6 +1367,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 min-height: 36px;
                 background-color: alpha(@window_bg_color, 0.7);
             }
+            label.grid-duration {
+                font-weight: 700;
+                font-size: 0.85em;
+                padding: 2px 6px;
+            }
             """
         )
         Gtk.StyleContext.add_provider_for_display(
@@ -1578,6 +1629,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         controller.connect("key-pressed", self._on_key)
         self.add_controller(controller)
+        # App-wide Esc: SearchEntry and Gtk.Video otherwise keep the key.
+        esc = Gtk.ShortcutController()
+        esc.set_scope(Gtk.ShortcutScope.GLOBAL)
+        esc.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+
+        def _esc_action(_widget, _args) -> bool:
+            return self._handle_escape()
+
+        esc.add_shortcut(
+            Gtk.Shortcut.new(
+                Gtk.KeyvalTrigger.new(Gdk.KEY_Escape, Gdk.ModifierType(0)),
+                Gtk.CallbackAction.new(_esc_action),
+            )
+        )
+        self.add_controller(esc)
 
     def _remember_dialog(self, win: Gtk.Window) -> None:
         """Track a non-modal picker so Esc on this window can close it."""
@@ -1593,23 +1659,37 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         def _clear(*_a) -> None:
             if self._open_dialog is win:
                 self._open_dialog = None
+            if self._open_dialog is None:
+                self._picker_blocking = False
 
         win.connect("destroy", _clear)
 
     def _close_open_dialog(self) -> bool:
         win = self._open_dialog
         if win is None:
+            self._picker_blocking = False
+            return False
+        try:
+            visible = bool(win.get_visible())
+        except Exception:  # noqa: BLE001
+            visible = False
+        if not visible:
+            self._open_dialog = None
+            self._picker_blocking = False
             return False
         try:
             win.close()
-            return True
         except Exception:  # noqa: BLE001
             try:
                 win.destroy()
-                return True
             except Exception:  # noqa: BLE001
                 self._open_dialog = None
+                self._picker_blocking = False
                 return False
+        if self._open_dialog is win:
+            self._open_dialog = None
+        self._picker_blocking = False
+        return True
 
     def _shutdown_background(self) -> None:
         """Stop timers / workers so the process can actually exit."""
@@ -3111,14 +3191,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         stars.set_visible(False)
         tile.add_overlay(stars)
 
-        # Type badge (video / audio / other)
+        # Type / duration badge (video / audio / other)
         badge = Gtk.Label(xalign=1.0)
         badge.add_css_class("osd")
-        badge.add_css_class("caption")
+        badge.add_css_class("grid-duration")
         badge.set_halign(Gtk.Align.END)
         badge.set_valign(Gtk.Align.END)
         badge.set_margin_end(4)
-        badge.set_margin_bottom(2)
+        badge.set_margin_bottom(4)
         tile.add_overlay(badge)
 
         # Set member count (bottom-left)
@@ -3142,13 +3222,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         card.append(tile)
 
-        label = Gtk.Label(xalign=0.5, ellipsize=3, max_width_chars=18)
+        cap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        cap.set_hexpand(False)
+        label = Gtk.Label(xalign=0.0, ellipsize=3, hexpand=True)
         label.add_css_class("caption")
-        card.append(label)
+        dur_lbl = Gtk.Label(xalign=1.0)
+        dur_lbl.add_css_class("caption")
+        dur_lbl.add_css_class("dim-label")
+        dur_lbl.set_visible(False)
+        cap.append(label)
+        cap.append(dur_lbl)
+        card.append(cap)
 
         list_item.set_child(card)
         list_item.picture = picture  # type: ignore[attr-defined]
         list_item.label = label  # type: ignore[attr-defined]
+        list_item.dur_lbl = dur_lbl  # type: ignore[attr-defined]
+        list_item.caption_row = cap  # type: ignore[attr-defined]
         list_item.badge = badge  # type: ignore[attr-defined]
         list_item.set_badge = set_badge  # type: ignore[attr-defined]
         list_item.icon = icon  # type: ignore[attr-defined]
@@ -3222,7 +3312,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         card.set_size_request(_cell_w(size), _cell_h(size))
         tile.set_size_request(size, size)
         picture.set_size_request(size, size)
-        label.set_size_request(size, -1)
+        cap = getattr(list_item, "caption_row", None)
+        if cap is not None:
+            cap.set_size_request(size, -1)
+        else:
+            label.set_size_request(size, -1)
         return size
 
     def _on_factory_bind(self, _factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem) -> None:
@@ -3257,6 +3351,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         badge_text = _type_badge(item)
         badge.set_text(badge_text)
         badge.set_visible(bool(badge_text))
+        dur_lbl = getattr(list_item, "dur_lbl", None)
+        if (item.is_video or item.is_audio) and item.duration:
+            clock = _fmt_grid_duration(item.duration)
+            badge.set_tooltip_text(f"{item.duration:.1f}s")
+            if dur_lbl is not None:
+                dur_lbl.set_text(clock)
+                dur_lbl.set_visible(True)
+        else:
+            badge.set_tooltip_text("")
+            if dur_lbl is not None:
+                dur_lbl.set_text("")
+                dur_lbl.set_visible(False)
 
         set_badge: Gtk.Label = list_item.set_badge  # type: ignore[attr-defined]
         stag = set_tag_of(item)
@@ -4303,12 +4409,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         active = set.intersection(*tag_sets) if tag_sets else set()
         union = set.union(*tag_sets) if tag_sets else set()
         partial = union - active
-        all_tags = [t for t in self.library.all_tags() if not is_set_tag(t)]
+        all_tags = self.library.all_tags(include_set=False)
         # Ensure current tags appear even if rare
+        have = set(all_tags)
         for t in union:
-            if t not in all_tags:
+            if t not in have:
                 all_tags.append(t)
-        all_tags = sorted(set(all_tags), key=str.lower)
+                have.add(t)
         recent = [t for t in load_recent("tags") if not is_set_tag(t)]
         ids = [it.id for it in items]
         n = len(items)
@@ -4396,7 +4503,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         active = {t for t in folder.tags if not is_set_tag(t)}
         # Live set for toggles (written on each Enter)
         current = set(active)
-        all_tags = [t for t in self.library.all_tags() if not is_set_tag(t)]
+        all_tags = self.library.all_tags(include_set=False)
         recent = [t for t in load_recent("tags") if not is_set_tag(t)]
 
         def on_toggle(tag: str, turn_on: bool) -> None:
@@ -4823,7 +4930,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         from picker import TogglePicker, load_recent
 
         vf = self._view_filters
-        all_tags = [t for t in self.library.all_tags() if not is_set_tag(t)]
+        all_tags = self.library.all_tags(include_set=False)
         recent = [t for t in load_recent("filter_tags") if not is_set_tag(t)]
 
         def on_include(tag: str, turn_on: bool) -> None:
@@ -5811,6 +5918,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._inbox_importing = False
                 if ok:
                     play_sound("notification", once=True)
+                    self._rebuild_set_counts(force=True)
                     new_items: list[Item] = []
                     for r in results:
                         if (
@@ -6149,15 +6257,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     SET_STRIP_MAX = 4
 
-    def _rebuild_set_counts(self) -> None:
+    def _rebuild_set_counts(self, *, force: bool = False) -> None:
+        if self._set_counts_ready and not force:
+            return
         counts: dict[str, int] = {}
+        prefix = SET_PREFIX
         for it in self.library.items:
             if it.is_deleted:
                 continue
             for t in it.tags:
-                if t.startswith(SET_PREFIX):
+                if t.startswith(prefix):
                     counts[t] = counts.get(t, 0) + 1
         self._set_counts = counts
+        self._set_counts_ready = True
 
     def _sync_set_ui(self, items: list[Item]) -> None:
         if not hasattr(self, "insp_set_open"):
@@ -6418,7 +6530,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except WriteError as exc:
             self._toast(str(exc))
             return
-        self._rebuild_set_counts()
+        self._rebuild_set_counts(force=True)
         self.refresh_items(reset_selection=False)
         n = self._set_counts.get(tag, 0)
         msg = f"Set · {n}"
@@ -6440,7 +6552,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except WriteError as exc:
             self._toast(str(exc))
             return
-        self._rebuild_set_counts()
+        self._rebuild_set_counts(force=True)
         if self._special_view == "set":
             still = self._set_counts.get(self._set_view_tag or "", 0)
             if still < 1:
@@ -6458,7 +6570,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         from sets import join_into_set
 
         join_into_set(self.library, source, new_item)
-        self._rebuild_set_counts()
+        self._rebuild_set_counts(force=True)
         return self.library.items_by_id.get(new_item.id) or new_item
 
     def _compare_current_still(self) -> Item | None:
@@ -6694,6 +6806,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if self._viewer_zoom_steps <= 0:
                 self._apply_viewer_zoom()
             self.viewer_picture.queue_draw()
+            self.viewer_picture.grab_focus()
             return False
 
         GLib.idle_add(_after_map)
@@ -6738,6 +6851,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         snap = self._saved_grid_scroll
         self._saved_grid_scroll = None
         self.grid.grab_focus()
+        GLib.idle_add(self._idle_grab_focus, self.grid)
         if restore_scroll and snap is not None:
             loaded = int(snap.get("loaded") or 0)
             if loaded > len(self._items):
@@ -6776,6 +6890,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.viewer_body.set_visible_child_name("video")
         self.center_stack.set_visible_child_name("viewer")
         self.viewer_video.grab_focus()
+        GLib.idle_add(self._idle_grab_focus, self.viewer_video)
         self.selected_item = item
         self.update_inspector()
         self._update_path_label()
@@ -7440,6 +7555,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._special_counts.clear()
                 self._populate_sidebar(select_current=True)
                 self.refresh_items()
+                self._start_duration_backfill()
                 n_smart = len(self.library.smart_folders_by_id)
                 self._toast(
                     f"Reloaded · {len(self.library.items)} items · {n_smart} smart folders"
@@ -7479,6 +7595,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return False
         self.folder_list.select_row(row)
         row.grab_focus()
+        return False
+
+    def _idle_grab_focus(self, widget=None) -> bool:
+        """One-shot focus. grab_focus() returns True; idle_add would loop forever."""
+        w = widget if widget is not None else self.grid
+        try:
+            w.grab_focus()
+        except Exception:  # noqa: BLE001
+            pass
         return False
 
     def focus_grid(self) -> None:
@@ -7534,27 +7659,42 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     # ── Keys ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _widget_is_in(focus, root) -> bool:
+        if focus is None or root is None:
+            return False
+        w = focus
+        while w is not None:
+            if w is root:
+                return True
+            try:
+                w = w.get_parent()
+            except Exception:  # noqa: BLE001
+                break
+        return False
+
     def _focus_is_search(self, focus) -> bool:
-        if focus is None:
-            return False
-        if focus is self.search or isinstance(focus, (Gtk.Entry, Gtk.SearchEntry)):
-            return True
-        if isinstance(focus, Gtk.Editable):
-            return True
-        try:
-            return focus.is_ancestor(self.search)
-        except TypeError:
-            return False
+        """True only when the header search box (or its inner Gtk.Text) has focus.
+
+        Any Gtk.Editable used to count, so a selectable path or inspector field
+        swallowed t/f/g as if the user was typing a search.
+        """
+        return self._widget_is_in(focus, getattr(self, "search", None))
 
     def _focus_is_sidebar(self, focus) -> bool:
-        if focus is None:
-            return False
-        if focus is self.folder_list:
-            return True
-        try:
-            return focus is self.folder_list or focus.is_ancestor(self.folder_list)
-        except TypeError:
-            return False
+        return self._widget_is_in(focus, getattr(self, "folder_list", None))
+
+    def _hotkeys_blocked(self) -> bool:
+        """True while a live picker/dialog owns the keyboard."""
+        win = self._open_dialog
+        if win is not None:
+            try:
+                if win.get_mapped() and win.get_visible():
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+            self._open_dialog = None
+        return bool(self._picker_blocking)
 
     def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
         self._filter_text = entry.get_text() or ""
@@ -7570,16 +7710,64 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         self._search_timeout_id = GLib.timeout_add(SEARCH_DEBOUNCE_MS, fire)
 
+    def _on_search_escape(self, *_a) -> None:
+        """Gtk.SearchEntry Esc — close the focused asset if the viewer is open."""
+        self._handle_escape()
+
+    def _on_viewer_escape(
+        self, _controller: Gtk.EventControllerKey, keyval: int, _keycode: int, _state: Gdk.ModifierType
+    ) -> bool:
+        if keyval == Gdk.KEY_Escape:
+            return self._handle_escape()
+        return False
+
+    def _handle_escape(self) -> bool:
+        """Esc: dismiss picker, else close the focused asset, else unwind the view."""
+        if self._handling_escape:
+            return True
+        now = time.monotonic()
+        last = getattr(self, "_last_escape_mono", 0.0)
+        if now - last < 0.12:
+            return True
+        self._last_escape_mono = now
+        self._handling_escape = True
+        try:
+            if self._close_open_dialog():
+                return True
+            if self.is_viewer_open():
+                self.close_inline_viewer()
+                return True
+            if self._focus_is_search(self.get_focus()):
+                self.search.set_text("")
+                self.focus_grid()
+                return True
+            if self.clear_marks():
+                return True
+            if self._special_view == "set":
+                self._leave_set_view()
+                return True
+            if self._view_filters.active():
+                self.clear_view_filters()
+                return True
+            if self._filter_text:
+                self.search.set_text("")
+                return True
+            return False
+        finally:
+            self._handling_escape = False
+
     def _on_key(self, _controller: Gtk.EventControllerKey, keyval: int, _keycode: int, state: Gdk.ModifierType) -> bool:
         # Modal tag/folder/type pickers own the keyboard — do not steal letters
         # (was eating s/o/f/i/b/… so filter text became "ie" from "Sofie")
-        if self._picker_blocking or self._open_dialog is not None:
-            if keyval == Gdk.KEY_Escape and self._close_open_dialog():
-                return True
+        if self._hotkeys_blocked():
+            if keyval == Gdk.KEY_Escape:
+                return self._handle_escape()
             return False
 
         focus = self.get_focus()
-        in_search = self._focus_is_search(focus)
+        # SearchEntry as the header title often keeps focus after opening an
+        # asset. Letter hotkeys still apply while the viewer is showing.
+        in_search = self._focus_is_search(focus) and not self.is_viewer_open()
         in_sidebar = self._focus_is_sidebar(focus)
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         super_mod = bool(state & Gdk.ModifierType.SUPER_MASK)
@@ -7617,25 +7805,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.delete_selected()
             return True
         if keyval == Gdk.KEY_Escape:
-            if self.is_viewer_open():
-                self.close_inline_viewer()
-                return True
-            if in_search:
-                self.search.set_text("")
-                self.focus_grid()
-                return True
-            if self.clear_marks():
-                return True
-            if self._special_view == "set":
-                self._leave_set_view()
-                return True
-            if self._view_filters.active():
-                self.clear_view_filters()
-                return True
-            if self._filter_text:
-                self.search.set_text("")
-                return True
-            return False
+            return self._handle_escape()
         if keyval == Gdk.KEY_slash and not in_search and not ctrl:
             self.focus_search()
             return True

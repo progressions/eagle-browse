@@ -419,7 +419,14 @@ class EagleLibrary:
         self.folder_paths: dict[str, str] = {}  # id -> "Parent / Child"
         self.smart_folder_paths: dict[str, str] = {}
         self._query_cache: dict[tuple, list[Item]] = {}
+        self._all_tags_cache: list[str] | None = None
+        self._user_tags_cache: list[str] | None = None
         self._lock = threading.Lock()
+
+    def _clear_derived_caches(self) -> None:
+        self._query_cache.clear()
+        self._all_tags_cache = None
+        self._user_tags_cache = None
 
     def load(self) -> None:
         if not self.root.is_dir():
@@ -468,7 +475,7 @@ class EagleLibrary:
         with self._lock:
             self.items = items
             self.items_by_id = items_by_id
-            self._query_cache = {}
+            self._clear_derived_caches()
 
     def reload_metadata_trees(self) -> None:
         """Re-read folders + smart folders from metadata.json. Does not rescan items."""
@@ -485,7 +492,7 @@ class EagleLibrary:
         self.smart_folder_paths = {}
         self._build_smart_folder_paths(self.smart_folders, [])
         with self._lock:
-            self._query_cache = {}
+            self._clear_derived_caches()
 
     def count_conditions(
         self,
@@ -516,7 +523,7 @@ class EagleLibrary:
             else:
                 self.items.insert(0, item)
             self.items_by_id[item.id] = item
-            self._query_cache = {}
+            self._clear_derived_caches()
         return item
 
     def load_item(self, item_id: str) -> Item | None:
@@ -748,6 +755,44 @@ class EagleLibrary:
             return sum(1 for it in self.items if not it.is_deleted and not it.folders)
         raise ValueError(f"unknown special view: {view}")
 
+    def backfill_missing_durations(self) -> list[tuple[str, float]]:
+        """ffprobe audio/video items that have no duration; write it onto disk.
+
+        Does not bump Eagle modificationTime. Returns (id, seconds) written.
+        """
+        from import_media import _video_meta
+        from write import WriteError, write_item_duration, write_session
+
+        missing: list[Item] = []
+        for it in self.items:
+            if it.is_deleted:
+                continue
+            if not (it.is_video or it.is_audio):
+                continue
+            if it.duration:
+                continue
+            if it.item_dir is None or not it.path.is_file():
+                continue
+            missing.append(it)
+        if not missing:
+            return []
+        written: list[tuple[str, float]] = []
+        try:
+            with write_session(self.root):
+                for it in missing:
+                    _w, _h, duration = _video_meta(it.path)
+                    if duration <= 0:
+                        continue
+                    try:
+                        write_item_duration(it.item_dir, duration)
+                    except WriteError:
+                        continue
+                    it.duration = duration
+                    written.append((it.id, duration))
+        except WriteError:
+            return written
+        return written
+
     def items_in_set(self, tag: str) -> list[Item]:
         """Non-deleted items that carry this set: tag."""
         from sets import items_with_set_tag
@@ -757,7 +802,7 @@ class EagleLibrary:
     # ── Writes (tags, ratings) ────────────────────────────────────────
 
     def _invalidate_caches(self) -> None:
-        self._query_cache.clear()
+        self._clear_derived_caches()
 
     def _refresh_item_derived(self, item: Item) -> None:
         item.tags = canonicalize_tags(item.tags)
@@ -766,13 +811,37 @@ class EagleLibrary:
         item.name_lower = item.name.lower()
         item.ext_lower = item.ext.lower()
 
-    def all_tags(self) -> list[str]:
-        tags: list[str] = []
+    def all_tags(self, *, include_set: bool = True) -> list[str]:
+        """Unique tags in first-seen order. ``include_set=False`` drops ``set:``."""
+        if self._all_tags_cache is None or self._user_tags_cache is None:
+            self._fill_tag_caches()
+        cached = self._all_tags_cache if include_set else self._user_tags_cache
+        return list(cached or [])
+
+    def _fill_tag_caches(self) -> None:
+        from sets import is_set_tag
+
+        seen: set[str] = set()
+        all_tags: list[str] = []
+        user: list[str] = []
         for it in self.items:
-            tags.extend(it.tags)
+            for t in it.tags:
+                if t in seen:
+                    continue
+                seen.add(t)
+                all_tags.append(t)
+                if not is_set_tag(t):
+                    user.append(t)
         for folder in self.folders_by_id.values():
-            tags.extend(folder.tags)
-        return canonicalize_tags(tags)
+            for t in folder.tags:
+                if t in seen:
+                    continue
+                seen.add(t)
+                all_tags.append(t)
+                if not is_set_tag(t):
+                    user.append(t)
+        self._all_tags_cache = all_tags
+        self._user_tags_cache = user
 
     def folder_ancestor_ids(self, folder_id: str) -> list[str]:
         """Root → … → folder_id (inclusive)."""

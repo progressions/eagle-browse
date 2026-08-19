@@ -204,6 +204,13 @@ def load_item_metadata(item_dir: Path) -> dict[str, Any]:
     return data
 
 
+def write_item_duration(item_dir: Path, duration: float) -> None:
+    """Set duration seconds without bumping modificationTime (backfill)."""
+    data = load_item_metadata(item_dir)
+    data["duration"] = float(duration)
+    atomic_write_json(item_dir / "metadata.json", data)
+
+
 def save_item_metadata(
     library_root: Path,
     item_dir: Path,

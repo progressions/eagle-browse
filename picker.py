@@ -262,13 +262,15 @@ class TogglePicker(Gtk.Window):
             while (child := self.list.get_first_child()) is not None:
                 self.list.remove(child)
             self._rows = []
+            seen_rows: set[str] = set()
 
             q = text.strip()
             q_lower = q.lower()
 
             def add_row(value: str, meta: str = "") -> None:
-                if any(v == value for v, _ in self._rows):
+                if value in seen_rows:
                     return
+                seen_rows.add(value)
                 self._rows.append((value, meta or "item"))
                 row = Gtk.ListBoxRow()
                 row.set_activatable(True)
@@ -314,13 +316,14 @@ class TogglePicker(Gtk.Window):
                 self.list.append(row)
 
             if not q:
+                # Do not instantiate a GTK row per library tag. 28k-item
+                # libraries have hundreds of tags; that freeze made `t`
+                # look broken. Type to search the rest.
                 for v in sorted(self._active, key=str.lower):
                     add_row(v, "active")
                 for v in self._recent:
                     if v in self._all or v in self._active:
                         add_row(v, "recent")
-                for v in self._all:
-                    add_row(v)
             else:
                 # Exact / prefix before substring so "fanvue" beats
                 # "published-fanvue". Recents stay in the list but do not
@@ -333,7 +336,7 @@ class TogglePicker(Gtk.Window):
                             seen.add(v)
                             hits.append(v)
                 hits.sort(key=lambda v: _filter_rank(v, q_lower))
-                for v in hits:
+                for v in hits[:100]:
                     if v in self._active:
                         add_row(v, "active")
                     elif v in self._recent:

@@ -510,7 +510,7 @@ class SmartFolderEditor(Gtk.Window):
             self,
             title="Tags for this rule",
             subtitle="Enter toggles · Esc closes",
-            all_values=[t for t in self.library.all_tags() if not is_set_tag(t)],
+            all_values=self.library.all_tags(include_set=False),
             active={t for t in rule.tags if not is_set_tag(t)},
             recent=[t for t in load_recent("tags") if not is_set_tag(t)],
             allow_create=True,
