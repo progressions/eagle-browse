@@ -17,6 +17,30 @@ BACKUP_DIRNAME = "backup/eagle-browse-writes"
 INBOX_SIGNAL_FILENAME = ".eagle-browse.inbox-signal"
 
 
+def _load_inbox_signal(path: Path) -> dict[str, Any]:
+    try:
+        if path.is_file():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return raw
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return {}
+
+
+def _write_inbox_signal(
+    library_root: Path, *, ids: list[str], dups: list[str]
+) -> None:
+    path = library_root / INBOX_SIGNAL_FILENAME
+    try:
+        atomic_write_json(
+            path,
+            {"ids": ids[-200:], "dups": dups[-50:], "ts": time.time()},
+        )
+    except OSError:
+        pass
+
+
 def announce_imported_ids(library_root: Path, item_ids: list[str]) -> None:
     """Atomically record newly imported item ids for GUI / phone watchers.
 
@@ -27,22 +51,24 @@ def announce_imported_ids(library_root: Path, item_ids: list[str]) -> None:
     if not ids:
         return
     path = library_root / INBOX_SIGNAL_FILENAME
-    existing: list[str] = []
-    try:
-        if path.is_file():
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                existing = [str(i) for i in (raw.get("ids") or []) if i]
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        existing = []
-    merged = list(dict.fromkeys(existing + ids))[-200:]
-    try:
-        atomic_write_json(
-            path,
-            {"ids": merged, "ts": time.time()},
-        )
-    except OSError:
-        pass
+    raw = _load_inbox_signal(path)
+    existing = [str(i) for i in (raw.get("ids") or []) if i]
+    dups = [str(n) for n in (raw.get("dups") or []) if n]
+    merged = list(dict.fromkeys(existing + ids))
+    _write_inbox_signal(library_root, ids=merged, dups=dups)
+
+
+def announce_inbox_dups(library_root: Path, names: list[str]) -> None:
+    """Tell an open GUI to review these intake filenames as duplicates."""
+    names = [n for n in names if n]
+    if not names:
+        return
+    path = library_root / INBOX_SIGNAL_FILENAME
+    raw = _load_inbox_signal(path)
+    ids = [str(i) for i in (raw.get("ids") or []) if i]
+    existing = [str(n) for n in (raw.get("dups") or []) if n]
+    merged = list(dict.fromkeys(existing + names))
+    _write_inbox_signal(library_root, ids=ids, dups=merged)
 
 
 class WriteError(Exception):

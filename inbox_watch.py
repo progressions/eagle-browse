@@ -43,7 +43,7 @@ from import_media import (  # noqa: E402
     unpack_zip_to_inbox,
 )
 from library import DEFAULT_LIBRARY, EagleLibrary  # noqa: E402
-from write import WriteError, write_session  # noqa: E402
+from write import WriteError, announce_inbox_dups, write_session  # noqa: E402
 
 LOG = logging.getLogger("eagle-inbox-watch")
 STATE_DIR = Path.home() / ".local" / "state" / "eagle-browse"
@@ -208,6 +208,7 @@ def process_ready(
     dup_policy: str,
     notify: bool,
     sound: bool,
+    announced_dups: set[tuple] | None = None,
 ) -> tuple[int, int, int]:
     """
     Import ready files. Returns (new_count, reused_count, fail_count).
@@ -226,6 +227,9 @@ def process_ready(
     new_n = 0
     reused_n = 0
     fail_n = 0
+    gui_up = gui_is_running()
+    pending_dups: list[str] = []
+    announced = announced_dups if announced_dups is not None else set()
 
     t0 = time.perf_counter()
     new_ids: list[str] = []
@@ -252,6 +256,23 @@ def process_ready(
                     LOG.warning("import failed %s: %s", f.name, r.error)
 
             for match in dups:
+                # Open GUI owns keep-original / import-new. Leave the file
+                # in intake and signal the browser instead of auto-reusing.
+                if gui_up and dup_policy == "reuse":
+                    try:
+                        st = match.source.stat()
+                        key = (match.source.name, int(st.st_size), int(st.st_mtime))
+                    except OSError:
+                        key = (match.source.name, match.size, 0)
+                    if key not in announced:
+                        announced.add(key)
+                        pending_dups.append(match.source.name)
+                        LOG.info(
+                            "left duplicate %s for GUI (matches %s)",
+                            match.source.name,
+                            match.existing_id,
+                        )
+                    continue
                 if dup_policy == "reuse":
                     r = reimport_existing(
                         library.root,
@@ -307,6 +328,10 @@ def process_ready(
         except Exception as exc:  # noqa: BLE001
             LOG.warning("ingest %s after import failed: %s", iid, exc)
 
+    if pending_dups:
+        announce_inbox_dups(library.root, pending_dups)
+        LOG.info("signaled GUI to review %d duplicate(s)", len(pending_dups))
+
     elapsed = time.perf_counter() - t0
     LOG.info(
         "batch done in %.2fs · %d new · %d reused · %d failed",
@@ -317,7 +342,6 @@ def process_ready(
     )
 
     total_ok = new_n + reused_n
-    gui_up = gui_is_running()
     if total_ok and notify and not gui_up:
         parts = []
         if new_n:
@@ -356,6 +380,7 @@ def run_loop(
     sizes: dict[str, int] = {}
     zip_sizes: dict[str, int] = {}
     wait_logged: set[str] = set()
+    announced_dups: set[tuple] = set()
     while True:
         try:
             ready_zips, zip_sizes = _stable_ready_zips(
@@ -372,6 +397,7 @@ def run_loop(
                     dup_policy=dup_policy,
                     notify=notify,
                     sound=sound,
+                    announced_dups=announced_dups,
                 )
         except Exception:  # noqa: BLE001
             LOG.exception("poll error")

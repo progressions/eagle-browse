@@ -79,6 +79,7 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
 | `x` | **Crop** focused image (also the crop icon on the viewer toolbar) |
+| Viewer **Upscale** button | Queue a still (Z-Image 2× on Jack) or video (SeedVR2 on Eric) through PromptForge. Tags the source `upscaling`. Toasts if PromptForge is down (no lying tag). No hotkey. |
 | `F2` / `n` | **Rename** focused file (media + matching thumbnail; Eagle id unchanged) |
 | `g` | **Group** selected items into a set |
 | `Alt+←` / `Alt+→` | **Back** / **Forward** through views (also header buttons) |

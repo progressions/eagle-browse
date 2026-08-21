@@ -164,4 +164,42 @@ def join_imported_by_name(library: Any, new_item: Any) -> str | None:
             if getattr(it, "is_image", False):
                 source = it
                 break
-    return join_into_set(library, source, new_item)
+    tag = join_into_set(library, source, new_item)
+    apply_upscale_lineage(library, source, new_item)
+    return tag
+
+
+# Prefixes that mean "this file is an upscale of the id in the name."
+# Do not fire on h3-/ltx-/tt-wan- derivatives.
+UPSCALE_NAME_RE = re.compile(
+    r"(?i)(?:^|[^a-z0-9])(?:upscale|seedvr2?|rtp-upscale)(?:[^a-z0-9]|$)"
+)
+
+
+def apply_upscale_lineage(library: Any, source: Any, child: Any) -> None:
+    """If the new file is an upscale, tag lineage and clear the in-flight mark.
+
+    Child: ``upscale-of-<sourceid>``. Source: add ``upscaled``, drop ``upscaling``.
+    Set join is already done by ``join_imported_by_name``.
+    """
+    from write import WriteError
+
+    name = getattr(child, "name", "") or ""
+    if not UPSCALE_NAME_RE.search(name):
+        return
+    src_id = str(getattr(source, "id", "") or "")
+    child_id = str(getattr(child, "id", "") or "")
+    if not src_id or not child_id:
+        return
+    try:
+        library.update_items_batch(
+            [child_id],
+            add_tags=[f"upscale-of-{src_id.lower()}"],
+        )
+        library.update_items_batch(
+            [src_id],
+            add_tags=["upscaled"],
+            remove_tags=["upscaling"],
+        )
+    except WriteError:
+        return

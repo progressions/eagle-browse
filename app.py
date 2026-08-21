@@ -50,6 +50,11 @@ from sets import (  # noqa: E402
     set_tags_of,
 )
 from sounds import mark_gui_running, mark_gui_stopped, play_sound  # noqa: E402
+from upscale_queue import (  # noqa: E402
+    UpscaleResult,
+    already_reason,
+    post_upscale,
+)
 from write import INBOX_SIGNAL_FILENAME  # noqa: E402
 
 APP_ID = "cool.eagle.Browse"
@@ -490,6 +495,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # so Space/p can read the current timestamp.
         self._viewer_open = False
         self._viewer_item_id: str | None = None
+        self._viewer_audio_proc: subprocess.Popen[bytes] | None = None
+        self._viewer_mute_tries = 0
+        self._viewer_playing_handler = 0
+        self._viewer_playing_stream = None
+        self._viewer_audio_ignore_playing = False
         self._viewer_mode: str = "image"  # "image" | "video" | "compare"
         self._viewer_fit = True  # True = contain; False = scaled
         self._viewer_scale: float | None = None  # None = fit pane; else × native
@@ -540,6 +550,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             "image-crop-symbolic", "Crop (x)", self.open_crop_dialog
         )
         self.crop_btn.set_sensitive(False)
+        self.upscale_btn = _tool_icon(
+            "view-fullscreen-symbolic", "Upscale", self.queue_upscale
+        )
+        self.upscale_btn.set_sensitive(False)
         self.viewer_zoom_out_btn = _tool_icon(
             "zoom-out-symbolic", "Zoom out (scroll / −)", lambda: self.viewer_toggle_zoom(larger=False)
         )
@@ -577,6 +591,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         for b in (
             self.crop_btn,
+            self.upscale_btn,
             self.viewer_zoom_out_btn,
             self.viewer_zoom_in_btn,
             self.viewer_save_frame_btn,
@@ -718,10 +733,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if vadj is not None:
             vadj.connect("value-changed", self._on_grid_scrolled)
             vadj.connect("changed", self._on_grid_scrolled)
-        # Debounced column sync only on real resize — never on every arrow key
+        # Debounced column sync only on real resize — never on every arrow key.
+        # Hyprland tile/fullscreen changes the Gdk.Surface size; Gtk.Window
+        # default-width often does not notify, so thumbs stay at the old
+        # column count and look crushed or sparse.
         self.grid.connect("map", lambda *_: self._schedule_column_sync())
+        self.grid_scroll.connect("notify::width", lambda *_: self._schedule_column_sync())
         self.connect("notify::default-width", lambda *_: self._schedule_column_sync())
         self.connect("notify::width", lambda *_: self._schedule_column_sync())
+        self.connect("realize", self._hook_surface_resize)
+        if self.get_realized():
+            self._hook_surface_resize()
         GLib.idle_add(self._sync_columns)
         self._install_shrink_css()
 
@@ -771,7 +793,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints = Gtk.Label(
             label=(
                 "Enter open (image inline · video/audio mpv) · Esc close viewer · "
-                "i/o video marks · x cut · p save frame · t tags · f folders · g group · G ungroup · Ctrl+A all · Del · Ctrl+Z · Super+W"
+                "i/o video marks · x cut · p save frame · Shift+E clip editor · t tags · f folders · g group · G ungroup · Ctrl+A all · Del · Ctrl+Z · Super+W"
             ),
             xalign=0,
         )
@@ -1425,6 +1447,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_subtitle.set_text("Select an asset in the grid")
         if hasattr(self, "crop_btn"):
             self.crop_btn.set_sensitive(False)
+        if hasattr(self, "upscale_btn"):
+            self.upscale_btn.set_sensitive(False)
         if hasattr(self, "insp_rename_btn"):
             self.insp_rename_btn.set_sensitive(False)
         if hasattr(self, "crop_916_btn"):
@@ -1503,6 +1527,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.crop_btn.set_sensitive(
                     bool((it.is_image or it.is_audio) and it.path.is_file())
                 )
+            if hasattr(self, "upscale_btn"):
+                self.upscale_btn.set_sensitive(
+                    bool((it.is_image or it.is_video) and it.path.is_file())
+                )
             can_rename = bool(it.item_dir and it.path.is_file())
             if hasattr(self, "insp_rename_btn"):
                 self.insp_rename_btn.set_sensitive(can_rename)
@@ -1526,6 +1554,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._set_inspector_preview(_thumb_path_for(items[0]))
             if hasattr(self, "crop_btn"):
                 self.crop_btn.set_sensitive(False)
+            if hasattr(self, "upscale_btn"):
+                self.upscale_btn.set_sensitive(False)
             if hasattr(self, "insp_rename_btn"):
                 self.insp_rename_btn.set_sensitive(False)
             if hasattr(self, "crop_916_btn"):
@@ -3863,6 +3893,45 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         self._toast(f"Copied Eagle id · {iid}")
 
+    def open_selected_in_clip_editor(self) -> None:
+        """Shift+E: video opens as the picture; audio attaches to the current project."""
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        item = items[0]
+        sid = self.selected_item.id if self.selected_item is not None else None
+        if sid:
+            for it in items:
+                if it.id == sid:
+                    item = it
+                    break
+        if not item.path.is_file():
+            self._toast("File missing")
+            return
+        if item.is_video:
+            flag = "--video"
+        elif item.is_audio:
+            flag = "--audio"
+        else:
+            self._toast("Clip editor is for video or audio")
+            return
+        exe = shutil.which("clip-editor")
+        if not exe:
+            bundled = Path.home() / "tech/clip-editor/clip-editor"
+            exe = str(bundled) if bundled.is_file() else None
+        if not exe:
+            self._toast("clip-editor not found")
+            return
+        path = str(item.path.resolve())
+        if not _spawn_detached([exe, "gui", flag, path]):
+            self._toast("Could not open clip editor")
+            return
+        if item.is_audio:
+            self._toast(f"Editor audio · {item.display_name}")
+        else:
+            self._toast(f"Editor · {item.display_name}")
+
     def reveal_selected_in_files(self) -> None:
         """Open Nautilus with the focused (or first marked) file selected."""
         items = self._effective_hand_off_items()
@@ -4319,6 +4388,68 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             on_done=on_done,
             on_close=on_close,
         )
+
+    def queue_upscale(self) -> None:
+        """Queue a PromptForge upscale for the focused still or video."""
+        from write import WriteError
+
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        if len(items) != 1:
+            self._toast("Select one still or video")
+            return
+        item = items[0]
+        if not (item.is_image or item.is_video):
+            self._toast("Upscale is for stills and videos")
+            return
+        if not item.path.is_file():
+            self._toast("File missing")
+            return
+        prior = already_reason(item)
+        if prior:
+            self._toast(prior)
+            return
+        inflight = getattr(self, "_upscale_inflight", None)
+        if inflight is None:
+            inflight = set()
+            self._upscale_inflight = inflight
+        if item.id in inflight:
+            self._toast("Already queued")
+            return
+        inflight.add(item.id)
+
+        def work() -> None:
+            try:
+                result = post_upscale(item)
+            except Exception:  # noqa: BLE001
+                result = UpscaleResult("offline", "PromptForge not answering")
+
+            def apply() -> bool:
+                inflight.discard(item.id)
+                if result.status == "ok":
+                    try:
+                        self.library.update_item(
+                            item.id,
+                            add_tags=["upscaling"],
+                            remove_tags=["needs-upscale"],
+                        )
+                    except WriteError:
+                        self._toast(
+                            "PromptForge queued it but the Eagle tag failed"
+                        )
+                        return False
+                    self.refresh_items(reset_selection=False, scroll_to_top=False)
+                    self.update_inspector()
+                    self._toast(result.toast)
+                    return False
+                self._toast(result.toast)
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(target=work, name="eagle-upscale", daemon=True).start()
 
     def _invalidate_thumb_cache_for(self, item: Item) -> None:
         """Drop cached textures for this item so the grid reloads after crop."""
@@ -5554,13 +5685,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if ts and ts <= self._inbox_signal_ts:
             return
         ids = [str(i) for i in (raw.get("ids") or []) if i]
-        if not ids:
-            if ts:
-                self._inbox_signal_ts = ts
-            return
+        dups = [str(n) for n in (raw.get("dups") or []) if n]
         if ts:
             self._inbox_signal_ts = ts
-        self._ingest_item_ids(ids)
+        if ids:
+            self._ingest_item_ids(ids)
+        if dups:
+            self.import_inbox(manual=False, only_names=set(dups))
 
     _PENDING_MAX = 200
     _PENDING_MAX_TRIES = 8
@@ -6236,8 +6367,156 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except Exception:  # noqa: BLE001
             return False
 
+    def _set_inline_video_muted(self, muted: bool) -> bool:
+        """True if the media stream is not ready yet (caller may retry)."""
+        video = getattr(self, "viewer_video", None)
+        if video is None:
+            return False
+        try:
+            stream = video.get_media_stream()
+        except Exception:  # noqa: BLE001
+            return False
+        if stream is None:
+            return True
+        try:
+            stream.set_muted(bool(muted))
+            stream.set_volume(0.0 if muted else 1.0)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    def _mute_inline_video(self) -> bool:
+        """Mute Gtk.Video only while the sidecar player is alive. Cap retries."""
+        self._viewer_mute_tries = getattr(self, "_viewer_mute_tries", 0) + 1
+        if self._viewer_mute_tries > 40:
+            return False
+        proc = self._viewer_audio_proc
+        if proc is None or proc.poll() is not None:
+            self._set_inline_video_muted(False)
+            return False
+        return self._set_inline_video_muted(True)
+
+    def _viewer_audio_watchdog(self) -> bool:
+        proc = self._viewer_audio_proc
+        if proc is None:
+            return False
+        if proc.poll() is not None:
+            self._viewer_audio_proc = None
+            self._set_inline_video_muted(False)
+        return False
+
+    def _stop_viewer_audio(self) -> None:
+        proc = self._viewer_audio_proc
+        self._viewer_audio_proc = None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=0.4)
+        except (ProcessLookupError, PermissionError, OSError, subprocess.TimeoutExpired):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def _start_viewer_audio(self, path: Path | str, start: float = 0.0) -> None:
+        """Play soundtrack out of process. Gtk.Video/GStreamer is often silent."""
+        self._stop_viewer_audio()
+        start = max(0.0, float(start))
+        cmd: list[str] | None = None
+        # mpv is what notification chimes use on this machine.
+        if shutil.which("mpv"):
+            cmd = [
+                "mpv",
+                "--no-video",
+                "--force-window=no",
+                "--really-quiet",
+                "--audio-display=no",
+                "--no-resume-playback",
+                "--keep-open=no",
+                f"--start={start:.3f}",
+                str(path),
+            ]
+        elif shutil.which("ffplay"):
+            cmd = [
+                "ffplay",
+                "-vn",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{start:.3f}",
+                str(path),
+            ]
+        if cmd is None:
+            return
+        try:
+            self._viewer_audio_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            self._viewer_audio_proc = None
+            return
+        self._viewer_mute_tries = 0
+        GLib.idle_add(self._mute_inline_video)
+        GLib.timeout_add(250, self._viewer_audio_watchdog)
+
+    def _disconnect_viewer_playing(self) -> None:
+        hid = getattr(self, "_viewer_playing_handler", 0)
+        stream = getattr(self, "_viewer_playing_stream", None)
+        self._viewer_playing_handler = 0
+        self._viewer_playing_stream = None
+        if hid and stream is not None:
+            try:
+                stream.disconnect(hid)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _connect_viewer_playing(self, stream) -> None:
+        self._disconnect_viewer_playing()
+        if stream is None:
+            return
+        try:
+            hid = stream.connect("notify::playing", self._on_viewer_playing)
+        except Exception:  # noqa: BLE001
+            return
+        self._viewer_playing_handler = hid
+        self._viewer_playing_stream = stream
+
+    def _on_viewer_playing(self, stream, *_a) -> None:
+        """Keep sidecar audio in lockstep with Gtk.Video's play/pause button."""
+        if getattr(self, "_viewer_audio_ignore_playing", False):
+            return
+        if not self.is_viewer_open() or self._viewer_mode != "video":
+            return
+        try:
+            playing = bool(stream.get_playing())
+        except Exception:  # noqa: BLE001
+            return
+        if not playing:
+            self._stop_viewer_audio()
+            return
+        proc = self._viewer_audio_proc
+        if proc is not None and proc.poll() is None:
+            return
+        seconds = 0.0
+        try:
+            seconds = max(0.0, int(stream.get_timestamp()) / 1_000_000.0)
+        except Exception:  # noqa: BLE001
+            seconds = 0.0
+        item = self._viewer_item()
+        if item is not None and item.path.is_file():
+            self._start_viewer_audio(item.path, seconds)
+
     def _stop_inline_video(self) -> None:
         """Pause and detach any in-frame video stream."""
+        self._disconnect_viewer_playing()
+        self._stop_viewer_audio()
         video = getattr(self, "viewer_video", None)
         if video is None:
             return
@@ -6873,12 +7152,29 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._viewer_src_pixbuf = None
         self.viewer_picture.queue_draw()
         try:
-            self.viewer_video.set_filename(str(path))
+            media = Gtk.MediaFile.new_for_filename(str(path))
+            try:
+                media.set_loop(False)
+            except Exception:  # noqa: BLE001
+                pass
+            self.viewer_video.set_media_stream(media)
             self.viewer_video.set_autoplay(True)
+            self._viewer_audio_ignore_playing = True
+            self._connect_viewer_playing(media)
+            try:
+                media.set_muted(False)
+                media.set_volume(1.0)
+                media.play()
+            except Exception:  # noqa: BLE001
+                pass
+            self._viewer_audio_ignore_playing = False
         except Exception as exc:  # noqa: BLE001
             self._toast(f"Could not load video: {exc}")
             self._open_external_media(item)
             return
+        # Gtk.Video/GStreamer often has picture and no sound. Play audio with
+        # mpv; mute the widget only while that sidecar is actually running.
+        self._start_viewer_audio(path, 0.0)
 
         self.viewer_title.set_text(item.display_name)
         self._viewer_item_id = item.id
@@ -6902,7 +7198,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         stream = self.viewer_video.get_media_stream()
         if stream is None:
             return
-        stream.set_playing(not stream.get_playing())
+        playing = stream.get_playing()
+        self._viewer_audio_ignore_playing = True
+        try:
+            stream.set_playing(not playing)
+        finally:
+            self._viewer_audio_ignore_playing = False
+        if playing:
+            self._stop_viewer_audio()
+            return
+        seconds = 0.0
+        try:
+            seconds = max(0.0, int(stream.get_timestamp()) / 1_000_000.0)
+        except Exception:  # noqa: BLE001
+            seconds = 0.0
+        item = self._viewer_item()
+        if item is not None and item.path.is_file():
+            self._start_viewer_audio(item.path, seconds)
 
     def _viewer_item(self) -> Item | None:
         item = None
@@ -7213,6 +7525,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             )
             self.crop_btn.set_visible(not video and not compare)
             self.crop_btn.set_sensitive(can_crop)
+        if hasattr(self, "upscale_btn"):
+            items = self._effective_hand_off_items()
+            item = items[0] if len(items) == 1 else None
+            can_upscale = bool(
+                not compare
+                and item is not None
+                and (item.is_image or item.is_video)
+                and item.path.is_file()
+            )
+            self.upscale_btn.set_visible(not compare)
+            self.upscale_btn.set_sensitive(can_upscale)
 
     @staticmethod
     def _fit_pixbuf_rect(
@@ -8005,14 +8328,29 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         ):
             self.import_inbox(manual=True)
             return True
+        # e = reveal in Files; E (Shift+E) = clip editor. Match g/G: use
+        # keyval, not SHIFT_MASK — GTK often reports KEY_E with shift already
+        # applied and the modifier bit cleared.
         if (
-            keyval in (Gdk.KEY_e, Gdk.KEY_E)
+            keyval == Gdk.KEY_E
             and not ctrl
             and not alt
             and not super_mod
             and not in_sidebar
         ):
-            self.reveal_selected_in_files()
+            self.open_selected_in_clip_editor()
+            return True
+        if (
+            keyval == Gdk.KEY_e
+            and not ctrl
+            and not alt
+            and not super_mod
+            and not in_sidebar
+        ):
+            if state & Gdk.ModifierType.SHIFT_MASK:
+                self.open_selected_in_clip_editor()
+            else:
+                self.reveal_selected_in_files()
             return True
         # In viewer: +/- toggle fit/actual; grid: thumb size
         if keyval in (
@@ -8140,6 +8478,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         return False
 
+    def _hook_surface_resize(self, *_a) -> None:
+        if getattr(self, "_surf_size_hooked", False):
+            return
+        surf = self.get_surface()
+        if surf is None:
+            return
+        self._surf_size_hooked = True
+        surf.connect("notify::width", lambda *_: self._schedule_column_sync())
+        surf.connect("notify::height", lambda *_: self._schedule_column_sync())
+        surf.connect("notify::scale-factor", lambda *_: self._schedule_column_sync())
+
     def _schedule_column_sync(self) -> None:
         if self._cols_sync_timeout_id:
             GLib.source_remove(self._cols_sync_timeout_id)
@@ -8150,7 +8499,34 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._sync_columns()
             return False
 
-        self._cols_sync_timeout_id = GLib.timeout_add(120, fire)
+        self._cols_sync_timeout_id = GLib.timeout_add(80, fire)
+
+    def _grid_layout_width(self) -> int:
+        """Allocated width the GridView can actually fill (not default-width)."""
+        for getter in (
+            lambda: self.grid_scroll.get_width(),
+            lambda: self.grid.get_width(),
+        ):
+            try:
+                w = int(getter())
+            except Exception:  # noqa: BLE001
+                w = 0
+            if w > 32:
+                return w
+        surf = self.get_surface()
+        if surf is not None:
+            try:
+                sw = int(surf.get_width())
+            except Exception:  # noqa: BLE001
+                sw = 0
+            if sw > 32:
+                side = 0
+                if getattr(self, "_left_sidebar_open", True):
+                    side += int(getattr(self, "_left_pane_w", 280))
+                if getattr(self, "_right_sidebar_open", True):
+                    side += int(getattr(self, "_insp_pane_w", 260))
+                return max(160, sw - side - 32)
+        return 0
 
     def _sync_columns(self) -> bool:
         """
@@ -8159,26 +8535,25 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         Only called on resize (debounced), not on every arrow key — changing
         min/max columns reflows the grid and feels like lag.
         """
-        width = self.grid_scroll.get_width()
-        if width <= 1:
-            width = self.grid.get_width()
-        if width <= 1:
-            side = 0
-            if getattr(self, "_left_sidebar_open", True):
-                side += int(getattr(self, "_left_pane_w", 280))
-            if getattr(self, "_right_sidebar_open", True):
-                side += int(getattr(self, "_insp_pane_w", 260))
-            # Old fallback subtracted only 200px for both sidebars and
-            # overestimated columns, which then inflated the window min-width.
-            width = max(160, self.get_width() - side - 32)
+        width = self._grid_layout_width()
+        if width <= 32:
+            return False
 
         cell_w = _cell_w(self._thumb_size) + 16
         cols = max(1, min(16, int(width) // int(cell_w)))
-        if cols == self._cols and self.grid.get_min_columns() == cols:
+        if (
+            cols == self._cols
+            and self.grid.get_min_columns() == cols
+            and self.grid.get_max_columns() == cols
+        ):
             return False
         self._cols = cols
         self.grid.set_min_columns(cols)
         self.grid.set_max_columns(cols)
+        try:
+            self.grid.queue_resize()
+        except Exception:  # noqa: BLE001
+            pass
         return False
 
 
