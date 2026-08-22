@@ -6603,6 +6603,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except Exception:  # noqa: BLE001
                 pass
 
+        error_hid = getattr(self, "_viewer_error_handler", 0)
+        error_stream = getattr(self, "_viewer_error_stream", None)
+        self._viewer_error_handler = 0
+        self._viewer_error_stream = None
+        if error_hid and error_stream is not None:
+            try:
+                error_stream.disconnect(error_hid)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _connect_viewer_playing(self, stream) -> None:
         self._disconnect_viewer_playing()
         if stream is None:
@@ -6613,6 +6623,29 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         self._viewer_playing_handler = hid
         self._viewer_playing_stream = stream
+        try:
+            error_hid = stream.connect("notify::error", self._on_viewer_media_error)
+        except Exception:  # noqa: BLE001
+            error_hid = 0
+        self._viewer_error_handler = error_hid
+        self._viewer_error_stream = stream if error_hid else None
+
+    def _on_viewer_media_error(self, stream, *_a) -> None:
+        """Surface asynchronous GStreamer failures instead of a black viewer."""
+        try:
+            error = stream.get_error()
+        except Exception:  # noqa: BLE001
+            error = None
+        if error is None:
+            return
+        detail = str(getattr(error, "message", error) or "Playback failed").strip()
+        lower = detail.lower()
+        if "missing" in lower and ("plug-in" in lower or "plugin" in lower):
+            message = "Video decoder missing · install the required GStreamer codec plugin"
+        else:
+            message = f"Could not play video · {detail}"
+        self._stop_viewer_audio()
+        self._toast(message)
 
     def _on_viewer_playing(self, stream, *_a) -> None:
         """Keep sidecar audio in lockstep with Gtk.Video's play/pause button."""
@@ -7283,10 +7316,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 media.set_loop(False)
             except Exception:  # noqa: BLE001
                 pass
-            self.viewer_video.set_media_stream(media)
-            self.viewer_video.set_autoplay(True)
+            # Connect before attaching/autoplay so immediate backend errors
+            # (notably missing decoders) cannot race past notify::error.
             self._viewer_audio_ignore_playing = True
             self._connect_viewer_playing(media)
+            self.viewer_video.set_media_stream(media)
+            self.viewer_video.set_autoplay(True)
             try:
                 media.set_muted(False)
                 media.set_volume(1.0)
