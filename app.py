@@ -4017,19 +4017,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def open_rename_dialog(self) -> None:
         """Rename the focused item's file stem. Thumbnail is renamed with it."""
         if self._picker_blocking:
-            # A closed picker can leave the coarse blocking flag behind.  That
-            # made the inspector button appear enabled while clicks were
-            # silently ignored.  Only block for a dialog that is actually
-            # still on screen; otherwise repair the stale state here.
-            win = self._open_dialog
-            if win is not None:
-                try:
-                    if win.get_visible():
-                        win.present()
-                        return
-                except Exception:  # noqa: BLE001
-                    pass
-            self._open_dialog = None
+            # Rename is an explicit action, so never swallow it behind the
+            # shared picker flag. Close a tracked transient and repair any
+            # orphaned state before opening the rename window.
+            self._close_open_dialog()
             self._picker_blocking = False
         items = self._effective_hand_off_items()
         if not items:
@@ -4043,26 +4034,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast("Cannot rename this item")
             return
 
-        win = Gtk.Window(
-            title="Rename",
-            transient_for=self,
-            modal=True,
-            default_width=420,
+        dialog = Adw.AlertDialog(
+            heading="Rename file",
+            body="The Eagle id stays the same.",
         )
-        self._remember_dialog(win)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        box.set_margin_top(16)
-        box.set_margin_bottom(16)
-        box.set_margin_start(16)
-        box.set_margin_end(16)
-        win.set_child(box)
-        hint = Gtk.Label(
-            label="Changes the file name and its thumbnail. The Eagle id stays the same.",
-            xalign=0,
-            wrap=True,
-        )
-        hint.add_css_class("dim-label")
-        box.append(hint)
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         entry = Gtk.Entry()
         entry.set_text(item.name)
@@ -4073,29 +4048,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ext_lbl = Gtk.Label(label=f".{item.ext}")
             ext_lbl.add_css_class("dim-label")
             row.append(ext_lbl)
-        box.append(row)
+        dialog.set_extra_child(row)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("rename", "Rename")
+        dialog.set_response_appearance(
+            "rename", Adw.ResponseAppearance.SUGGESTED
+        )
+        dialog.set_default_response("rename")
+        dialog.set_close_response("cancel")
 
-        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        btns.set_halign(Gtk.Align.END)
-        cancel = Gtk.Button(label="Cancel")
-        save = Gtk.Button(label="Rename")
-        save.add_css_class("suggested-action")
-        save.set_can_default(True)
-        btns.append(cancel)
-        btns.append(save)
-        box.append(btns)
-        win.set_default_widget(save)
-
-        def close_win(*_a) -> None:
-            if self._open_dialog is win:
-                self._open_dialog = None
-            self._picker_blocking = False
-            try:
-                win.close()
-            except Exception:
-                win.destroy()
-
-        def apply(*_a) -> None:
+        def on_response(_dialog, response: str) -> None:
+            if response != "rename":
+                return
             from write import WriteError
 
             raw = entry.get_text()
@@ -4118,27 +4082,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if self._sort_key.startswith("name"):
                 self.refresh_items(reset_selection=False)
             self._toast(f"Renamed · {it.display_name}")
-            close_win()
 
-        cancel.connect("clicked", close_win)
-        save.connect("clicked", apply)
-        key = Gtk.EventControllerKey()
+        dialog.connect("response", on_response)
+        dialog.present(self)
 
-        def on_key(_c, keyval: int, _kc: int, _state: Gdk.ModifierType) -> bool:
-            if keyval == Gdk.KEY_Escape:
-                close_win()
-                return True
-            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-                apply()
-                return True
+        def focus_name() -> bool:
+            entry.grab_focus()
+            entry.select_region(0, -1)
             return False
 
-        key.connect("key-pressed", on_key)
-        win.add_controller(key)
-        win.connect("close-request", lambda *_: False)
-        win.present()
-        entry.grab_focus()
-        entry.select_region(0, -1)
+        GLib.idle_add(focus_name)
 
     def edit_notes_dialog(self) -> None:
         """View or edit Eagle annotation (notes) for the selection."""
