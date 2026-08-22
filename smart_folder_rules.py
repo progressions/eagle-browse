@@ -10,7 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from filters import RATING_OP_EQ, RATING_OP_GTE, RATING_OP_LTE, rating_chip_label
+from filters import (
+    RATING_OP_EQ,
+    RATING_OP_GTE,
+    RATING_OP_LTE,
+    format_filter_date,
+    parse_filter_date,
+    rating_chip_label,
+)
 
 GROUP_ALL = "all"
 GROUP_ANY = "any"
@@ -58,6 +65,53 @@ _RATING_TO_EAGLE = {
 _ANY_METHODS = frozenset({"union", "intersection"})
 _ALL_METHODS = frozenset({"subset", "contain", "all"})
 
+DATE_KIND_CREATED = "created"
+DATE_KIND_ADDED = "added"
+DATE_KIND_LABELS = {
+    DATE_KIND_CREATED: "Created",
+    DATE_KIND_ADDED: "Added",
+}
+DATE_PROP = {
+    DATE_KIND_CREATED: "createTime",
+    DATE_KIND_ADDED: "btime",
+}
+DATE_PROP_FROM_EAGLE = {
+    "createtime": DATE_KIND_CREATED,
+    "mtime": DATE_KIND_CREATED,
+    "btime": DATE_KIND_ADDED,
+    "importtime": DATE_KIND_ADDED,
+    "addedtime": DATE_KIND_ADDED,
+}
+
+DATE_OP_GTE = "gte"
+DATE_OP_LTE = "lte"
+DATE_OP_EQ = "eq"
+DATE_OP_WITHIN = "within"
+DATE_OPS = (DATE_OP_GTE, DATE_OP_LTE, DATE_OP_EQ, DATE_OP_WITHIN)
+DATE_OP_LABELS = {
+    DATE_OP_GTE: "on or after",
+    DATE_OP_LTE: "on or before",
+    DATE_OP_EQ: "on",
+    DATE_OP_WITHIN: "last N days",
+}
+_DATE_FROM_EAGLE = {
+    "gte": DATE_OP_GTE,
+    "ge": DATE_OP_GTE,
+    "after": DATE_OP_GTE,
+    "lte": DATE_OP_LTE,
+    "le": DATE_OP_LTE,
+    "before": DATE_OP_LTE,
+    "equal": DATE_OP_EQ,
+    "on": DATE_OP_EQ,
+    "within": DATE_OP_WITHIN,
+}
+_DATE_TO_EAGLE = {
+    DATE_OP_GTE: "gte",
+    DATE_OP_LTE: "lte",
+    DATE_OP_EQ: "equal",
+    DATE_OP_WITHIN: "within",
+}
+
 
 @dataclass
 class RatingRule:
@@ -78,13 +132,23 @@ class CategoriesRule:
 
 
 @dataclass
+class DateRule:
+    """Created-at (Eagle createTime) or added-at (library btime)."""
+
+    kind: str = DATE_KIND_CREATED
+    op: str = DATE_OP_GTE
+    day: str = ""  # YYYY-MM-DD for after/before/on
+    days: int = 7  # last N days for within
+
+
+@dataclass
 class OtherRule:
     """An Eagle rule the editor does not own. Written back unchanged."""
 
     raw: dict[str, Any]
 
 
-EditorRule = RatingRule | TagsRule | CategoriesRule | OtherRule
+EditorRule = RatingRule | TagsRule | CategoriesRule | DateRule | OtherRule
 
 
 @dataclass
@@ -158,6 +222,28 @@ def decode_rule(raw: dict[str, Any]) -> EditorRule:
             return CategoriesRule(mode=SET_ALL, folder_ids=ids)
         return OtherRule(raw=dict(raw))
 
+    kind = DATE_PROP_FROM_EAGLE.get(prop)
+    if kind is not None and method in _DATE_FROM_EAGLE:
+        op = _DATE_FROM_EAGLE[method]
+        if op == DATE_OP_WITHIN:
+            days = 7
+            raw_days = value[0] if isinstance(value, list) and value else value
+            try:
+                days = max(1, int(raw_days))
+            except (TypeError, ValueError):
+                days = 7
+            return DateRule(kind=kind, op=op, days=days)
+        day = ""
+        raw_day = value[0] if isinstance(value, list) and value else value
+        parsed = parse_filter_date(str(raw_day or ""))
+        if parsed is None and isinstance(raw_day, (int, float)):
+            from filters import _coerce_rule_day
+
+            parsed = _coerce_rule_day(raw_day)
+        if parsed is not None:
+            day = format_filter_date(parsed)
+        return DateRule(kind=kind, op=op, day=day)
+
     return OtherRule(raw=dict(raw))
 
 
@@ -181,6 +267,23 @@ def encode_rule(rule: EditorRule) -> dict[str, Any] | None:
             return None
         method = "subset" if rule.mode == SET_ALL else "intersection"
         return {"property": "folders", "method": method, "value": ids}
+    if isinstance(rule, DateRule):
+        prop = DATE_PROP.get(rule.kind, "createTime")
+        method = _DATE_TO_EAGLE.get(rule.op, "gte")
+        if rule.op == DATE_OP_WITHIN:
+            return {
+                "property": prop,
+                "method": "within",
+                "value": [max(1, int(rule.days or 1))],
+            }
+        day = parse_filter_date(rule.day or "")
+        if day is None:
+            return None
+        return {
+            "property": prop,
+            "method": method,
+            "value": format_filter_date(day),
+        }
     return None
 
 
@@ -270,6 +373,15 @@ def rule_summary(
         mode = SET_LABELS.get(rule.mode, rule.mode)
         names = ", ".join(paths.get(i, i) for i in rule.folder_ids) or "(none)"
         return f"Categories · {mode}: {names}"
+    if isinstance(rule, DateRule):
+        label = DATE_KIND_LABELS.get(rule.kind, rule.kind)
+        if rule.op == DATE_OP_WITHIN:
+            n = max(1, int(rule.days or 1))
+            unit = "day" if n == 1 else "days"
+            return f"{label} · last {n} {unit}"
+        op = DATE_OP_LABELS.get(rule.op, rule.op)
+        day = rule.day or "(date)"
+        return f"{label} · {op} {day}"
     raw = rule.raw
     prop = raw.get("property") or "?"
     method = raw.get("method") or "?"

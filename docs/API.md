@@ -10,7 +10,7 @@ Query and update the Eagle library without the GTK app:
 ## Setup
 
 ```bash
-ln -sfn ~/Work/tech/eagle-browse/eagle-api ~/.local/bin/eagle-api
+ln -sfn ~/tech/eagle-browse/eagle-api ~/.local/bin/eagle-api
 export EAGLE_LIBRARY=~/Dropbox/ISAAC/GENNIE/Eunbi.library   # optional default
 eagle-api --help
 ```

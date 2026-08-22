@@ -70,9 +70,11 @@ class Item:
     height: int
     annotation: str
     modification_time: int
-    # Eagle btime — when the item was added (or source birth at import in our writer).
+    # Eagle btime — when the item was added to the library.
     # Stable across tag/folder edits; use for "Added · newest" sort.
     btime: int = 0
+    # Eagle mtime — original file time at import (created). Not modificationTime.
+    created_time: int = 0
     star: int | None = None  # Eagle UI "rating"; absent = unrated
     duration: float | None = None  # seconds (video/audio)
     item_dir: Path | None = None  # images/<id>.info for metadata writes
@@ -243,6 +245,7 @@ def _item_from_dir(item_dir: Path) -> Item | None:
         annotation=str(raw.get("annotation") or ""),
         modification_time=int(raw.get("modificationTime") or 0),
         btime=int(raw.get("btime") or 0),
+        created_time=int(raw.get("mtime") or 0),
         star=star,
         duration=duration,
         item_dir=item_dir,
@@ -376,6 +379,15 @@ def _eval_rule(item: Item, property_name: str, method: str, value: Any) -> bool:
         if method == "unequal":
             return text != v
         return False
+
+    if prop in ("createtime", "mtime"):
+        from filters import item_created_ms, timestamp_matches_rule
+
+        return timestamp_matches_rule(item_created_ms(item), method, value)
+    if prop in ("btime", "importtime", "addedtime"):
+        from filters import item_added_ms, timestamp_matches_rule
+
+        return timestamp_matches_rule(item_added_ms(item), method, value)
 
     # Unknown property: fail closed so we don't over-include
     return False

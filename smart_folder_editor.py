@@ -23,6 +23,12 @@ from library import EagleLibrary  # noqa: E402
 from picker import TogglePicker, load_recent  # noqa: E402
 from sets import is_set_tag  # noqa: E402
 from smart_folder_rules import (  # noqa: E402
+    DATE_KIND_ADDED,
+    DATE_KIND_CREATED,
+    DATE_KIND_LABELS,
+    DATE_OP_LABELS,
+    DATE_OP_WITHIN,
+    DATE_OPS,
     GROUP_ALL,
     GROUP_ANY,
     GROUP_LABELS,
@@ -31,6 +37,7 @@ from smart_folder_rules import (  # noqa: E402
     SET_ANY,
     SET_LABELS,
     CategoriesRule,
+    DateRule,
     EditorGroup,
     EditorRule,
     EditorSpec,
@@ -293,6 +300,8 @@ class SmartFolderEditor(Gtk.Window):
             ("+ Rating", lambda gi=g_idx: self._add_rating(gi)),
             ("+ Tags", lambda gi=g_idx: self._add_tags(gi)),
             ("+ Categories", lambda gi=g_idx: self._add_categories(gi)),
+            ("+ Created", lambda gi=g_idx: self._add_date(gi, DATE_KIND_CREATED)),
+            ("+ Added", lambda gi=g_idx: self._add_date(gi, DATE_KIND_ADDED)),
         ):
             b = Gtk.Button(label=label)
             b.add_css_class("flat")
@@ -380,6 +389,51 @@ class SmartFolderEditor(Gtk.Window):
             row.append(self._remove_rule_btn(g_idx, r_idx))
             return row
 
+        if isinstance(rule, DateRule):
+            row.append(
+                Gtk.Label(
+                    label=DATE_KIND_LABELS.get(rule.kind, rule.kind),
+                    xalign=0,
+                )
+            )
+            ops = list(DATE_OPS)
+            drop = Gtk.DropDown.new_from_strings(
+                [DATE_OP_LABELS[o] for o in ops]
+            )
+            drop.set_selected(ops.index(rule.op) if rule.op in ops else 0)
+            drop.connect(
+                "notify::selected",
+                lambda d, *_ , gi=g_idx, ri=r_idx, o=ops: self._set_date_op(
+                    gi, ri, o[int(d.get_selected())] if 0 <= int(d.get_selected()) < len(o) else DATE_OPS[0]
+                ),
+            )
+            row.append(drop)
+            if rule.op == DATE_OP_WITHIN:
+                spin = Gtk.SpinButton.new_with_range(1, 3650, 1)
+                spin.set_value(max(1, int(rule.days or 1)))
+                spin.connect(
+                    "value-changed",
+                    lambda s, gi=g_idx, ri=r_idx: self._set_date_days(
+                        gi, ri, int(s.get_value())
+                    ),
+                )
+                row.append(spin)
+                row.append(Gtk.Label(label="days", xalign=0))
+            else:
+                ent = Gtk.Entry()
+                ent.set_text(rule.day or "")
+                ent.set_placeholder_text("YYYY-MM-DD")
+                ent.set_width_chars(12)
+                ent.connect(
+                    "changed",
+                    lambda e, gi=g_idx, ri=r_idx: self._set_date_day(
+                        gi, ri, e.get_text() or ""
+                    ),
+                )
+                row.append(ent)
+            row.append(self._remove_rule_btn(g_idx, r_idx))
+            return row
+
         # OtherRule — read-only, kept on save
         lab = Gtk.Label(
             label=rule_summary(rule, folder_paths=self.library.folder_paths),
@@ -448,6 +502,34 @@ class SmartFolderEditor(Gtk.Window):
         r_idx = len(self._spec.groups[g_idx].rules) - 1
         self._rebuild_groups()
         self._open_categories_picker(g_idx, r_idx, remove_if_empty=True)
+
+    def _add_date(self, g_idx: int, kind: str) -> None:
+        from datetime import date as date_cls
+
+        from filters import format_filter_date
+
+        self._spec.groups[g_idx].rules.append(
+            DateRule(kind=kind, day=format_filter_date(date_cls.today()))
+        )
+        self._rebuild_groups()
+
+    def _set_date_op(self, g_idx: int, r_idx: int, op: str) -> None:
+        rule = self._rule_at(g_idx, r_idx)
+        if isinstance(rule, DateRule) and rule.op != op:
+            rule.op = op
+            self._rebuild_groups()
+
+    def _set_date_day(self, g_idx: int, r_idx: int, text: str) -> None:
+        rule = self._rule_at(g_idx, r_idx)
+        if isinstance(rule, DateRule):
+            rule.day = text.strip()
+            self._schedule_count()
+
+    def _set_date_days(self, g_idx: int, r_idx: int, days: int) -> None:
+        rule = self._rule_at(g_idx, r_idx)
+        if isinstance(rule, DateRule):
+            rule.days = max(1, int(days))
+            self._schedule_count()
 
     def _remove_rule(self, g_idx: int, r_idx: int) -> None:
         rules = self._spec.groups[g_idx].rules

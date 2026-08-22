@@ -21,7 +21,7 @@ The window chrome opens immediately. The library scan (tens of thousands of item
 
 ```bash
 # From source
-~/Work/tech/eagle-browse/eagle-browse
+~/tech/eagle-browse/eagle-browse
 
 # Or if installed on PATH (symlink in ~/.local/bin)
 eagle-browse
@@ -58,10 +58,10 @@ remote is ahead). Untracked files are ignored for that check.
 
 ```bash
 # Launcher on PATH
-ln -sfn ~/Work/tech/eagle-browse/eagle-browse ~/.local/bin/eagle-browse
+ln -sfn ~/tech/eagle-browse/eagle-browse ~/.local/bin/eagle-browse
 
 # Walker / app menu
-cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
+cp ~/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 # (or use the installed copy under ~/.local/share/applications/eagle-browse.desktop)
 
 # Hotkey: Super+Shift+I  (set in ~/.config/hypr/bindings.conf)
@@ -81,6 +81,9 @@ cp ~/Work/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `x` | **Crop** focused image (also the crop icon on the viewer toolbar) |
 | Viewer **Upscale** button | Queue a still (Z-Image 2× on Jack) or video (SeedVR2 on Eric) through PromptForge. Tags the source `upscaling`. Toasts if PromptForge is down (no lying tag). No hotkey. |
 | `F2` / `n` | **Rename** focused file (media + matching thumbnail; Eagle id unchanged) |
+| `e` | Open the focused file in Files |
+| `Shift+E` | Add the focused video/audio to the current clip-editor project |
+| `Ctrl+Shift+E` | New clip-editor project with the focused video/audio |
 | `g` | **Group** selected items into a set |
 | `Alt+←` / `Alt+→` | **Back** / **Forward** through views (also header buttons) |
 | `G` | **Remove** selection from its set |
@@ -245,7 +248,7 @@ Requires `ffmpeg` / `ffprobe` for video (and ImageMagick `convert` as thumb fall
 JSON CLI + Python API for search and writes (tags, folders, ratings, smart folders). See [docs/API.md](docs/API.md).
 
 ```bash
-ln -sfn ~/Work/tech/eagle-browse/eagle-api ~/.local/bin/eagle-api
+ln -sfn ~/tech/eagle-browse/eagle-api ~/.local/bin/eagle-api
 
 eagle-api search --smart-folder "Eunbi/images" --limit 10
 eagle-api search --tag eunbi --rating-min 3 --type video
@@ -267,9 +270,9 @@ Runs at login and imports inbox files without opening Eagle Browse:
 
 ```bash
 # Install launcher + enable user service
-ln -sfn ~/Work/tech/eagle-browse/eagle-inbox-watch ~/.local/bin/eagle-inbox-watch
+ln -sfn ~/tech/eagle-browse/eagle-inbox-watch ~/.local/bin/eagle-inbox-watch
 mkdir -p ~/.config/systemd/user
-cp ~/Work/tech/eagle-browse/eagle-inbox-watch.service ~/.config/systemd/user/
+cp ~/tech/eagle-browse/eagle-inbox-watch.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now eagle-inbox-watch.service
 
@@ -297,7 +300,7 @@ not rely on the GUI for auto-import.
 | `y` | **Copy Eagle id(s)** (newline-separated if multi-selected) — agent-CLI safe |
 | `Y` / Shift+Y / `c` | **Copy path(s)** (absolute filesystem path) |
 | `Ctrl+Y` | Copy selection as `file://` URIs |
-| `s` | **Stage** marked files → outbox folder (copy; library stays read-only) and open the folder |
+| `s` | **Stage** marked files → outbox folder (copy; source library files are unchanged) and open the folder |
 | `Esc` | Clear marks (then clear search) |
 
 ### Multi-file handoff (Lightroom / other apps)
@@ -380,7 +383,7 @@ Add a desktop entry or Hyprland bind if you want Super+key access:
 
 ```bash
 # example Hyprland bind (edit ~/.config/hypr/bindings.conf yourself)
-bind = SUPER SHIFT, E, exec, /home/isaac/Work/tech/eagle-browse/eagle-browse
+bind = SUPER SHIFT, E, exec, /home/isaac/tech/eagle-browse/eagle-browse
 ```
 
 ## Phone browse (LAN)
@@ -405,4 +408,3 @@ IP fallback is also printed if `.local` fails. Override name with `--mdns-name o
 - **Rebuild index** in the drawer after bulk tagging (also refreshes smart-folder rules)
 
 `phone-index.json` is also what a future Dropbox-hosted web app can download instead of scanning every item.
-

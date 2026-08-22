@@ -31,7 +31,9 @@ from filters import (  # noqa: E402
     RATING_OP_LTE,
     RATING_OP_SYMBOLS,
     ViewFilters,
+    format_filter_date,
     item_matches_view_filters,
+    parse_filter_date,
     rating_chip_label,
 )
 from config import DEFAULT_LIBRARY, inbox_path  # noqa: E402
@@ -425,6 +427,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ("Stars", self.open_star_filter),
             ("Size", self.open_dimension_filter),
             ("Duration", self.open_duration_filter),
+            ("Dates", self.open_date_filter),
         ):
             btn = Gtk.Button(label=label)
             btn.add_css_class("flat")
@@ -793,7 +796,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints = Gtk.Label(
             label=(
                 "Enter open (image inline · video/audio mpv) · Esc close viewer · "
-                "i/o video marks · x cut · p save frame · Shift+E clip editor · t tags · f folders · g group · G ungroup · Ctrl+A all · Del · Ctrl+Z · Super+W"
+                "i/o video marks · x cut · p save frame · Shift+E add to editor · Ctrl+Shift+E new editor project · t tags · f folders · g group · G ungroup · Ctrl+A all · Del · Ctrl+Z · Super+W"
             ),
             xalign=0,
         )
@@ -3893,8 +3896,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         self._toast(f"Copied Eagle id · {iid}")
 
-    def open_selected_in_clip_editor(self) -> None:
-        """Shift+E: video opens as the picture; audio attaches to the current project."""
+    def open_selected_in_clip_editor(self, *, new_project: bool = False) -> None:
+        """Shift+E adds to the current clip-editor project. Ctrl+Shift+E starts a new one."""
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing selected")
@@ -3924,13 +3927,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast("clip-editor not found")
             return
         path = str(item.path.resolve())
-        if not _spawn_detached([exe, "gui", flag, path]):
+        cmd = [exe, "gui"]
+        if new_project:
+            cmd.append("--new")
+        cmd.extend([flag, path])
+        if not _spawn_detached(cmd):
             self._toast("Could not open clip editor")
             return
-        if item.is_audio:
+        if new_project:
+            self._toast(f"Editor new · {item.display_name}")
+        elif item.is_audio:
             self._toast(f"Editor audio · {item.display_name}")
         else:
-            self._toast(f"Editor · {item.display_name}")
+            self._toast(f"Editor add · {item.display_name}")
 
     def reveal_selected_in_files(self) -> None:
         """Open Nautilus with the focused (or first marked) file selected."""
@@ -4008,7 +4017,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def open_rename_dialog(self) -> None:
         """Rename the focused item's file stem. Thumbnail is renamed with it."""
         if self._picker_blocking:
-            return
+            # A closed picker can leave the coarse blocking flag behind.  That
+            # made the inspector button appear enabled while clicks were
+            # silently ignored.  Only block for a dialog that is actually
+            # still on screen; otherwise repair the stale state here.
+            win = self._open_dialog
+            if win is not None:
+                try:
+                    if win.get_visible():
+                        win.present()
+                        return
+                except Exception:  # noqa: BLE001
+                    pass
+            self._open_dialog = None
+            self._picker_blocking = False
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing selected")
@@ -4085,6 +4107,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 return
             except OSError as exc:
                 self._toast(str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                # GUI launches normally have no terminal, so an unexpected
+                # failure must be visible in-app instead of looking like a
+                # dead button.
+                self._toast(f"Could not rename: {exc}")
                 return
             self._refresh_after_in_place_edit(it)
             if self._sort_key.startswith("name"):
@@ -5046,6 +5074,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             chip(f"dur≥{vf.duration_min:g}s", lambda: setattr(vf, "duration_min", None))
         if vf.duration_max is not None:
             chip(f"dur≤{vf.duration_max:g}s", lambda: setattr(vf, "duration_max", None))
+        if vf.created_from is not None:
+            chip(f"created≥{vf.created_from}", lambda: setattr(vf, "created_from", None))
+        if vf.created_to is not None:
+            chip(f"created≤{vf.created_to}", lambda: setattr(vf, "created_to", None))
+        if vf.added_from is not None:
+            chip(f"added≥{vf.added_from}", lambda: setattr(vf, "added_from", None))
+        if vf.added_to is not None:
+            chip(f"added≤{vf.added_to}", lambda: setattr(vf, "added_to", None))
         if vf.rating is not None:
             chip(
                 rating_chip_label(vf.rating_op, vf.rating),
@@ -5242,6 +5278,143 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ),
             as_int=False,
         )
+
+    def open_date_filter(self) -> None:
+        """Filter by original file date and library-add date (inclusive days)."""
+        vf = self._view_filters
+        scroll = self._grid_scroll_value()
+        win = Gtk.Window(
+            title="Filter · dates",
+            transient_for=self,
+            modal=False,
+            default_width=420,
+        )
+        self._remember_dialog(win)
+        closing = {"v": False}
+        outside: dict[str, Gtk.GestureClick | None] = {"g": None}
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        win.set_child(box)
+        title_lbl = Gtk.Label(label="Filter · dates", xalign=0)
+        title_lbl.add_css_class("title-3")
+        box.append(title_lbl)
+        hint = Gtk.Label(
+            label=(
+                "Created is the original file time. Added is when it entered "
+                "this library. Local dates, inclusive. YYYY-MM-DD."
+            ),
+            xalign=0,
+            wrap=True,
+        )
+        hint.add_css_class("dim-label")
+        hint.add_css_class("caption")
+        box.append(hint)
+
+        fields = (
+            ("Created from", "created_from"),
+            ("Created to", "created_to"),
+            ("Added from", "added_from"),
+            ("Added to", "added_to"),
+        )
+        entries: dict[str, Gtk.Entry] = {}
+        for label, attr in fields:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.append(Gtk.Label(label=label, xalign=0, hexpand=True))
+            ent = Gtk.Entry()
+            cur = getattr(vf, attr)
+            if cur:
+                ent.set_text(str(cur))
+            ent.set_placeholder_text("YYYY-MM-DD")
+            ent.set_width_chars(12)
+            entries[attr] = ent
+            row.append(ent)
+            box.append(row)
+
+        def close_win(*_a) -> None:
+            if closing["v"]:
+                return
+            closing["v"] = True
+            if outside["g"] is not None:
+                try:
+                    self.remove_controller(outside["g"])
+                except Exception:  # noqa: BLE001
+                    pass
+                outside["g"] = None
+            self._picker_blocking = False
+            win.destroy()
+            self.grid.grab_focus()
+            self._restore_grid_scroll(scroll)
+
+        def apply(*_a) -> None:
+            parsed: dict[str, str | None] = {}
+            for attr, ent in entries.items():
+                text = (ent.get_text() or "").strip()
+                if not text:
+                    parsed[attr] = None
+                    continue
+                d = parse_filter_date(text)
+                if d is None:
+                    self._toast(f"Invalid date: {text}")
+                    return
+                parsed[attr] = format_filter_date(d)
+            for attr, val in parsed.items():
+                setattr(vf, attr, val)
+            self.refresh_items()
+            close_win()
+
+        def clear_dates(*_a) -> None:
+            vf.created_from = vf.created_to = None
+            vf.added_from = vf.added_to = None
+            self.refresh_items()
+            close_win()
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btns.set_halign(Gtk.Align.END)
+        clear = Gtk.Button(label="Clear")
+        clear.connect("clicked", clear_dates)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", close_win)
+        ok = Gtk.Button(label="Apply")
+        ok.add_css_class("suggested-action")
+        ok.connect("clicked", apply)
+        btns.append(clear)
+        btns.append(cancel)
+        btns.append(ok)
+        box.append(btns)
+
+        key = Gtk.EventControllerKey()
+
+        def on_key(_c, keyval, _kc, _state):
+            if keyval == Gdk.KEY_Escape:
+                close_win()
+                return True
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                apply()
+                return True
+            return False
+
+        key.connect("key-pressed", on_key)
+        win.add_controller(key)
+        win.connect("close-request", lambda *_: (close_win() or True))
+
+        def arm_outside() -> bool:
+            if closing["v"]:
+                return False
+            click = Gtk.GestureClick()
+            click.set_button(1)
+            click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            click.connect("pressed", lambda *_: close_win())
+            self.add_controller(click)
+            outside["g"] = click
+            return False
+
+        GLib.timeout_add(200, arm_outside)
+        win.present()
+        if entries:
+            next(iter(entries.values())).grab_focus()
 
     def open_star_filter(self) -> None:
         """Filter the grid by star rating: 1–5 with =, ≥, or ≤."""
@@ -8328,30 +8501,25 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         ):
             self.import_inbox(manual=True)
             return True
-        # e = reveal in Files; E (Shift+E) = clip editor. Match g/G: use
-        # keyval, not SHIFT_MASK — GTK often reports KEY_E with shift already
-        # applied and the modifier bit cleared.
+        # e = Files; Shift+E = add to clip editor; Ctrl+Shift+E = new project.
+        # Match g/G: use keyval, not SHIFT_MASK — GTK often reports KEY_E with
+        # shift already applied and the modifier bit cleared.
         if (
-            keyval == Gdk.KEY_E
-            and not ctrl
+            keyval in (Gdk.KEY_e, Gdk.KEY_E)
             and not alt
             and not super_mod
             and not in_sidebar
         ):
-            self.open_selected_in_clip_editor()
-            return True
-        if (
-            keyval == Gdk.KEY_e
-            and not ctrl
-            and not alt
-            and not super_mod
-            and not in_sidebar
-        ):
-            if state & Gdk.ModifierType.SHIFT_MASK:
-                self.open_selected_in_clip_editor()
-            else:
+            shift = keyval == Gdk.KEY_E or bool(state & Gdk.ModifierType.SHIFT_MASK)
+            if shift and ctrl:
+                self.open_selected_in_clip_editor(new_project=True)
+                return True
+            if shift and not ctrl:
+                self.open_selected_in_clip_editor(new_project=False)
+                return True
+            if not shift and not ctrl:
                 self.reveal_selected_in_files()
-            return True
+                return True
         # In viewer: +/- toggle fit/actual; grid: thumb size
         if keyval in (
             Gdk.KEY_plus,
