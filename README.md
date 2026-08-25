@@ -72,6 +72,8 @@ cp ~/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 
 | Key | Action |
 |-----|--------|
+| `?` | Show the **keyboard command reference** |
+| `Ctrl+K` | **Go to folder**: fuzzy-search special views, smart folders, and library folder paths (`uncat` → Uncategorized; `eun im` → `Eunbi / images`) |
 | `←` / `→` or `h` / `l` | Previous / next image |
 | `←` on leftmost column | Focus sidebar on the **current** smart folder / folder |
 | `↑` / `↓` or `k` / `j` | Image above / below (one row) |
@@ -80,10 +82,12 @@ cp ~/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `0` | Clear rating |
 | `x` | **Crop** focused image (also the crop icon on the viewer toolbar) |
 | Viewer **Upscale** button | Queue a still (Z-Image 2× on Jack) or video (SeedVR2 on Eric) through PromptForge. Tags the source `upscaling`. Toasts if PromptForge is down (no lying tag). No hotkey. |
-| `F2` / `n` | **Rename** focused file (media + matching thumbnail; Eagle id unchanged) |
+| `n` | Open **Notes** for the focused or selected asset(s) |
+| `F2` / `Shift+N` | **Rename** focused file (media + matching thumbnail; Eagle id unchanged) |
 | `e` | Open the focused file in Files |
 | `Shift+E` | Add the focused video/audio to the current clip-editor project |
 | `Ctrl+Shift+E` | New clip-editor project with the focused video/audio |
+| `Ctrl+G` | **Open the set** containing the focused grouped asset |
 | `g` | **Group** selected items into a set |
 | `Alt+←` / `Alt+→` | **Back** / **Forward** through views (also header buttons) |
 | `G` | **Remove** selection from its set |
@@ -123,7 +127,7 @@ Shows the focused asset (or **common** values when multi-selected):
 - Thumbnail preview  
 - **Rating** — stars + Clear on one row (`1`–`5` / `0`)  
 - **Tags / Folders** — pill chips (shared tags plain; partial multi-select marked `±`); pencil icon or click chips to edit  
-- **Notes** — card with truncated Eagle annotation; click or pencil to view/edit (Ctrl+Enter / Ctrl+S saves)  
+- **Notes** — card with truncated Eagle annotation; click, pencil, or `n` to view/edit (Ctrl+Enter / Ctrl+S saves)
 - Path (single selection, dim line at bottom)
 | `t` | **Tags** picker (recent + autocomplete; Enter toggles and clears the filter; Esc closes) |
 | `f` | **Folders / categories** picker (same UX as tags) |

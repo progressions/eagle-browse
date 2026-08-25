@@ -1202,6 +1202,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         box.append(self.insp_set_thumbs)
         set_act = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         self.insp_set_open = Gtk.Button(label="Open set")
+        self.insp_set_open.set_tooltip_text("Open the focused asset's set (Ctrl+G)")
         self.insp_set_open.add_css_class("suggested-action")
         self.insp_set_open.set_sensitive(False)
         self.insp_set_open.connect("clicked", lambda *_: self.open_focused_set())
@@ -2183,6 +2184,172 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         for parent_id in self._smart_ancestors(smart_id):
             self._smart_expanded.add(parent_id)
+
+    def open_location_picker(self) -> None:
+        """Open the fuzzy smart-folder / folder switcher."""
+        from picker import Choice, ChoicePicker
+
+        choices = [
+            Choice("special:uncategorized", "Uncategorized", "Special view"),
+            Choice("special:untagged", "Untagged", "Special view"),
+        ]
+        choices.extend(
+            Choice(f"smart:{smart_id}", path, "Smart folder")
+            for smart_id, path in self.library.smart_folder_paths.items()
+        )
+        choices.extend(
+            Choice(f"folder:{folder_id}", path, "Folder")
+            for folder_id, path in self.library.folder_paths.items()
+        )
+
+        def choose(choice: Choice) -> None:
+            kind, location_id = choice.key.split(":", 1)
+            before = self._view_loc()
+            if self.is_viewer_open():
+                self.close_inline_viewer(restore_scroll=False)
+            self._set_view_tag = None
+            if kind == "smart":
+                self._special_view = None
+                self.current_smart_folder_id = location_id
+                self.current_folder_id = None
+                self._ensure_smart_expanded_path(location_id)
+            elif kind == "folder":
+                self._special_view = None
+                self.current_smart_folder_id = None
+                self.current_folder_id = location_id
+                self._folders_section_expanded = True
+            else:
+                self._special_view = location_id
+                self.current_smart_folder_id = None
+                self.current_folder_id = None
+            self._populate_sidebar(select_current=True)
+            self.refresh_items(reset_selection=True, scroll_to_top=True)
+            self._save_sidebar_state()
+            self._record_view_change(before)
+            self.focus_grid()
+
+        picker = ChoicePicker(
+            self,
+            title="Go to folder",
+            subtitle="Search special views, smart folders, and library folder paths.",
+            choices=choices,
+            on_choose=choose,
+        )
+        picker.present()
+
+    def open_keyboard_help(self) -> None:
+        """Show the keyboard command reference."""
+        win = Gtk.Window(
+            title="Keyboard commands",
+            transient_for=self,
+            # A compositor can occasionally place a modal transient behind its
+            # parent, making the entire app appear frozen. Dialog tracking still
+            # blocks app hotkeys without disabling the parent window.
+            modal=False,
+            default_width=620,
+            default_height=680,
+        )
+        self._remember_dialog(win)
+
+        def restore_parent_focus(*_args) -> None:
+            def apply() -> bool:
+                try:
+                    self.present()
+                    self.focus_grid()
+                except Exception:  # noqa: BLE001
+                    pass
+                return False
+
+            GLib.idle_add(apply)
+
+        win.connect("destroy", restore_parent_focus)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        win.set_child(root)
+        header = Gtk.HeaderBar()
+        header.set_title_widget(Gtk.Label(label="Keyboard commands"))
+        close = Gtk.Button(label="Close")
+        close.connect("clicked", lambda *_args: win.close())
+        header.pack_end(close)
+        root.append(header)
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        root.append(scroll)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        content.set_margin_top(16)
+        content.set_margin_bottom(20)
+        content.set_margin_start(20)
+        content.set_margin_end(20)
+        scroll.set_child(content)
+
+        groups = (
+            ("Navigate", (
+                ("Ctrl+K", "Go to a special view, smart folder, or folder"),
+                ("/  or  Ctrl+F", "Search assets"),
+                ("Arrow keys  or  h j k l", "Move through the grid"),
+                ("b", "Focus the sidebar"),
+                ("Alt+← / Alt+→", "Back / forward through views"),
+                ("Enter  or  o", "Open or close the focused asset"),
+                ("Esc", "Close the current dialog, viewer, or filter"),
+            )),
+            ("Select and organize", (
+                ("Space", "Mark or unmark the focused asset"),
+                ("Ctrl+A", "Select all assets in the current view"),
+                ("t", "Edit tags"),
+                ("f", "Edit folders"),
+                ("n", "Edit notes"),
+                ("Shift+N  or  F2", "Rename file"),
+                ("Ctrl+G", "Open the focused asset's set"),
+                ("g / Shift+G", "Create a set / remove from set"),
+                ("Delete", "Move selection to Eagle trash"),
+                ("Ctrl+Z", "Undo the last delete"),
+                ("1–5 / 0", "Set or clear star rating"),
+            )),
+            ("Use assets", (
+                ("e", "Reveal in Files"),
+                ("Shift+E", "Add to the current clip-editor project"),
+                ("Ctrl+Shift+E", "Create a clip-editor project"),
+                ("y", "Copy Eagle ID"),
+                ("Shift+Y  or  c", "Copy file path"),
+                ("s", "Stage marked assets"),
+                ("x", "Crop the focused image"),
+                ("r", "Reload the library"),
+            )),
+            ("Video viewer", (
+                ("Space", "Play or pause"),
+                ("i / o", "Mark in / out"),
+                ("x", "Cut the marked range"),
+                ("p", "Save the current frame"),
+                ("+ / −", "Zoom in / out"),
+            )),
+        )
+        for title, commands in groups:
+            heading = Gtk.Label(label=title, xalign=0)
+            heading.add_css_class("heading")
+            heading.set_margin_top(8)
+            content.append(heading)
+            grid = Gtk.Grid(column_spacing=20, row_spacing=8)
+            grid.set_margin_bottom(8)
+            for row_index, (keys, action) in enumerate(commands):
+                key_label = Gtk.Label(label=keys, xalign=1, valign=Gtk.Align.START)
+                key_label.add_css_class("monospace")
+                key_label.add_css_class("accent")
+                action_label = Gtk.Label(label=action, xalign=0, wrap=True, hexpand=True)
+                grid.attach(key_label, 0, row_index, 1, 1)
+                grid.attach(action_label, 1, row_index, 1, 1)
+            content.append(grid)
+
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+
+        def on_key(_controller, keyval, _keycode, _state) -> bool:
+            if keyval in (Gdk.KEY_Escape, Gdk.KEY_question):
+                win.close()
+                return True
+            return False
+
+        keys.connect("key-pressed", on_key)
+        win.add_controller(keys)
+        win.present()
 
     def _smart_is_under(self, smart_id: str | None, ancestor_id: str) -> bool:
         """True if *smart_id* is *ancestor_id* or a descendant of it."""
@@ -6726,10 +6893,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if tag:
             token = tag[len(SET_PREFIX) :] or tag
             self.insp_set_title.set_text(f"Set · {count}" if count else "Set")
-            self.insp_set_open.set_tooltip_text(tag)
+            self.insp_set_open.set_tooltip_text(f"{tag} · Open set (Ctrl+G)")
         else:
             self.insp_set_title.set_text("Set")
-            self.insp_set_open.set_tooltip_text("Open the set this item belongs to")
+            self.insp_set_open.set_tooltip_text("Open the focused asset's set (Ctrl+G)")
         self.insp_set_open.set_sensitive(bool(tag))
         self.insp_set_group.set_sensitive(n_sel >= 2)
         self.insp_set_remove.set_sensitive(
@@ -8258,6 +8425,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Alt+letter must not fire single-letter hotkeys (mnemonics / OS binds).
         alt = bool(state & Gdk.ModifierType.ALT_MASK)
 
+        if keyval in (Gdk.KEY_k, Gdk.KEY_K) and ctrl and not alt and not super_mod:
+            self.open_location_picker()
+            return True
+
         if (
             alt
             and not ctrl
@@ -8301,6 +8472,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.focus_grid()
                 return True
             return False
+
+        if keyval == Gdk.KEY_question and not ctrl and not alt and not super_mod:
+            self.open_keyboard_help()
+            return True
 
         # Sidebar: ↑↓ move list; ←→ / Enter collapse-expand smart folders
         if in_sidebar:
@@ -8459,8 +8634,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if keyval == Gdk.KEY_F2:
                 self.open_rename_dialog()
                 return True
-            if keyval in (Gdk.KEY_n, Gdk.KEY_N):
+            if keyval == Gdk.KEY_N:
                 self.open_rename_dialog()
+                return True
+            if keyval == Gdk.KEY_n:
+                self.edit_notes_dialog()
                 return True
         # y = Eagle id(s) — paste-safe for agent CLIs (not rewritten as image)
         # Shift+Y / c = path(s)
@@ -8548,6 +8726,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # No hotkey for "All items" — only click the sidebar row.
         if keyval in (Gdk.KEY_d, Gdk.KEY_D) and not alt and not ctrl and not super_mod:
             self.toggle_descendants()
+            return True
+        if (
+            keyval == Gdk.KEY_g
+            and ctrl
+            and not alt
+            and not super_mod
+            and not in_sidebar
+        ):
+            self.open_focused_set()
             return True
         if (
             keyval in (Gdk.KEY_g,)

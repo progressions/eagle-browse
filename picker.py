@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import gi
@@ -33,6 +34,202 @@ def _filter_rank(value: str, q: str) -> tuple:
     if q in vl:
         return (3, vl.index(q), vl)
     return (9, 0, vl)
+
+
+def fuzzy_path_rank(value: str, query: str) -> tuple | None:
+    """Rank space-separated fuzzy tokens against a folder path."""
+    value_l = value.casefold()
+    leaf = value_l.rsplit(" / ", 1)[-1]
+    tokens = query.casefold().split()
+    if not tokens:
+        return (0, 0, len(value_l), value_l)
+    score = 0
+    for token in tokens:
+        pos = value_l.find(token)
+        if pos >= 0:
+            score += pos
+            if leaf.startswith(token):
+                score -= 20
+            continue
+        # Fall back to ordered-character matching, so short abbreviations work.
+        cursor = -1
+        spread = 0
+        for char in token:
+            next_pos = value_l.find(char, cursor + 1)
+            if next_pos < 0:
+                return None
+            if cursor >= 0:
+                spread += next_pos - cursor - 1
+            cursor = next_pos
+        score += 100 + cursor + spread * 3
+    exact_leaf = int(leaf != " ".join(tokens))
+    return (exact_leaf, score, len(value_l), value_l)
+
+
+@dataclass(frozen=True, slots=True)
+class Choice:
+    key: str
+    label: str
+    kind: str
+
+
+class ChoicePicker(Gtk.Window):
+    """Keyboard-first, fuzzy single-choice autocomplete."""
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        *,
+        title: str,
+        subtitle: str,
+        choices: list[Choice],
+        on_choose: Callable[[Choice], None],
+    ):
+        super().__init__(
+            title=title,
+            transient_for=parent,
+            modal=False,
+            default_width=500,
+            default_height=480,
+        )
+        self.set_destroy_with_parent(True)
+        self._parent = parent
+        self._choices = choices
+        self._on_choose = on_choose
+        self._closing = False
+        self._outside_click: Gtk.GestureClick | None = None
+        if hasattr(parent, "_remember_dialog"):
+            parent._remember_dialog(self)  # type: ignore[attr-defined]
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        root.set_margin_top(12)
+        root.set_margin_bottom(12)
+        root.set_margin_start(12)
+        root.set_margin_end(12)
+        self.set_child(root)
+        head = Gtk.Label(label=title, xalign=0)
+        head.add_css_class("title-3")
+        root.append(head)
+        sub = Gtk.Label(label=subtitle, xalign=0, wrap=True)
+        sub.add_css_class("dim-label")
+        root.append(sub)
+        self.entry = Gtk.Entry(placeholder_text="Type a folder name or path…")
+        self.entry.connect("changed", self._rebuild)
+        root.append(self.entry)
+        hint = Gtk.Label(label="↑↓ navigate · Enter open · Esc close", xalign=0)
+        hint.add_css_class("caption")
+        hint.add_css_class("dim-label")
+        root.append(hint)
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        root.append(scroll)
+        self.list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.list.add_css_class("boxed-list")
+        self.list.set_can_focus(False)
+        self.list.connect("row-activated", self._activate_row)
+        scroll.set_child(self.list)
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
+        entry_keys = Gtk.EventControllerKey()
+        entry_keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        entry_keys.connect("key-pressed", self._on_key)
+        self.entry.add_controller(entry_keys)
+        self.connect("close-request", self._on_close_request)
+        self._rebuild()
+        GLib.idle_add(self._focus_entry)
+        GLib.timeout_add(200, self._install_outside_click)
+
+    def _focus_entry(self) -> bool:
+        self.entry.grab_focus()
+        return False
+
+    def _rebuild(self, *_args) -> None:
+        while (child := self.list.get_first_child()) is not None:
+            self.list.remove(child)
+        query = (self.entry.get_text() or "").strip()
+        ranked = [
+            (rank, choice)
+            for choice in self._choices
+            if (rank := fuzzy_path_rank(choice.label, query)) is not None
+        ]
+        ranked.sort(key=lambda pair: (pair[0], pair[1].kind != "Smart folder"))
+        for _rank, choice in ranked[:100]:
+            row = Gtk.ListBoxRow(activatable=True, selectable=True)
+            row._choice = choice  # type: ignore[attr-defined]
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            box.set_margin_top(8)
+            box.set_margin_bottom(8)
+            box.set_margin_start(10)
+            box.set_margin_end(10)
+            label = Gtk.Label(label=choice.label, xalign=0, hexpand=True, ellipsize=3)
+            box.append(label)
+            kind = Gtk.Label(label=choice.kind)
+            kind.add_css_class("caption")
+            kind.add_css_class("dim-label")
+            box.append(kind)
+            row.set_child(box)
+            self.list.append(row)
+        first = self.list.get_row_at_index(0)
+        if first:
+            self.list.select_row(first)
+
+    def _activate_row(self, _list=None, row=None) -> None:
+        row = row or self.list.get_selected_row()
+        choice = getattr(row, "_choice", None) if row else None
+        if choice is None:
+            return
+        self._on_choose(choice)
+        self.close()
+
+    def _move(self, delta: int) -> None:
+        row = self.list.get_selected_row()
+        index = row.get_index() if row else 0
+        target = self.list.get_row_at_index(max(0, index + delta))
+        if target:
+            self.list.select_row(target)
+        self.entry.grab_focus()
+
+    def _on_key(self, _controller, keyval, _keycode, _state) -> bool:
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+            return True
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self._activate_row()
+            return True
+        if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down):
+            self._move(1)
+            return True
+        if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up):
+            self._move(-1)
+            return True
+        return False
+
+    def _install_outside_click(self) -> bool:
+        if self._closing:
+            return False
+        click = Gtk.GestureClick(button=1)
+        click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        click.connect("pressed", lambda *_args: self.close())
+        self._parent.add_controller(click)
+        self._outside_click = click
+        return False
+
+    def _on_close_request(self, *_args) -> bool:
+        if self._closing:
+            return True
+        self._closing = True
+        if self._outside_click is not None:
+            try:
+                self._parent.remove_controller(self._outside_click)
+            except Exception:  # noqa: BLE001
+                pass
+        if getattr(self._parent, "_open_dialog", None) is self:
+            self._parent._open_dialog = None  # type: ignore[attr-defined]
+        if hasattr(self._parent, "_picker_blocking"):
+            self._parent._picker_blocking = False  # type: ignore[attr-defined]
+        return False
 
 
 def load_recent(kind: str) -> list[str]:
