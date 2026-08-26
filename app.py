@@ -2190,7 +2190,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         from picker import Choice, ChoicePicker
 
         choices = [
-            Choice("special:uncategorized", "Uncategorized", "Special view"),
+            Choice(
+                "special:uncategorized",
+                "Intake",
+                "Special view",
+                ("uncategorized", "uncat"),
+            ),
             Choice("special:untagged", "Untagged", "Special view"),
         ]
         choices.extend(
@@ -2219,9 +2224,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.current_folder_id = location_id
                 self._folders_section_expanded = True
             else:
-                self._special_view = location_id
-                self.current_smart_folder_id = None
-                self.current_folder_id = None
+                self.open_special_view(location_id)
+                return
             self._populate_sidebar(select_current=True)
             self.refresh_items(reset_selection=True, scroll_to_top=True)
             self._save_sidebar_state()
@@ -2236,6 +2240,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             on_choose=choose,
         )
         picker.present()
+
+    def open_special_view(self, view: str) -> None:
+        """Open a virtual library view and keep navigation state in sync."""
+        before = self._view_loc()
+        if self.is_viewer_open():
+            self.close_inline_viewer(restore_scroll=False)
+        self._set_view_tag = None
+        self._special_view = view
+        self.current_smart_folder_id = None
+        self.current_folder_id = None
+        self._populate_sidebar(select_current=True)
+        self.refresh_items(reset_selection=True, scroll_to_top=True)
+        self._save_sidebar_state()
+        self._record_view_change(before)
+        self.focus_grid()
 
     def open_keyboard_help(self) -> None:
         """Show the keyboard command reference."""
@@ -2283,9 +2302,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         groups = (
             ("Navigate", (
-                ("Ctrl+K", "Go to a special view, smart folder, or folder"),
+                ("K", "Go to a special view, smart folder, or folder"),
+                ("I", "Open Intake (new assets with no category)"),
                 ("/  or  Ctrl+F", "Search assets"),
-                ("Arrow keys  or  h j k l", "Move through the grid"),
+                ("Arrow keys  or  h j l", "Move through the grid"),
                 ("b", "Focus the sidebar"),
                 ("Alt+← / Alt+→", "Back / forward through views"),
                 ("Enter  or  o", "Open or close the focused asset"),
@@ -2316,7 +2336,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             )),
             ("Video viewer", (
                 ("Space", "Play or pause"),
-                ("i / o", "Mark in / out"),
+                ("o", "Mark out (use the toolbar for mark in)"),
                 ("x", "Cut the marked range"),
                 ("p", "Save the current frame"),
                 ("+ / −", "Zoom in / out"),
@@ -2406,7 +2426,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return f"{sf.name} ({n})"
 
     def _special_label(self, view: str, base: str) -> str:
-        """Sidebar label for Untagged / Uncategorized, e.g. 'Untagged (42)'."""
+        """Sidebar label for Untagged / Intake, e.g. 'Untagged (42)'."""
         n = self._special_counts.get(view)
         if n is None:
             try:
@@ -2437,9 +2457,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             row = row.get_next_sibling()
 
     def _update_special_count_label(self, view: str, count: int) -> None:
-        """Patch Untagged / Uncategorized sidebar label without full rebuild."""
+        """Patch Untagged / Intake sidebar label without full rebuild."""
         self._special_counts[view] = count
-        base = "Untagged" if view == "untagged" else "Uncategorized"
+        base = "Untagged" if view == "untagged" else "Intake"
         label_text = f"{base} ({count})"
         row = self.folder_list.get_first_child()
         while row is not None:
@@ -2455,7 +2475,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             row = row.get_next_sibling()
 
     def _refresh_special_counts(self) -> None:
-        """Recount Untagged / Uncategorized in the background and patch labels."""
+        """Recount Untagged / Intake in the background and patch labels."""
 
         def work() -> None:
             try:
@@ -2511,7 +2531,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         self.folder_list.append(
             self._make_nav_row(
-                label=self._special_label("uncategorized", "Uncategorized"),
+                label=self._special_label("uncategorized", "Intake"),
                 kind="special",
                 special_view="uncategorized",
             )
@@ -2867,7 +2887,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if self._special_view == "untagged":
             return "Untagged"
         if self._special_view == "uncategorized":
-            return "Uncategorized"
+            return "Intake"
         if self.current_smart_folder_id:
             return "⚡ " + self.library.smart_folder_paths.get(
                 self.current_smart_folder_id, self.current_smart_folder_id
@@ -8425,10 +8445,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Alt+letter must not fire single-letter hotkeys (mnemonics / OS binds).
         alt = bool(state & Gdk.ModifierType.ALT_MASK)
 
-        if keyval in (Gdk.KEY_k, Gdk.KEY_K) and ctrl and not alt and not super_mod:
-            self.open_location_picker()
-            return True
-
         if (
             alt
             and not ctrl
@@ -8472,6 +8488,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.focus_grid()
                 return True
             return False
+
+        if not ctrl and not alt and not super_mod:
+            if keyval in (Gdk.KEY_k, Gdk.KEY_K):
+                self.open_location_picker()
+                return True
+            if keyval in (Gdk.KEY_i, Gdk.KEY_I):
+                self.open_special_view("uncategorized")
+                return True
 
         if keyval == Gdk.KEY_question and not ctrl and not alt and not super_mod:
             self.open_keyboard_help()
@@ -8580,9 +8604,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             and self.is_viewer_open()
             and self._viewer_mode == "video"
         ):
-            if keyval in (Gdk.KEY_i, Gdk.KEY_I):
-                self._mark_viewer("in")
-                return True
             if keyval in (Gdk.KEY_o, Gdk.KEY_O):
                 self._mark_viewer("out")
                 return True
@@ -8657,15 +8678,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return True
         if keyval in (Gdk.KEY_s, Gdk.KEY_S) and not ctrl and not alt and not super_mod:
             self.stage_marked()
-            return True
-        if (
-            keyval in (Gdk.KEY_i, Gdk.KEY_I)
-            and not ctrl
-            and not alt
-            and not super_mod
-            and not in_sidebar
-        ):
-            self.import_inbox(manual=True)
             return True
         # e = Files; Shift+E = add to clip editor; Ctrl+Shift+E = new project.
         # Match g/G: use keyval, not SHIFT_MASK — GTK often reports KEY_E with
@@ -8811,9 +8823,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._cols, extend=shift, keep_selection=ctrl and not shift
             )
             return True
-        if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up) or (
-            keyval in (Gdk.KEY_k, Gdk.KEY_K) and not ctrl
-        ):
+        if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up):
             self.move_selection(
                 -self._cols, extend=shift, keep_selection=ctrl and not shift
             )

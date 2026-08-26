@@ -71,6 +71,7 @@ class Choice:
     key: str
     label: str
     kind: str
+    aliases: tuple[str, ...] = ()
 
 
 class ChoicePicker(Gtk.Window):
@@ -152,7 +153,12 @@ class ChoicePicker(Gtk.Window):
         ranked = [
             (rank, choice)
             for choice in self._choices
-            if (rank := fuzzy_path_rank(choice.label, query)) is not None
+            if (
+                rank := fuzzy_path_rank(
+                    " ".join((choice.label, *choice.aliases)), query
+                )
+            )
+            is not None
         ]
         ranked.sort(key=lambda pair: (pair[0], pair[1].kind != "Smart folder"))
         for _rank, choice in ranked[:100]:

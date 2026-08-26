@@ -73,10 +73,11 @@ cp ~/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | Key | Action |
 |-----|--------|
 | `?` | Show the **keyboard command reference** |
-| `Ctrl+K` | **Go to folder**: fuzzy-search special views, smart folders, and library folder paths (`uncat` → Uncategorized; `eun im` → `Eunbi / images`) |
+| `k` | **Go to folder**: fuzzy-search special views, smart folders, and library folder paths (`uncat` → Intake; `eun im` → `Eunbi / images`) |
+| `i` | Open **Intake**, the new assets with no category |
 | `←` / `→` or `h` / `l` | Previous / next image |
 | `←` on leftmost column | Focus sidebar on the **current** smart folder / folder |
-| `↑` / `↓` or `k` / `j` | Image above / below (one row) |
+| `↑` / `↓` or `j` | Image above / below (one row) |
 | `Enter` / `o` | Open larger: **images and videos → inline viewer**, **audio → mpv** |
 | `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
@@ -92,7 +93,7 @@ cp ~/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `Alt+←` / `Alt+→` | **Back** / **Forward** through views (also header buttons) |
 | `G` | **Remove** selection from its set |
 | `p` (video playing) | **Save frame** at the current playhead; ffmpeg writes a new untagged still |
-| `i` / `o` (video playing) | Mark **in** / **out** at the playhead (sidecar `eagle-browse.json`; Esc still closes) |
+| `o` (video playing) | Mark **out** at the playhead; use the viewer toolbar to mark **in** |
 | `x` (video playing) | **Cut** the marked range to a new untagged H.264/AAC clip |
 | `Ctrl+A` | **Select all** assets in the current grid view |
 | `Delete` / `Backspace` | **Soft-delete** selection (Eagle trash — files stay on disk) |
@@ -139,7 +140,7 @@ Shows the focused asset (or **common** values when multi-selected):
 | `Esc` | Clear marks → clear view filters → clear search |
 | `b` | Focus **sidebar** |
 
-Left nav includes **Untagged** and **Uncategorized** virtual views.
+Left nav includes **Untagged** and **Intake** virtual views. Intake contains assets with no category.
 
 ### Folder auto-tags (Eagle-compatible)
 
@@ -219,10 +220,10 @@ once is safe; none of them will race the intake folder.
 | Action | How |
 |--------|-----|
 | **Auto** | `eagle-inbox-watch` only (one host; user systemd unit) |
-| **Manual (GUI)** | Press **`i`** — one-shot import; leave it to the watcher in normal use |
+| **Manual (GUI)** | No dedicated shortcut; leave imports to the watcher in normal use |
 | Override path | `EAGLE_INBOX=/path/to/folder` |
 
-Import steps (watcher or manual `i`):
+Import steps:
 
 1. Unpack any complete ``.zip`` in the inbox: media files are flattened into the
    inbox root, then the zip and the extract folder are deleted. Incomplete
@@ -343,7 +344,7 @@ Browsers open the system file picker (GTK portal). It does **not** auto-jump to 
 | **`Enter`** / **`o`** (grid) / double-click | Play in the center pane (`o` while playing marks **out**) |
 | **`Space`** | Play / pause |
 | **`p`** or camera button | Save the current frame as a new still |
-| **`i`** | Mark **in** at the playhead (written immediately) |
+| Viewer toolbar | Mark **in** at the playhead (written immediately) |
 | **`o`** | Mark **out** at the playhead (Esc still closes the viewer) |
 | **`x`** or scissors button | Cut `[in, out]` via ffmpeg to a new untagged H.264/AAC clip (Buffer-safe) |
 | **`Esc`** | Close the viewer |

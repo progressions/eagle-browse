@@ -270,7 +270,7 @@
   function scopeTitle() {
     if (state.smartFolderName) return state.smartFolderName;
     if (state.specialView === "untagged") return "Untagged";
-    if (state.specialView === "uncategorized") return "Uncategorized";
+    if (state.specialView === "uncategorized") return "Intake";
     return "Eagle";
   }
 
@@ -351,7 +351,7 @@
       bits.push(chipHtml("Untagged", "special"));
     }
     if (state.specialView === "uncategorized") {
-      bits.push(chipHtml("Uncategorized", "special"));
+      bits.push(chipHtml("Intake", "special"));
     }
     if (state.smartFolderId) {
       bits.push(
@@ -610,7 +610,7 @@
     const views = [
       { id: "", label: "All" },
       { id: "untagged", label: "Untagged" },
-      { id: "uncategorized", label: "Uncategorized" },
+      { id: "uncategorized", label: "Intake" },
     ];
     for (const v of views) {
       const btn = document.createElement("button");
@@ -718,7 +718,7 @@
       };
       addView("", "All");
       addView("untagged", "Untagged");
-      addView("uncategorized", "Uncategorized");
+      addView("uncategorized", "Intake");
     }
 
     // Smart folder tree
