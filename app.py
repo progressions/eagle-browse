@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -92,6 +93,33 @@ SORT_OPTIONS: list[tuple[str, str]] = [
 SORT_IDS = [s[0] for s in SORT_OPTIONS]
 SORT_LABELS = [s[1] for s in SORT_OPTIONS]
 NAV_HISTORY_MAX = 80
+_OMARCHY_COLORS_PATH = (
+    Path.home() / ".local" / "state" / "omarchy" / "current" / "theme" / "colors.toml"
+)
+
+
+def _omarchy_colors() -> dict[str, str]:
+    """Selection colors from the active Omarchy theme, with GTK-safe fallbacks."""
+    fallback = {
+        "accent": "#3584e4",
+        "selection": "#1c71d8",
+        "background": "#1e1e1e",
+        "bright_foreground": "#ffffff",
+    }
+    try:
+        loaded = tomllib.loads(_OMARCHY_COLORS_PATH.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return fallback
+    for key in fallback:
+        value = loaded.get(key)
+        if (
+            isinstance(value, str)
+            and len(value) in (4, 7)
+            and value.startswith("#")
+            and all(c in "0123456789abcdefABCDEF" for c in value[1:])
+        ):
+            fallback[key] = value
+    return fallback
 
 
 class _ViewLoc(NamedTuple):
@@ -906,22 +934,44 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         report a natural width wider than the column and Hyprland cuts the
         inspector off the right edge.
         """
+        colors = _omarchy_colors()
         css = Gtk.CssProvider()
         css.load_from_data(
-            b"""
-            box.eagle-main {
+            f"""
+            box.eagle-main {{
                 min-width: 0;
-            }
-            flowbox.eagle-filter-btns {
+            }}
+            flowbox.eagle-filter-btns {{
                 min-width: 0;
-            }
-            flowbox.eagle-filter-btns > flowboxchild {
+            }}
+            flowbox.eagle-filter-btns > flowboxchild {{
                 padding: 0;
-            }
-            gridview {
+            }}
+            gridview {{
                 min-width: 0;
-            }
+            }}
+            box.asset-selected {{
+                background-color: {colors["selection"]};
+                border-radius: 9px;
+                box-shadow: 0 0 0 3px {colors["accent"]};
+            }}
+            box.asset-selection-outline {{
+                border: 4px solid {colors["bright_foreground"]};
+                border-radius: 7px;
+                box-shadow: inset 0 0 0 1px alpha({colors["background"]}, 0.75),
+                            0 0 5px 1px alpha({colors["accent"]}, 0.95);
+            }}
+            label.asset-selection-mark {{
+                min-width: 28px;
+                min-height: 28px;
+                padding: 0;
+                border-radius: 999px;
+                color: {colors["background"]};
+                background-color: {colors["bright_foreground"]};
+                box-shadow: 0 1px 5px alpha(black, 0.80);
+            }}
             """
+            .encode()
         )
         display = Gdk.Display.get_default()
         if display is not None:
@@ -3389,10 +3439,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         picture.set_valign(Gtk.Align.FILL)
         tile.set_child(picture)
 
+        # This is an overlay (rather than a border on the tile itself), so the
+        # selected outline is always painted above bright or dark thumbnails.
+        selection_outline = Gtk.Box()
+        selection_outline.add_css_class("asset-selection-outline")
+        selection_outline.set_halign(Gtk.Align.FILL)
+        selection_outline.set_valign(Gtk.Align.FILL)
+        selection_outline.set_can_target(False)
+        selection_outline.set_visible(False)
+        tile.add_overlay(selection_outline)
+
         # Multi-select mark (top-left)
         mark = Gtk.Label(label="✓")
         mark.add_css_class("osd")
         mark.add_css_class("heading")
+        mark.add_css_class("asset-selection-mark")
         mark.set_halign(Gtk.Align.START)
         mark.set_valign(Gtk.Align.START)
         mark.set_margin_start(6)
@@ -3463,6 +3524,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         list_item.set_badge = set_badge  # type: ignore[attr-defined]
         list_item.icon = icon  # type: ignore[attr-defined]
         list_item.mark = mark  # type: ignore[attr-defined]
+        list_item.selection_outline = selection_outline  # type: ignore[attr-defined]
         list_item.stars = stars  # type: ignore[attr-defined]
         list_item.card = card  # type: ignore[attr-defined]
         list_item.tile = tile  # type: ignore[attr-defined]
@@ -3556,10 +3618,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         marked = item.id in self._marked
         mark.set_visible(marked)
+        list_item.selection_outline.set_visible(marked)  # type: ignore[attr-defined]
         if marked:
-            card.add_css_class("accent")
+            card.add_css_class("asset-selected")
         else:
-            card.remove_css_class("accent")
+            card.remove_css_class("asset-selected")
 
         if item.star and 1 <= item.star <= 5:
             stars_lbl.set_text("★" * item.star)
@@ -3864,14 +3927,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             item: Item = obj.item
             mark: Gtk.Label = getattr(li, "mark", None)  # type: ignore[assignment]
             card: Gtk.Box = getattr(li, "card", None)  # type: ignore[assignment]
-            if mark is None or card is None:
+            outline: Gtk.Box = getattr(li, "selection_outline", None)  # type: ignore[assignment]
+            if mark is None or card is None or outline is None:
                 continue
             marked = item.id in self._marked
             mark.set_visible(marked)
+            outline.set_visible(marked)
             if marked:
-                card.add_css_class("accent")
+                card.add_css_class("asset-selected")
             else:
-                card.remove_css_class("accent")
+                card.remove_css_class("asset-selected")
 
     def _sync_star_overlays(self) -> None:
         """Update ★ overlays on visible tiles without rebuilding the grid."""
