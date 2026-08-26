@@ -2302,10 +2302,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         groups = (
             ("Navigate", (
-                ("K", "Go to a special view, smart folder, or folder"),
+                ("V", "Go to a special view, smart folder, or folder"),
                 ("I", "Open Intake (new assets with no category)"),
                 ("/  or  Ctrl+F", "Search assets"),
-                ("Arrow keys  or  h j l", "Move through the grid"),
+                ("Arrow keys  or  h j k l", "Move through the grid"),
                 ("b", "Focus the sidebar"),
                 ("Alt+← / Alt+→", "Back / forward through views"),
                 ("Enter  or  o", "Open or close the focused asset"),
@@ -8490,7 +8490,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return False
 
         if not ctrl and not alt and not super_mod:
-            if keyval in (Gdk.KEY_k, Gdk.KEY_K):
+            if keyval in (Gdk.KEY_v, Gdk.KEY_V):
                 self.open_location_picker()
                 return True
             if keyval in (Gdk.KEY_i, Gdk.KEY_I):
@@ -8823,7 +8823,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._cols, extend=shift, keep_selection=ctrl and not shift
             )
             return True
-        if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up):
+        if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up) or (
+            keyval in (Gdk.KEY_k, Gdk.KEY_K) and not ctrl
+        ):
             self.move_selection(
                 -self._cols, extend=shift, keep_selection=ctrl and not shift
             )

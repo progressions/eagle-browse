@@ -73,11 +73,11 @@ cp ~/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | Key | Action |
 |-----|--------|
 | `?` | Show the **keyboard command reference** |
-| `k` | **Go to folder**: fuzzy-search special views, smart folders, and library folder paths (`uncat` → Intake; `eun im` → `Eunbi / images`) |
+| `v` | **Go to folder**: fuzzy-search special views, smart folders, and library folder paths (`uncat` → Intake; `eun im` → `Eunbi / images`) |
 | `i` | Open **Intake**, the new assets with no category |
 | `←` / `→` or `h` / `l` | Previous / next image |
 | `←` on leftmost column | Focus sidebar on the **current** smart folder / folder |
-| `↑` / `↓` or `j` | Image above / below (one row) |
+| `↑` / `↓` or `k` / `j` | Image above / below (one row) |
 | `Enter` / `o` | Open larger: **images and videos → inline viewer**, **audio → mpv** |
 | `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
