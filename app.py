@@ -71,6 +71,7 @@ VIEWER_ZOOM_COOLDOWN_S = 0.12
 PAGE_CHUNK = 500  # first page + each infinite-scroll increment
 BULK_EDIT_CONFIRM = 100  # confirm tag/folder writes above this many items
 SEARCH_DEBOUNCE_MS = 150
+G_PREFIX_TIMEOUT_MS = 800
 # Staging handoff (copy out of library — never writes into .library)
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
 # Sidebar expand/selection — survives close / crash
@@ -291,6 +292,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._right_sidebar_open = True
         self._grid_has_focus = False
         self._last_focus_idx = 0
+        # Explicit keyboard-navigation regions. Only meaningful app actions are
+        # registered; GTK implementation children never become destinations.
+        self._filter_nav_targets: list[Gtk.Widget] = []
+        self._inspector_nav_targets: list[Gtk.Widget] = []
         # Forced grid column count (min_columns == max_columns). Arrow-down
         # must step by exactly this many items or selection drifts diagonally.
         # Start at 1 so the window can shrink into a scrolling-layout column;
@@ -316,6 +321,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Esc is handled here against this reference.
         self._open_dialog: Gtk.Window | None = None
         self._handling_escape = False
+        # Vim-style lowercase-g prefix (gg / gs / gr). The saved context
+        # prevents a pending prefix from leaking across focus or view changes.
+        self._g_prefix_source = 0
+        self._g_prefix_context: tuple[Any, ...] | None = None
         # Ignore the row-selected that follows a viewer-open sidebar click
         self._sidebar_nav_lock = False
         # Soft-delete undo: each entry is a batch of item ids (newest last)
@@ -356,6 +365,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     # ── UI ────────────────────────────────────────────────────────────
 
+    def _register_nav_target(self, widget: Gtk.Widget, region: str) -> Gtk.Widget:
+        """Register one meaningful keyboard target in a named UI region."""
+        widget.add_css_class("spatial-focus-target")
+        if region == "filter":
+            self._filter_nav_targets.append(widget)
+        elif region == "inspector":
+            self._inspector_nav_targets.append(widget)
+        return widget
+
     def _build_ui(self) -> None:
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._toast_overlay.set_child(root)
@@ -378,6 +396,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         header.pack_start(nav)
 
         self.search = Gtk.SearchEntry(placeholder_text="Search name, tags, folders, id…  (/)")
+        self.search.add_css_class("spatial-focus-target")
         self.search.set_hexpand(True)
         self.search.set_sensitive(False)
         self.search.connect("search-changed", self._on_search_changed)
@@ -459,11 +478,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         ):
             btn = Gtk.Button(label=label)
             btn.add_css_class("flat")
+            self._register_nav_target(btn, "filter")
             btn.connect("clicked", lambda _b, h=handler: h())
             filter_btns.append(btn)
 
         clear_btn = Gtk.Button(label="Clear filters")
         clear_btn.add_css_class("flat")
+        self._register_nav_target(clear_btn, "filter")
         clear_btn.connect("clicked", lambda *_: self.clear_view_filters())
         filter_btns.append(clear_btn)
 
@@ -474,6 +495,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         filter_btns.append(sort_lbl)
         sort_model = Gtk.StringList.new(SORT_LABELS)
         self.sort_dropdown = Gtk.DropDown(model=sort_model)
+        self._register_nav_target(self.sort_dropdown, "filter")
         self.sort_dropdown.set_selected(0)
         self.sort_dropdown.set_tooltip_text("Sort items in the current view")
         self.sort_dropdown.connect("notify::selected", self._on_sort_changed)
@@ -495,6 +517,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except AttributeError:
             pass
         filter_bar.append(chip_scroll)
+        self.filter_bar = filter_bar
+        self.filter_buttons = filter_btns
         main.append(filter_bar)
 
         mid = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -970,6 +994,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 background-color: {colors["bright_foreground"]};
                 box-shadow: 0 1px 5px alpha(black, 0.80);
             }}
+            .spatial-focus-target:focus,
+            .spatial-focus-target:focus-visible,
+            .spatial-focus-target:focus-within,
+            list.navigation-sidebar row:focus,
+            list.navigation-sidebar row:focus-visible,
+            list.navigation-sidebar row:focus-within {{
+                outline: 3px solid {colors["bright_foreground"]};
+                outline-offset: -3px;
+                box-shadow: 0 0 0 3px {colors["accent"]};
+                background-color: alpha({colors["accent"]}, 0.28);
+            }}
             """
             .encode()
         )
@@ -1026,6 +1061,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         except AttributeError:
             pass
         scroll.add_css_class("inspector-sidebar")
+        self.inspector_scroll = scroll
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.set_margin_top(12)
@@ -1066,6 +1102,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except (AttributeError, TypeError):
                 btn.set_label(fallback)
             btn.connect("clicked", lambda *_: on_click())
+            self._register_nav_target(btn, "inspector")
             return btn
 
         def _section_head(title: str, on_edit, *, tooltip: str = "Edit") -> Gtk.Box:
@@ -1170,6 +1207,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             btn.set_size_request(32, 32)
             btn.set_hexpand(False)
             btn.connect("clicked", lambda _b, s=n: self.set_rating(s))
+            self._register_nav_target(btn, "inspector")
             self.insp_star_buttons.append(btn)
             self.insp_stars_box.append(btn)
         rate_row.append(self.insp_stars_box)
@@ -1179,6 +1217,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         clear_r.set_valign(Gtk.Align.CENTER)
         clear_r.set_tooltip_text("Clear rating (0)")
         clear_r.connect("clicked", lambda *_: self.set_rating(0))
+        self._register_nav_target(clear_r, "inspector")
         rate_row.append(clear_r)
         box.append(rate_row)
         # Only shown when multi-select ratings differ
@@ -1228,6 +1267,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_notes_btn.set_tooltip_text("Click to view or edit note")
         self.insp_notes_btn.set_sensitive(False)
         self.insp_notes_btn.connect("clicked", lambda *_: self.edit_notes_dialog())
+        self._register_nav_target(self.insp_notes_btn, "inspector")
         box.append(self.insp_notes_btn)
 
         # Path — no heavy heading; dim selectable line at the bottom
@@ -1256,18 +1296,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_set_open.add_css_class("suggested-action")
         self.insp_set_open.set_sensitive(False)
         self.insp_set_open.connect("clicked", lambda *_: self.open_focused_set())
+        self._register_nav_target(self.insp_set_open, "inspector")
         self.insp_set_group = Gtk.Button(label="Group")
         self.insp_set_group.add_css_class("flat")
         self.insp_set_group.add_css_class("insp-quiet-btn")
-        self.insp_set_group.set_tooltip_text("Group selection (g)")
+        self.insp_set_group.set_tooltip_text("Group selection into a set (gs)")
         self.insp_set_group.set_sensitive(False)
         self.insp_set_group.connect("clicked", lambda *_: self.group_selection_into_set())
+        self._register_nav_target(self.insp_set_group, "inspector")
         self.insp_set_remove = Gtk.Button(label="Remove")
         self.insp_set_remove.add_css_class("flat")
         self.insp_set_remove.add_css_class("insp-quiet-btn")
-        self.insp_set_remove.set_tooltip_text("Remove selection from set (G)")
+        self.insp_set_remove.set_tooltip_text("Remove selection from set (gr)")
         self.insp_set_remove.set_sensitive(False)
         self.insp_set_remove.connect("clicked", lambda *_: self.remove_selection_from_set())
+        self._register_nav_target(self.insp_set_remove, "inspector")
         set_act.append(self.insp_set_open)
         set_act.append(self.insp_set_group)
         set_act.append(self.insp_set_remove)
@@ -1286,6 +1329,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             btn.set_hexpand(True)
             btn.set_tooltip_text(f"Park the current still as {letter}")
             btn.connect("clicked", lambda *_ , s=letter.lower(): self._compare_set_slot(s))
+            self._register_nav_target(btn, "inspector")
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             pic = Gtk.Picture()
             pic.set_size_request(36, 36)
@@ -1314,16 +1358,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_cmp_go.add_css_class("suggested-action")
         self.insp_cmp_go.set_sensitive(False)
         self.insp_cmp_go.connect("clicked", lambda *_: self.open_compare_viewer())
+        self._register_nav_target(self.insp_cmp_go, "inspector")
         self.insp_cmp_swap = Gtk.Button(label="Swap")
         self.insp_cmp_swap.add_css_class("flat")
         self.insp_cmp_swap.add_css_class("insp-quiet-btn")
         self.insp_cmp_swap.set_sensitive(False)
         self.insp_cmp_swap.connect("clicked", lambda *_: self._compare_swap_slots())
+        self._register_nav_target(self.insp_cmp_swap, "inspector")
         self.insp_cmp_clear = Gtk.Button(label="Clear")
         self.insp_cmp_clear.add_css_class("flat")
         self.insp_cmp_clear.add_css_class("insp-quiet-btn")
         self.insp_cmp_clear.set_sensitive(False)
         self.insp_cmp_clear.connect("clicked", lambda *_: self._compare_clear_slots())
+        self._register_nav_target(self.insp_cmp_clear, "inspector")
         act_row.append(self.insp_cmp_go)
         act_row.append(self.insp_cmp_swap)
         act_row.append(self.insp_cmp_clear)
@@ -2356,6 +2403,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 ("I", "Open Intake (new assets with no category)"),
                 ("/  or  Ctrl+F", "Search assets"),
                 ("Arrow keys  or  h j k l", "Move through the grid"),
+                ("gg / G", "Jump to the first / last asset in the view"),
+                ("h / l at grid edges", "Move to the sidebar / inspector"),
+                ("k from the first row", "Move to the filter controls"),
+                ("h j k l in panels", "Move among panel actions and back to the grid"),
+                ("Down from Search", "Move to the nearest filter control"),
                 ("b", "Focus the sidebar"),
                 ("Alt+← / Alt+→", "Back / forward through views"),
                 ("Enter  or  o", "Open or close the focused asset"),
@@ -2369,7 +2421,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 ("n", "Edit notes"),
                 ("Shift+N  or  F2", "Rename file"),
                 ("Ctrl+G", "Open the focused asset's set"),
-                ("g / Shift+G", "Create a set / remove from set"),
+                ("gs / gr", "Create a set / remove from set"),
                 ("Delete", "Move selection to Eagle trash"),
                 ("Ctrl+Z", "Undo the last delete"),
                 ("1–5 / 0", "Set or clear star rating"),
@@ -2385,6 +2437,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 ("r", "Reload the library"),
             )),
             ("Video viewer", (
+                ("h / l  or  ← / →", "Previous / next media; never leave the viewer"),
                 ("Space", "Play or pause"),
                 ("o", "Mark out (use the toolbar for mark in)"),
                 ("x", "Cut the marked range"),
@@ -5235,6 +5288,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _rebuild_filter_chips(self) -> None:
         """Show active view filters as removable chips."""
+        self._filter_nav_targets = [
+            target
+            for target in self._filter_nav_targets
+            if not self._widget_is_in(target, self.filter_chips)
+        ]
         while (c := self.filter_chips.get_first_child()) is not None:
             self.filter_chips.remove(c)
         vf = self._view_filters
@@ -5251,6 +5309,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             btn.add_css_class("circular")
             btn.set_tooltip_text("Click to remove this filter")
             btn.connect("clicked", lambda *_: clear_fn() or self.refresh_items())
+            self._register_nav_target(btn, "filter")
             self.filter_chips.append(btn)
 
         for t in sorted(vf.tags_include):
@@ -8420,6 +8479,330 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _focus_is_sidebar(self, focus) -> bool:
         return self._widget_is_in(focus, getattr(self, "folder_list", None))
 
+    def _key_context(self) -> tuple[Any, ...]:
+        """Context in which a pending multi-key command is valid."""
+        return (
+            self.get_focus(),
+            self.current_folder_id,
+            self.current_smart_folder_id,
+            self._special_view,
+            self._set_view_tag,
+            self._filter_text,
+            self.is_viewer_open(),
+            self._viewer_item_id,
+        )
+
+    def _cancel_g_prefix(self) -> None:
+        if self._g_prefix_source:
+            GLib.source_remove(self._g_prefix_source)
+            self._g_prefix_source = 0
+        self._g_prefix_context = None
+
+    def _start_g_prefix(self) -> None:
+        self._cancel_g_prefix()
+        self._g_prefix_context = self._key_context()
+
+        def expire() -> bool:
+            self._g_prefix_source = 0
+            self._g_prefix_context = None
+            return False
+
+        self._g_prefix_source = GLib.timeout_add(G_PREFIX_TIMEOUT_MS, expire)
+
+    def _jump_to_view_edge(self, *, last: bool) -> None:
+        """Focus the first/last asset, loading the full result for the latter."""
+        if not self._all_items:
+            return
+        if last:
+            self._ensure_loaded(len(self._all_items))
+
+        if self.is_viewer_open():
+            indices = (
+                range(len(self._items) - 1, -1, -1)
+                if last
+                else range(len(self._items))
+            )
+            idx = next(
+                (
+                    i
+                    for i in indices
+                    if self._items[i].is_image or self._items[i].is_video
+                ),
+                None,
+            )
+            if idx is None:
+                self._toast("No viewable media in this view")
+                return
+            item = self._items[idx]
+            self._select_index(idx, ctrl=False, shift=False)
+            self.open_inline_viewer(item)
+            return
+
+        idx = len(self._items) - 1 if last else 0
+        self._select_index(idx, ctrl=False, shift=False)
+        self.grid.grab_focus()
+
+    def _focus_is_text_input(self, focus) -> bool:
+        """Do not steal letters from editable controls outside Search."""
+        w = focus
+        while w is not None:
+            if isinstance(w, (Gtk.TextView, Gtk.Entry)):
+                return True
+            try:
+                if isinstance(w, Gtk.Editable):
+                    return True
+            except TypeError:
+                pass
+            try:
+                w = w.get_parent()
+            except Exception:  # noqa: BLE001
+                break
+        return False
+
+    @staticmethod
+    def _nav_target_eligible(widget: Gtk.Widget) -> bool:
+        try:
+            return bool(
+                widget.get_visible()
+                and widget.get_mapped()
+                and widget.get_sensitive()
+                and widget.get_can_focus()
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _widget_bounds(self, widget: Gtk.Widget) -> tuple[float, float, float, float] | None:
+        """Widget bounds in window coordinates, tolerant of GI return variants."""
+        try:
+            result = widget.compute_bounds(self)
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(result, tuple):
+            if len(result) == 2 and isinstance(result[0], bool):
+                if not result[0]:
+                    return None
+                rect = result[1]
+            else:
+                rect = result[-1]
+        else:
+            rect = result
+        try:
+            return (
+                float(rect.origin.x),
+                float(rect.origin.y),
+                float(rect.size.width),
+                float(rect.size.height),
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _widget_center(self, widget: Gtk.Widget) -> tuple[float, float] | None:
+        bounds = self._widget_bounds(widget)
+        if bounds is None:
+            return None
+        x, y, width, height = bounds
+        return x + width / 2.0, y + height / 2.0
+
+    def _focused_registered_target(
+        self, focus: Gtk.Widget | None, targets: list[Gtk.Widget]
+    ) -> Gtk.Widget | None:
+        for target in targets:
+            if self._widget_is_in(focus, target):
+                return target
+        return None
+
+    def _visible_nav_targets(
+        self, region: str, *, viewport_only: bool = False
+    ) -> list[Gtk.Widget]:
+        targets = (
+            self._filter_nav_targets
+            if region == "filter"
+            else self._inspector_nav_targets
+        )
+        eligible = [target for target in targets if self._nav_target_eligible(target)]
+        if not viewport_only:
+            return eligible
+        container = (
+            getattr(self, "filter_bar", None)
+            if region == "filter"
+            else getattr(self, "inspector_scroll", None)
+        )
+        clip = self._widget_bounds(container) if container is not None else None
+        if clip is None:
+            return eligible
+        cx, cy, cw, ch = clip
+        visible: list[Gtk.Widget] = []
+        for target in eligible:
+            bounds = self._widget_bounds(target)
+            if bounds is None:
+                continue
+            tx, ty, tw, th = bounds
+            if tx + tw > cx and tx < cx + cw and ty + th > cy and ty < cy + ch:
+                visible.append(target)
+        return visible
+
+    def _focus_nearest_target(
+        self, region: str, *, x: float | None = None, y: float | None = None
+    ) -> bool:
+        scored: list[tuple[float, float, int, Gtk.Widget]] = []
+        for order, target in enumerate(
+            self._visible_nav_targets(region, viewport_only=True)
+        ):
+            center = self._widget_center(target)
+            if center is None:
+                continue
+            tx, ty = center
+            primary = abs((y if y is not None else ty) - ty)
+            secondary = abs((x if x is not None else tx) - tx)
+            scored.append((primary, secondary, order, target))
+        if not scored:
+            return False
+        target = min(scored, key=lambda value: value[:3])[3]
+        target.grab_focus()
+        return True
+
+    def _move_registered_focus(self, region: str, delta: int) -> bool:
+        """Move through meaningful controls in stable visual order."""
+        focus = self.get_focus()
+        targets = []
+        for order, target in enumerate(self._visible_nav_targets(region)):
+            center = self._widget_center(target)
+            if center is not None:
+                targets.append((center[1], center[0], order, target))
+        targets.sort(key=lambda value: value[:3])
+        if not targets:
+            return False
+        current = self._focused_registered_target(
+            focus, [value[3] for value in targets]
+        )
+        idx = next(
+            (i for i, value in enumerate(targets) if value[3] is current),
+            0 if delta < 0 else -1,
+        )
+        new = max(0, min(len(targets) - 1, idx + delta))
+        targets[new][3].grab_focus()
+        return True
+
+    def _move_filter_focus(self, delta: int) -> bool:
+        """Move left/right within the focused filter's rendered row."""
+        targets = self._visible_nav_targets("filter", viewport_only=True)
+        current = self._focused_registered_target(self.get_focus(), targets)
+        if current is None:
+            return False
+        center = self._widget_center(current)
+        current_bounds = self._widget_bounds(current)
+        if center is None or current_bounds is None:
+            return False
+        cx, cy = center
+        _cbx, _cby, _cbw, current_h = current_bounds
+        scored: list[tuple[float, float, int, Gtk.Widget]] = []
+        for order, target in enumerate(targets):
+            if target is current:
+                continue
+            other = self._widget_center(target)
+            other_bounds = self._widget_bounds(target)
+            if other is None or other_bounds is None:
+                continue
+            ox, oy = other
+            _obx, _oby, _obw, other_h = other_bounds
+            dx = ox - cx
+            if (delta < 0 and dx >= 0) or (delta > 0 and dx <= 0):
+                continue
+            if abs(oy - cy) > max(current_h, other_h) * 0.75:
+                continue
+            scored.append((abs(oy - cy), abs(dx), order, target))
+        if not scored:
+            return True
+        min(scored, key=lambda value: value[:3])[3].grab_focus()
+        return True
+
+    def _sidebar_rows(self) -> list[Gtk.ListBoxRow]:
+        rows: list[Gtk.ListBoxRow] = []
+        idx = 0
+        while True:
+            row = self.folder_list.get_row_at_index(idx)
+            if row is None:
+                break
+            if self._nav_target_eligible(row):
+                rows.append(row)
+            idx += 1
+        return rows
+
+    def _focus_sidebar_near(self, y: float) -> bool:
+        scored: list[tuple[float, int, Gtk.ListBoxRow]] = []
+        for order, row in enumerate(self._sidebar_rows()):
+            center = self._widget_center(row)
+            if center is not None:
+                scored.append((abs(center[1] - y), order, row))
+        if not scored:
+            return False
+        row = min(scored, key=lambda value: value[:2])[2]
+        self.folder_list.select_row(row)
+        row.grab_focus()
+        return True
+
+    def _move_sidebar_focus(self, delta: int) -> bool:
+        rows = self._sidebar_rows()
+        if not rows:
+            return False
+        current = self.folder_list.get_selected_row()
+        idx = rows.index(current) if current in rows else (0 if delta < 0 else -1)
+        new = max(0, min(len(rows) - 1, idx + delta))
+        self.folder_list.select_row(rows[new])
+        rows[new].grab_focus()
+        return True
+
+    def _grid_focus_center(self) -> tuple[float, float]:
+        bounds = self._widget_bounds(self.grid_scroll)
+        if bounds is None:
+            return 0.0, 0.0
+        x, y, width, _height = bounds
+        n = max(1, len(self._items))
+        idx = self.selection.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION:
+            idx = max(0, min(n - 1, self._last_focus_idx))
+        cols = max(1, self._cols)
+        row, col = divmod(int(idx), cols)
+        vadj = self.grid_scroll.get_vadjustment()
+        scroll_y = vadj.get_value() if vadj is not None else 0.0
+        cell_w = max(1.0, width / cols)
+        return (
+            x + (col + 0.5) * cell_w,
+            y + row * _cell_h(self._thumb_size) - scroll_y + _cell_h(self._thumb_size) / 2,
+        )
+
+    def _focus_grid_near(
+        self, *, x: float | None = None, y: float | None = None, edge: str | None = None
+    ) -> bool:
+        if not self._items:
+            self.focus_grid()
+            return False
+        bounds = self._widget_bounds(self.grid_scroll)
+        if bounds is None:
+            self.focus_grid()
+            return True
+        gx, gy, width, _height = bounds
+        cols = max(1, self._cols)
+        vadj = self.grid_scroll.get_vadjustment()
+        scroll_y = vadj.get_value() if vadj is not None else 0.0
+        if y is None:
+            row = max(0, self._last_focus_idx // cols)
+        else:
+            row = max(0, int((y - gy + scroll_y) / _cell_h(self._thumb_size)))
+        if edge == "left":
+            col = 0
+        elif edge == "right":
+            col = cols - 1
+        elif x is None:
+            col = self._last_focus_idx % cols
+        else:
+            cell_w = max(1.0, width / cols)
+            col = max(0, min(cols - 1, int((x - gx) / cell_w)))
+        idx = min(len(self._items) - 1, row * cols + col)
+        self._select_index(idx, ctrl=False, shift=False)
+        self.grid.grab_focus()
+        return True
+
     def _hotkeys_blocked(self) -> bool:
         """True while a live picker/dialog owns the keyboard."""
         win = self._open_dialog
@@ -8496,6 +8879,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Modal tag/folder/type pickers own the keyboard — do not steal letters
         # (was eating s/o/f/i/b/… so filter text became "ie" from "Sofie")
         if self._hotkeys_blocked():
+            self._cancel_g_prefix()
             if keyval == Gdk.KEY_Escape:
                 return self._handle_escape()
             return False
@@ -8505,10 +8889,33 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # asset. Letter hotkeys still apply while the viewer is showing.
         in_search = self._focus_is_search(focus) and not self.is_viewer_open()
         in_sidebar = self._focus_is_sidebar(focus)
+        in_filter = self._widget_is_in(focus, getattr(self, "filter_bar", None))
+        in_inspector = self._widget_is_in(
+            focus, getattr(self, "inspector_scroll", None)
+        )
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         super_mod = bool(state & Gdk.ModifierType.SUPER_MASK)
         # Alt+letter must not fire single-letter hotkeys (mnemonics / OS binds).
         alt = bool(state & Gdk.ModifierType.ALT_MASK)
+
+        # A prefix is scoped to the exact focus/view where it began. An
+        # unrelated key cancels it but continues through normal handling.
+        pending_g = self._g_prefix_context is not None
+        if pending_g and self._g_prefix_context != self._key_context():
+            self._cancel_g_prefix()
+            pending_g = False
+        if pending_g:
+            plain = not ctrl and not alt and not super_mod
+            if plain and keyval in (Gdk.KEY_g, Gdk.KEY_s, Gdk.KEY_r):
+                self._cancel_g_prefix()
+                if keyval == Gdk.KEY_g:
+                    self._jump_to_view_edge(last=False)
+                elif keyval == Gdk.KEY_s:
+                    self.group_selection_into_set()
+                else:
+                    self.remove_selection_from_set()
+                return True
+            self._cancel_g_prefix()
 
         if (
             alt
@@ -8541,6 +8948,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.delete_selected()
             return True
         if keyval == Gdk.KEY_Escape:
+            self._cancel_g_prefix()
             return self._handle_escape()
         if keyval == Gdk.KEY_slash and not in_search and not ctrl:
             self.focus_search()
@@ -8552,7 +8960,50 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if keyval == Gdk.KEY_Return:
                 self.focus_grid()
                 return True
+            if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down):
+                center = self._widget_center(self.search)
+                if center is not None:
+                    return self._focus_nearest_target("filter", x=center[0])
             return False
+
+        if self._focus_is_text_input(focus):
+            return False
+
+        # Region-local controls get first refusal before app-wide letter
+        # shortcuts. Enter/Space propagate to the focused GTK control.
+        if in_filter:
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+                return False
+            if not ctrl and not alt and not super_mod:
+                if keyval in (Gdk.KEY_h, Gdk.KEY_H):
+                    return self._move_filter_focus(-1)
+                if keyval in (Gdk.KEY_l, Gdk.KEY_L):
+                    return self._move_filter_focus(1)
+                if keyval in (Gdk.KEY_j, Gdk.KEY_J):
+                    center = self._widget_center(focus)
+                    return self._focus_grid_near(
+                        x=center[0] if center is not None else None
+                    )
+                if keyval in (Gdk.KEY_k, Gdk.KEY_K):
+                    self.focus_search()
+                    return True
+
+        if in_inspector:
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+                return False
+            if not ctrl and not alt and not super_mod:
+                if keyval in (Gdk.KEY_j, Gdk.KEY_J):
+                    return self._move_registered_focus("inspector", 1)
+                if keyval in (Gdk.KEY_k, Gdk.KEY_K):
+                    return self._move_registered_focus("inspector", -1)
+                if keyval in (Gdk.KEY_h, Gdk.KEY_H):
+                    center = self._widget_center(focus)
+                    return self._focus_grid_near(
+                        y=center[1] if center is not None else None,
+                        edge="right",
+                    )
+                if keyval in (Gdk.KEY_l, Gdk.KEY_L):
+                    return True
 
         if not ctrl and not alt and not super_mod:
             if keyval in (Gdk.KEY_v, Gdk.KEY_V):
@@ -8621,16 +9072,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     return True
                 # Non-collapsible row: keep selection, don't copy path
                 return True
-            if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right):
+            if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right, Gdk.KEY_l, Gdk.KEY_L):
                 if self._sidebar_expand_selected():
                     return True
-                # Already open / no children → move into the image grid
-                self.focus_grid()
-                return True
-            if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left):
+                row = self.folder_list.get_selected_row()
+                center = self._widget_center(row) if row is not None else None
+                return self._focus_grid_near(
+                    y=center[1] if center is not None else None,
+                    edge="left",
+                )
+            if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left, Gdk.KEY_h, Gdk.KEY_H):
                 if self._sidebar_collapse_selected():
                     return True
                 return False
+            if keyval in (Gdk.KEY_j, Gdk.KEY_J):
+                return self._move_sidebar_focus(1)
+            if keyval in (Gdk.KEY_k, Gdk.KEY_K):
+                return self._move_sidebar_focus(-1)
             if keyval in (
                 Gdk.KEY_Up,
                 Gdk.KEY_Down,
@@ -8745,7 +9203,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.stage_marked()
             return True
         # e = Files; Shift+E = add to clip editor; Ctrl+Shift+E = new project.
-        # Match g/G: use keyval, not SHIFT_MASK — GTK often reports KEY_E with
+        # Use keyval, not SHIFT_MASK — GTK often reports KEY_E with
         # shift already applied and the modifier bit cleared.
         if (
             keyval in (Gdk.KEY_e, Gdk.KEY_E)
@@ -8820,7 +9278,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             and not super_mod
             and not in_sidebar
         ):
-            self.group_selection_into_set()
+            self._start_g_prefix()
             return True
         if (
             keyval in (Gdk.KEY_G,)
@@ -8829,7 +9287,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             and not super_mod
             and not in_sidebar
         ):
-            self.remove_selection_from_set()
+            self._jump_to_view_edge(last=True)
             return True
 
         # Inline viewer: left/right step images in current view
@@ -8863,6 +9321,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right) or (
             keyval in (Gdk.KEY_l, Gdk.KEY_L) and not ctrl
         ):
+            idx = self.selection.get_selected()
+            cols = max(1, self._cols)
+            is_plain_l = keyval in (Gdk.KEY_l, Gdk.KEY_L) and not shift
+            if (
+                is_plain_l
+                and not ctrl
+                and idx != Gtk.INVALID_LIST_POSITION
+                and int(idx) % cols == cols - 1
+            ):
+                _x, y = self._grid_focus_center()
+                if self._focus_nearest_target("inspector", y=y):
+                    return True
             self.move_selection(1, extend=shift, keep_selection=ctrl and not shift)
             return True
         if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left) or (
@@ -8876,8 +9346,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 and not ctrl
                 and (n == 0 or idx == Gtk.INVALID_LIST_POSITION or int(idx) % cols == 0)
             ):
-                # Leftmost cell in the row (or empty grid) → jump to sidebar
-                self.focus_folders()
+                # Leftmost cell in the row (or empty grid) → aligned sidebar row.
+                _x, y = self._grid_focus_center()
+                if not self._focus_sidebar_near(y):
+                    self.focus_folders()
                 return True
             self.move_selection(-1, extend=shift, keep_selection=ctrl and not shift)
             return True
@@ -8891,6 +9363,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up) or (
             keyval in (Gdk.KEY_k, Gdk.KEY_K) and not ctrl
         ):
+            idx = self.selection.get_selected()
+            is_plain_k = keyval in (Gdk.KEY_k, Gdk.KEY_K) and not shift
+            if (
+                is_plain_k
+                and not ctrl
+                and idx != Gtk.INVALID_LIST_POSITION
+                and int(idx) < max(1, self._cols)
+            ):
+                x, _y = self._grid_focus_center()
+                if self._focus_nearest_target("filter", x=x):
+                    return True
             self.move_selection(
                 -self._cols, extend=shift, keep_selection=ctrl and not shift
             )
