@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eagle-browse"
+version = "0.1.0"
+description = "Keyboard-first GTK browser and tools for an Eagle.cool library"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-Proprietary"
+authors = [{name = "Isaac Priestley"}]
+
+[project.scripts]
+eagle-browse = "app:main"
+eagle-api = "cli:main"
+eagle-inbox-watch = "inbox_watch:main"
+eagle-phone-index = "build_phone_index:main"
+phone-browse = "phone_server:main"
+
+[tool.setuptools]
+py-modules = [
+  "api",
+  "app",
+  "audio_crop",
+  "build_phone_index",
+  "cli",
+  "config",
+  "crop",
+  "filters",
+  "import_media",
+  "inbox_watch",
+  "library",
+  "phone_server",
+  "picker",
+  "pixbuf_io",
+  "resources",
+  "sets",
+  "smart_folder_editor",
+  "smart_folder_rules",
+  "sounds",
+  "theme",
+  "upscale_queue",
+  "video_trim",
+  "write",
+]
+
+[tool.setuptools.data-files]
+"share/eagle-browse/phone_web" = [
+  "phone_web/app.js",
+  "phone_web/index.html",
+  "phone_web/styles.css",
+]
+"share/eagle-browse/sounds" = [
+  "sounds/duplicate.wav",
+  "sounds/error.wav",
+  "sounds/notification.wav",
+  "sounds/notification_play.wav",
+  "sounds/remove.wav",
+]

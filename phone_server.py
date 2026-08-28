@@ -40,9 +40,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from library import DEFAULT_LIBRARY, _item_from_dir, _resolve_media_paths  # noqa: E402
+from resources import data_dir  # noqa: E402
 from write import INBOX_SIGNAL_FILENAME  # noqa: E402
 
-PHONE_WEB = Path(__file__).resolve().parent / "phone_web"
+PHONE_WEB = data_dir("phone_web")
 INDEX_NAME = "phone-index.json"
 DEFAULT_PORT = 8787
 DEFAULT_MDNS_NAME = "eagle"  # → eagle.local
