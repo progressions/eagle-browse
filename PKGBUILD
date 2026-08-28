@@ -28,22 +28,22 @@ optdepends=(
   'pipewire-audio: notification sound playback'
   'wl-clipboard: copy paths and file URIs under Wayland'
 )
-source=("$pkgname::git+$url.git#tag=v$pkgver")
+source=("$pkgname-$pkgver::git+$url.git#tag=v$pkgver")
 sha256sums=('SKIP')
 
 build() {
-  cd "$pkgname"
+  cd "$pkgname-$pkgver"
   python -m build --wheel --no-isolation
 }
 
 check() {
-  cd "$pkgname"
+  cd "$pkgname-$pkgver"
   python -m unittest discover -s tests
   python -m compileall -q .
 }
 
 package() {
-  cd "$pkgname"
+  cd "$pkgname-$pkgver"
   python -m installer --destdir="$pkgdir" dist/*.whl
   install -Dm644 eagle-browse.desktop \
     "$pkgdir/usr/share/applications/eagle-browse.desktop"
