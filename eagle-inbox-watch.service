@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/eagle-inbox-watch --dup=reuse
+ExecStart=/usr/bin/eagle-inbox-watch --dup=reuse
 Restart=on-failure
 RestartSec=5
 # Dropbox may lag after login.
 # Inbox path is read from the vault eagle-browse.toml (not hardcoded here).
-Environment=EAGLE_LIBRARY=%h/Dropbox/ISAAC/GENNIE/Eunbi.library
+EnvironmentFile=-%h/.config/eagle-browse/environment
 
 [Install]
 WantedBy=default.target

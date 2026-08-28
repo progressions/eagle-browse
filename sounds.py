@@ -13,7 +13,9 @@ import subprocess
 import time
 from pathlib import Path
 
-SOUNDS_DIR = Path(__file__).resolve().parent / "sounds"
+from resources import data_dir
+
+SOUNDS_DIR = data_dir("sounds")
 STATE_DIR = Path.home() / ".local" / "state" / "eagle-browse"
 _GUI_PID = STATE_DIR / "gui.pid"
 _LAST_SOUND = STATE_DIR / "last-sound.json"

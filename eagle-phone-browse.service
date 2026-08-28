@@ -6,10 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Port 8788 on Ginger — 8787 is the Eunbi communicator dashboard (localhost).
-ExecStart=%h/.local/bin/phone-browse --port 8788
+ExecStart=/usr/bin/phone-browse --port 8788
 Restart=on-failure
 RestartSec=5
-Environment=EAGLE_LIBRARY=%h/Dropbox/ISAAC/GENNIE/Eunbi.library
+EnvironmentFile=-%h/.config/eagle-browse/environment
 
 [Install]
 WantedBy=default.target

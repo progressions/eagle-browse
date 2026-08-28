@@ -6,24 +6,82 @@ Browse **smart folders** and regular folders, search tags/names, and **copy the 
 
 Smart folders are evaluated from Eagle’s `metadata.json` rules (nested filters inherit parents — e.g. `Eunbi` → `images`). Create and edit them in the sidebar.
 
-## Requirements
+## Install
 
-- Python 3
-- GTK 4 + libadwaita (`python-gobject`, `libadwaita`)
-- Wayland clipboard helper: `wl-copy` (optional but recommended)
-- Image preview: `imv` (optional; falls back to `xdg-open`)
+Eagle Browse is distributed as an Arch package. Releases are built from Git
+tags matching `pkgver` in `PKGBUILD`.
 
-On Omarchy these are typically already present.
+```bash
+git clone https://github.com/progressions/eagle-browse.git
+cd eagle-browse
+makepkg -si
+```
+
+The package installs `/usr/bin/eagle-browse`, `eagle-api`, `phone-browse`,
+`eagle-phone-index`, and `eagle-inbox-watch`, plus the desktop entry, phone UI,
+sounds, and user systemd units. Pacman installs the required Python, GTK,
+libadwaita, GStreamer, and FFmpeg dependencies. Optional integrations are
+listed by `pacman -Qi eagle-browse`.
+
+Installed commands do not run Git or update themselves. Package upgrades own
+application updates.
+
+### Migrating from source launchers
+
+After package installation, remove old user symlinks and the copied desktop
+entry if they exist:
+
+```bash
+unlink ~/.local/bin/eagle-browse
+unlink ~/.local/bin/eagle-api
+unlink ~/.local/bin/eagle-inbox-watch
+unlink ~/.local/bin/phone-browse
+rm ~/.local/share/applications/eagle-browse.desktop
+```
+
+This does not remove the Eagle library, inbox, configuration, state, indexes,
+or backups. The packaged desktop entry calls `/usr/bin/eagle-browse` directly.
+
+### Services
+
+The package installs user-unit templates. Machine overrides can be placed in
+`~/.config/eagle-browse/environment`, for example:
+
+```bash
+EAGLE_LIBRARY=/path/to/Eunbi.library
+EAGLE_INBOX=/path/to/intake
+EAGLE_PHONE_MDNS=eagle
+```
+
+Enable only the services appropriate for that machine. The inbox watcher must
+run on one machine only.
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now eagle-inbox-watch.service
+systemctl --user enable --now eagle-phone-browse.service
+```
+
+### Upgrade, downgrade, and uninstall
+
+Build a newer checked-out tag with `makepkg -si` to upgrade. Downgrade with a
+previous package from `/var/cache/pacman/pkg` using `sudo pacman -U`. Uninstall
+with `sudo pacman -Rns eagle-browse`. Pacman removes program files and unit
+templates only; user data is preserved.
+
+Maintainer release procedure:
+
+1. Update `pkgver` in `PKGBUILD` and the project version in `pyproject.toml`;
+   reset `pkgrel` to 1.
+2. Run the tests, installed-wheel smoke tests, and a real-library launch.
+3. Commit, tag the approved commit as `v<version>`, and push both.
+4. Run `makepkg -si` from the tagged checkout.
 
 ## Run
 
 The window chrome opens immediately. The library scan (tens of thousands of items) runs in the background; the grid says **Loading library…** until it finishes.
 
 ```bash
-# From source
-~/tech/eagle-browse/eagle-browse
-
-# Or if installed on PATH (symlink in ~/.local/bin)
 eagle-browse
 ```
 
@@ -37,9 +95,9 @@ eagle-browse /path/to/Something.library
 
 Default library: `~/Dropbox/ISAAC/GENNIE/Eunbi.library`
 
-### Auto-update on start
+### Source-checkout auto-update
 
-`eagle-browse`, `phone-browse`, and `eagle-inbox-watch` check `origin` on start
+The development shell launchers in a source checkout check `origin` on start
 (`git fetch`, 8s timeout). If the remote branch is strictly ahead and the
 tracked working tree is clean, they `git pull --ff-only` and re-exec so the new
 code runs. Offline, timed out, dirty tree, or diverged history → keep the
@@ -54,19 +112,7 @@ current checkout and start normally (no hang).
 Local uncommitted changes always block the pull (it will print a notice if the
 remote is ahead). Untracked files are ignored for that check.
 
-### Omarchy install
-
-```bash
-# Launcher on PATH
-ln -sfn ~/tech/eagle-browse/eagle-browse ~/.local/bin/eagle-browse
-
-# Walker / app menu
-cp ~/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
-# (or use the installed copy under ~/.local/share/applications/eagle-browse.desktop)
-
-# Hotkey: Super+Shift+I  (set in ~/.config/hypr/bindings.conf)
-# bindd = SUPER SHIFT, I, Eagle Browse, exec, omarchy-launch-or-focus cool.eagle.Browse "uwsm-app -- $HOME/.local/bin/eagle-browse"
-```
+Packaged commands never invoke this source updater.
 
 ## Hotkeys
 
@@ -253,8 +299,6 @@ Requires `ffmpeg` / `ffprobe` for video (and ImageMagick `convert` as thumb fall
 JSON CLI + Python API for search and writes (tags, folders, ratings, smart folders). See [docs/API.md](docs/API.md).
 
 ```bash
-ln -sfn ~/tech/eagle-browse/eagle-api ~/.local/bin/eagle-api
-
 eagle-api search --smart-folder "Eunbi/images" --limit 10
 eagle-api search --tag eunbi --rating-min 3 --type video
 eagle-api tag add <id> sofie
@@ -274,10 +318,6 @@ eagle-api smart-folder move "Sofie videos 3+" --after Sofie
 Runs at login and imports inbox files without opening Eagle Browse:
 
 ```bash
-# Install launcher + enable user service
-ln -sfn ~/tech/eagle-browse/eagle-inbox-watch ~/.local/bin/eagle-inbox-watch
-mkdir -p ~/.config/systemd/user
-cp ~/tech/eagle-browse/eagle-inbox-watch.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now eagle-inbox-watch.service
 
@@ -388,7 +428,7 @@ Add a desktop entry or Hyprland bind if you want Super+key access:
 
 ```bash
 # example Hyprland bind (edit ~/.config/hypr/bindings.conf yourself)
-bind = SUPER SHIFT, E, exec, /home/isaac/tech/eagle-browse/eagle-browse
+bind = SUPER SHIFT, E, exec, /usr/bin/eagle-browse
 ```
 
 ## Phone browse (LAN)
@@ -397,11 +437,10 @@ Browse the library on a phone **on the same Wi‑Fi** — no App Store, no deplo
 
 ```bash
 # optional: build/refresh index (~few seconds, writes phone-index.json in the library)
-./build_phone_index.py
+eagle-phone-index
 
 # serve UI + media on all interfaces (port 8787)
-./phone-browse
-# or: python3 phone_server.py --port 8787
+phone-browse
 ```
 
 On the phone open **`http://eagle.local:8787/`** (mDNS via Avahi; printed at startup).
