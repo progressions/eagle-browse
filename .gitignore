@@ -17,3 +17,9 @@ build/
 .eagle-browse.write.lock
 .update.lock
 *.tmp.*
+
+# makepkg local debris (build outside the tree when possible)
+pkg/
+src/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
