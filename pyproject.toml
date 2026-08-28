@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eagle-browse"
-version = "0.1.0"
+version = "0.1.1"
 description = "Keyboard-first GTK browser and tools for an Eagle.cool library"
 readme = "README.md"
 requires-python = ">=3.11"

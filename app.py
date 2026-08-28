@@ -829,7 +829,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints = Gtk.Label(
             label=(
                 "Enter open (image inline · video/audio mpv) · Esc close viewer · "
-                "i/o video marks · x cut · p save frame · Shift+E add to editor · Ctrl+Shift+E new editor project · t tags · f folders · g group · G ungroup · Ctrl+A all · Del · Ctrl+Z · Super+W"
+                "i/o video marks · x cut · p save frame · Shift+E add to editor · Ctrl+Shift+E new editor project · "
+                "t tags · f folders · gg / Shift+G jump · gs / gr set · Ctrl+A all · Del · Ctrl+Z · Super+W · ?"
             ),
             xalign=0,
         )
@@ -2361,7 +2362,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 ("I", "Set video In marker; otherwise open Intake"),
                 ("/  or  Ctrl+F", "Search assets"),
                 ("Arrow keys  or  h j k l", "Move through the grid"),
-                ("gg / G", "Jump to the first / last asset in the view"),
+                ("gg / Shift+G", "Jump to the first / last asset in the view"),
                 ("b", "Focus the sidebar"),
                 ("Alt+← / Alt+→", "Back / forward through views"),
                 ("Enter  or  o", "Open or close the focused asset"),
