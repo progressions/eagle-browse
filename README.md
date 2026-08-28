@@ -93,7 +93,7 @@ cp ~/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `Alt+←` / `Alt+→` | **Back** / **Forward** through views (also header buttons) |
 | `gr` | **Remove** selection from its set |
 | `p` (video playing) | **Save frame** at the current playhead; ffmpeg writes a new untagged still |
-| `o` (video playing) | Mark **out** at the playhead; use the viewer toolbar to mark **in** |
+| `i` / `o` (video playing) | Mark **in** / **out** at the playhead |
 | `x` (video playing) | **Cut** the marked range to a new untagged H.264/AAC clip |
 | `Ctrl+A` | **Select all** assets in the current grid view |
 | `Delete` / `Backspace` | **Soft-delete** selection (Eagle trash — files stay on disk) |

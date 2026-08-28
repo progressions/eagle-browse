@@ -2358,7 +2358,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         groups = (
             ("Navigate", (
                 ("V", "Go to a special view, smart folder, or folder"),
-                ("I", "Open Intake (new assets with no category)"),
+                ("I", "Set video In marker; otherwise open Intake"),
                 ("/  or  Ctrl+F", "Search assets"),
                 ("Arrow keys  or  h j k l", "Move through the grid"),
                 ("gg / G", "Jump to the first / last asset in the view"),
@@ -8647,7 +8647,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.open_location_picker()
                 return True
             if keyval in (Gdk.KEY_i, Gdk.KEY_I):
-                self.open_special_view("uncategorized")
+                if self.is_viewer_open() and self._viewer_mode == "video":
+                    self._mark_viewer("in")
+                else:
+                    self.open_special_view("uncategorized")
                 return True
 
         if keyval == Gdk.KEY_question and not ctrl and not alt and not super_mod:
