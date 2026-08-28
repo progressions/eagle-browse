@@ -1,6 +1,6 @@
 # Maintainer: Isaac Priestley <progressions@gmail.com>
 pkgname=eagle-browse
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Keyboard-first GTK browser and tools for an Eagle.cool library"
 arch=('any')
@@ -30,6 +30,21 @@ optdepends=(
 )
 source=("$pkgname-$pkgver::git+$url.git#tag=v$pkgver")
 sha256sums=('SKIP')
+
+# Build from a local checkout before the tag exists:
+#   EAGLE_BROWSE_SRC=$PWD makepkg -f
+if [[ -n "${EAGLE_BROWSE_SRC:-}" ]]; then
+  source=()
+  sha256sums=()
+fi
+
+prepare() {
+  if [[ -n "${EAGLE_BROWSE_SRC:-}" ]]; then
+    rm -rf "$srcdir/$pkgname-$pkgver"
+    mkdir -p "$srcdir/$pkgname-$pkgver"
+    git -C "$EAGLE_BROWSE_SRC" archive --format=tar HEAD | tar -x -C "$srcdir/$pkgname-$pkgver"
+  fi
+}
 
 build() {
   cd "$pkgname-$pkgver"

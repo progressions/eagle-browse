@@ -95,6 +95,20 @@ eagle-browse /path/to/Something.library
 
 Default library: `~/Dropbox/ISAAC/GENNIE/Eunbi.library`
 
+### Develop while the package is installed
+
+Daily use stays on `/usr/bin/eagle-browse` (Super+Shift+I, desktop entry,
+systemd services). To run the git checkout instead:
+
+```bash
+cd ~/tech/eagle-browse
+./eagle-browse --no-update
+```
+
+That launcher execs `app.py` from the checkout directory, so it does not use
+the installed `site-packages` copy. Leave `~/.local/bin/eagle-browse` unset so
+it does not shadow the package. Full notes: `GENNIE/Ops/isaac-archrepo.md`.
+
 ### Source-checkout auto-update
 
 The development shell launchers in a source checkout check `origin` on start
