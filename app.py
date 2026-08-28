@@ -71,6 +71,7 @@ VIEWER_ZOOM_COOLDOWN_S = 0.12
 PAGE_CHUNK = 500  # first page + each infinite-scroll increment
 BULK_EDIT_CONFIRM = 100  # confirm tag/folder writes above this many items
 SEARCH_DEBOUNCE_MS = 150
+G_PREFIX_TIMEOUT_MS = 800
 # Staging handoff (copy out of library — never writes into .library)
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
 # Sidebar expand/selection — survives close / crash
@@ -316,6 +317,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Esc is handled here against this reference.
         self._open_dialog: Gtk.Window | None = None
         self._handling_escape = False
+        # Vim-style lowercase-g prefix (gg / gs / gr). The saved context
+        # prevents a pending prefix from leaking across focus or view changes.
+        self._g_prefix_source = 0
+        self._g_prefix_context: tuple[Any, ...] | None = None
         # Ignore the row-selected that follows a viewer-open sidebar click
         self._sidebar_nav_lock = False
         # Soft-delete undo: each entry is a batch of item ids (newest last)
@@ -1259,13 +1264,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.insp_set_group = Gtk.Button(label="Group")
         self.insp_set_group.add_css_class("flat")
         self.insp_set_group.add_css_class("insp-quiet-btn")
-        self.insp_set_group.set_tooltip_text("Group selection (g)")
+        self.insp_set_group.set_tooltip_text("Group selection into a set (gs)")
         self.insp_set_group.set_sensitive(False)
         self.insp_set_group.connect("clicked", lambda *_: self.group_selection_into_set())
         self.insp_set_remove = Gtk.Button(label="Remove")
         self.insp_set_remove.add_css_class("flat")
         self.insp_set_remove.add_css_class("insp-quiet-btn")
-        self.insp_set_remove.set_tooltip_text("Remove selection from set (G)")
+        self.insp_set_remove.set_tooltip_text("Remove selection from set (gr)")
         self.insp_set_remove.set_sensitive(False)
         self.insp_set_remove.connect("clicked", lambda *_: self.remove_selection_from_set())
         set_act.append(self.insp_set_open)
@@ -2353,9 +2358,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         groups = (
             ("Navigate", (
                 ("V", "Go to a special view, smart folder, or folder"),
-                ("I", "Open Intake (new assets with no category)"),
+                ("I", "Set video In marker; otherwise open Intake"),
                 ("/  or  Ctrl+F", "Search assets"),
                 ("Arrow keys  or  h j k l", "Move through the grid"),
+                ("gg / G", "Jump to the first / last asset in the view"),
                 ("b", "Focus the sidebar"),
                 ("Alt+← / Alt+→", "Back / forward through views"),
                 ("Enter  or  o", "Open or close the focused asset"),
@@ -2369,7 +2375,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 ("n", "Edit notes"),
                 ("Shift+N  or  F2", "Rename file"),
                 ("Ctrl+G", "Open the focused asset's set"),
-                ("g / Shift+G", "Create a set / remove from set"),
+                ("gs / gr", "Create a set / remove from set"),
                 ("Delete", "Move selection to Eagle trash"),
                 ("Ctrl+Z", "Undo the last delete"),
                 ("1–5 / 0", "Set or clear star rating"),
@@ -8420,6 +8426,69 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def _focus_is_sidebar(self, focus) -> bool:
         return self._widget_is_in(focus, getattr(self, "folder_list", None))
 
+    def _key_context(self) -> tuple[Any, ...]:
+        """Context in which a pending multi-key command is valid."""
+        return (
+            self.get_focus(),
+            self.current_folder_id,
+            self.current_smart_folder_id,
+            self._special_view,
+            self._set_view_tag,
+            self._filter_text,
+            self.is_viewer_open(),
+            self._viewer_item_id,
+        )
+
+    def _cancel_g_prefix(self) -> None:
+        if self._g_prefix_source:
+            GLib.source_remove(self._g_prefix_source)
+            self._g_prefix_source = 0
+        self._g_prefix_context = None
+
+    def _start_g_prefix(self) -> None:
+        self._cancel_g_prefix()
+        self._g_prefix_context = self._key_context()
+
+        def expire() -> bool:
+            self._g_prefix_source = 0
+            self._g_prefix_context = None
+            return False
+
+        self._g_prefix_source = GLib.timeout_add(G_PREFIX_TIMEOUT_MS, expire)
+
+    def _jump_to_view_edge(self, *, last: bool) -> None:
+        """Focus the first/last asset, loading the full result for the latter."""
+        if not self._all_items:
+            return
+        if last:
+            self._ensure_loaded(len(self._all_items))
+
+        if self.is_viewer_open():
+            indices = (
+                range(len(self._items) - 1, -1, -1)
+                if last
+                else range(len(self._items))
+            )
+            idx = next(
+                (
+                    i
+                    for i in indices
+                    if self._items[i].is_image or self._items[i].is_video
+                ),
+                None,
+            )
+            if idx is None:
+                self._toast("No viewable media in this view")
+                return
+            item = self._items[idx]
+            self._select_index(idx, ctrl=False, shift=False)
+            self.open_inline_viewer(item)
+            return
+
+        idx = len(self._items) - 1 if last else 0
+        self._select_index(idx, ctrl=False, shift=False)
+        self.grid.grab_focus()
+
     def _hotkeys_blocked(self) -> bool:
         """True while a live picker/dialog owns the keyboard."""
         win = self._open_dialog
@@ -8496,6 +8565,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Modal tag/folder/type pickers own the keyboard — do not steal letters
         # (was eating s/o/f/i/b/… so filter text became "ie" from "Sofie")
         if self._hotkeys_blocked():
+            self._cancel_g_prefix()
             if keyval == Gdk.KEY_Escape:
                 return self._handle_escape()
             return False
@@ -8509,6 +8579,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         super_mod = bool(state & Gdk.ModifierType.SUPER_MASK)
         # Alt+letter must not fire single-letter hotkeys (mnemonics / OS binds).
         alt = bool(state & Gdk.ModifierType.ALT_MASK)
+
+        pending_g = self._g_prefix_context is not None
+        if pending_g and self._g_prefix_context != self._key_context():
+            self._cancel_g_prefix()
+            pending_g = False
+        if pending_g:
+            plain = not ctrl and not alt and not super_mod
+            if plain and keyval in (Gdk.KEY_g, Gdk.KEY_s, Gdk.KEY_r):
+                self._cancel_g_prefix()
+                if keyval == Gdk.KEY_g:
+                    self._jump_to_view_edge(last=False)
+                elif keyval == Gdk.KEY_s:
+                    self.group_selection_into_set()
+                else:
+                    self.remove_selection_from_set()
+                return True
+            self._cancel_g_prefix()
 
         if (
             alt
@@ -8541,6 +8628,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.delete_selected()
             return True
         if keyval == Gdk.KEY_Escape:
+            self._cancel_g_prefix()
             return self._handle_escape()
         if keyval == Gdk.KEY_slash and not in_search and not ctrl:
             self.focus_search()
@@ -8559,7 +8647,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.open_location_picker()
                 return True
             if keyval in (Gdk.KEY_i, Gdk.KEY_I):
-                self.open_special_view("uncategorized")
+                if self.is_viewer_open() and self._viewer_mode == "video":
+                    self._mark_viewer("in")
+                else:
+                    self.open_special_view("uncategorized")
                 return True
 
         if keyval == Gdk.KEY_question and not ctrl and not alt and not super_mod:
@@ -8814,22 +8905,22 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.open_focused_set()
             return True
         if (
-            keyval in (Gdk.KEY_g,)
+            keyval == Gdk.KEY_g
             and not alt
             and not ctrl
             and not super_mod
             and not in_sidebar
         ):
-            self.group_selection_into_set()
+            self._start_g_prefix()
             return True
         if (
-            keyval in (Gdk.KEY_G,)
+            keyval == Gdk.KEY_G
             and not alt
             and not ctrl
             and not super_mod
             and not in_sidebar
         ):
-            self.remove_selection_from_set()
+            self._jump_to_view_edge(last=True)
             return True
 
         # Inline viewer: left/right step images in current view
@@ -8852,12 +8943,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self.viewer_navigate(-1)
                 return True
 
+        # Grid movement is intentionally scoped to the asset grid. Sidebar,
+        # inspector, and filter controls keep their native/dedicated commands.
+        if not self._grid_has_focus:
+            return False
+
         # Grid movement (reading order is left→right, top→bottom):
         #   Left/Right / h/l  → previous / next image
         #   Up/Down / k/j     → image above / below (exactly one row)
         #   Shift+arrows      → range select from anchor through focus
         #   Ctrl+arrows       → move focus only (keep multi-selection); then Space to add
-        #   Left on first column → focus sidebar
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
         # Note: ctrl already computed above for other bindings
         if keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right) or (
@@ -8868,17 +8963,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_Left, Gdk.KEY_KP_Left) or (
             keyval in (Gdk.KEY_h, Gdk.KEY_H) and not ctrl
         ):
-            idx = self.selection.get_selected()
-            n = self.store.get_n_items()
-            cols = max(1, self._cols)
-            if (
-                not shift
-                and not ctrl
-                and (n == 0 or idx == Gtk.INVALID_LIST_POSITION or int(idx) % cols == 0)
-            ):
-                # Leftmost cell in the row (or empty grid) → jump to sidebar
-                self.focus_folders()
-                return True
             self.move_selection(-1, extend=shift, keep_selection=ctrl and not shift)
             return True
         if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down) or (

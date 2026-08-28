@@ -122,8 +122,8 @@ Packaged commands never invoke this source updater.
 | `v` | **Go to folder**: fuzzy-search special views, smart folders, and library folder paths (`uncat` → Intake; `eun im` → `Eunbi / images`) |
 | `i` | Open **Intake**, the new assets with no category |
 | `←` / `→` or `h` / `l` | Previous / next image |
-| `←` on leftmost column | Focus sidebar on the **current** smart folder / folder |
 | `↑` / `↓` or `k` / `j` | Image above / below (one row) |
+| `gg` / `G` | Jump to the first / last asset in the full filtered view |
 | `Enter` / `o` | Open larger: **images and videos → inline viewer**, **audio → mpv** |
 | `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
@@ -135,15 +135,18 @@ Packaged commands never invoke this source updater.
 | `Shift+E` | Add the focused video/audio to the current clip-editor project |
 | `Ctrl+Shift+E` | New clip-editor project with the focused video/audio |
 | `Ctrl+G` | **Open the set** containing the focused grouped asset |
-| `g` | **Group** selected items into a set |
+| `gs` | **Group** selected items into a set |
 | `Alt+←` / `Alt+→` | **Back** / **Forward** through views (also header buttons) |
-| `G` | **Remove** selection from its set |
+| `gr` | **Remove** selection from its set |
 | `p` (video playing) | **Save frame** at the current playhead; ffmpeg writes a new untagged still |
-| `o` (video playing) | Mark **out** at the playhead; use the viewer toolbar to mark **in** |
+| `i` / `o` (video playing) | Mark **in** / **out** at the playhead |
 | `x` (video playing) | **Cut** the marked range to a new untagged H.264/AAC clip |
 | `Ctrl+A` | **Select all** assets in the current grid view |
 | `Delete` / `Backspace` | **Soft-delete** selection (Eagle trash — files stay on disk) |
 | `Ctrl+Z` | **Undo** last delete batch (restore items) |
+
+Grid cursor keys stay within the asset grid. Use `b` for the sidebar, `/` for
+Search, and the filter and inspector controls' direct shortcuts or the mouse.
 
 ### Crop
 
@@ -411,8 +414,9 @@ The **Folders** heading starts **collapsed** (same idea as top-level smart folde
 | `d` | Toggle “include subfolders” (regular folders only) |
 
 Smart folders start **collapsed** at the top level. Expand only the category you’re working in.
-| `g` | **Group** selected items into a set (`set:` tag) |
-| `G` | **Remove** selection from its set |
+| `gg` / `G` | Jump to the first / last asset in the full filtered view |
+| `gs` | **Group** selected items into a set (`set:` tag) |
+| `gr` | **Remove** selection from its set |
 | `r` | Reload library from disk |
 | `Esc` | Clear search / leave search |
 | Super+W | Close window (Hyprland; `q` does not quit) |
