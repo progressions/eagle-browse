@@ -17,7 +17,7 @@ depends=(
   'python'
   'python-gobject'
 )
-makedepends=('git' 'python-build' 'python-installer' 'python-wheel')
+makedepends=('git' 'python-build' 'python-installer' 'python-setuptools' 'python-wheel')
 optdepends=(
   'avahi: phone-browse mDNS publication'
   'clip-editor: send selected video or audio to Clip Editor'
