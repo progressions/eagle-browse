@@ -76,20 +76,9 @@ cp ~/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `v` | **Go to folder**: fuzzy-search special views, smart folders, and library folder paths (`uncat` → Intake; `eun im` → `Eunbi / images`) |
 | `i` | Open **Intake**, the new assets with no category |
 | `←` / `→` or `h` / `l` | Previous / next image |
-| `h` on the left edge | Enter the sidebar near the same visible row |
-| `l` on the right edge | Enter the inspector near the same visible row |
 | `↑` / `↓` or `k` / `j` | Image above / below (one row) |
 | `gg` / `G` | Jump to the first / last asset in the full filtered view |
-| `k` from the first row | Enter the nearest filter control |
-| Sidebar `j` / `k` | Move through visible sidebar rows |
-| Sidebar `h` / `l` | Collapse, expand, or return to the nearest grid row |
-| Inspector `j` / `k` | Move through visible actionable controls |
-| Inspector `h` | Return to the nearest grid row |
-| Filters `h` / `l` | Move across controls in the rendered row |
-| Filters `j` / `k` | Move to the grid / Search |
-| `↓` from Search | Focus the nearest filter control; letters remain text input |
 | `Enter` / `o` | Open larger: **images and videos → inline viewer**, **audio → mpv** |
-| Viewer `h` / `l` | Previous / next image or video; never leave the viewer |
 | `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
 | `x` | **Crop** focused image (also the crop icon on the viewer toolbar) |
@@ -109,6 +98,9 @@ cp ~/tech/eagle-browse/eagle-browse.desktop ~/.local/share/applications/
 | `Ctrl+A` | **Select all** assets in the current grid view |
 | `Delete` / `Backspace` | **Soft-delete** selection (Eagle trash — files stay on disk) |
 | `Ctrl+Z` | **Undo** last delete batch (restore items) |
+
+Grid cursor keys stay within the asset grid. Use `b` for the sidebar, `/` for
+Search, and the filter and inspector controls' direct shortcuts or the mouse.
 
 ### Crop
 
@@ -375,16 +367,11 @@ Audio still opens in **mpv**.
 | `/` or `Ctrl+F` | Focus search |
 | `f` | Focus sidebar (smart folders + folders) |
 | `Enter` (in sidebar) | Toggle expand / collapse smart folder or **Folders** section |
-| `→` / `←` or `l` / `h` (in sidebar) | Expand / collapse; `l` enters the nearest grid row when already expanded |
+| `→` / `←` (in sidebar) | Expand / collapse smart folder or **Folders** section |
 | click ▶ / ▼ | Expand / collapse |
 
 The **Folders** heading starts **collapsed** (same idea as top-level smart folders).
 | `d` | Toggle “include subfolders” (regular folders only) |
-
-The filter bar and inspector participate in region-aware keyboard navigation.
-Only meaningful visible actions receive focus, and the bright focus treatment is
-separate from image multi-selection. Text fields, dialogs, and pickers retain
-their native typing behavior.
 
 Smart folders start **collapsed** at the top level. Expand only the category you’re working in.
 | `gg` / `G` | Jump to the first / last asset in the full filtered view |
