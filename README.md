@@ -12,10 +12,13 @@ Eagle Browse is distributed as an Arch package. Releases are built from Git
 tags matching `pkgver` in `PKGBUILD`.
 
 ```bash
-git clone https://github.com/progressions/eagle-browse.git
-cd eagle-browse
-makepkg -si
+git clone https://github.com/progressions/eagle-browse.git && cd eagle-browse && ./install
 ```
+
+For an existing checkout, run `./install`. The installer builds the tagged Arch
+package, installs it through Pacman, removes source-checkout launchers that would
+shadow the package, reloads user units, and restarts Eagle Browse services that
+were already running. It does not enable services on a new machine.
 
 The package installs `/usr/bin/eagle-browse`, `eagle-api`, `phone-browse`,
 `eagle-phone-index`, and `eagle-inbox-watch`, plus the desktop entry, phone UI,
@@ -26,21 +29,9 @@ listed by `pacman -Qi eagle-browse`.
 Installed commands do not run Git or update themselves. Package upgrades own
 application updates.
 
-### Migrating from source launchers
-
-After package installation, remove old user symlinks and the copied desktop
-entry if they exist:
-
-```bash
-unlink ~/.local/bin/eagle-browse
-unlink ~/.local/bin/eagle-api
-unlink ~/.local/bin/eagle-inbox-watch
-unlink ~/.local/bin/phone-browse
-rm ~/.local/share/applications/eagle-browse.desktop
-```
-
-This does not remove the Eagle library, inbox, configuration, state, indexes,
-or backups. The packaged desktop entry calls `/usr/bin/eagle-browse` directly.
+The installer does not remove the Eagle library, inbox, configuration, state,
+indexes, or backups. The packaged desktop entry calls `/usr/bin/eagle-browse`
+directly.
 
 ### Services
 
@@ -64,7 +55,7 @@ systemctl --user enable --now eagle-phone-browse.service
 
 ### Upgrade, downgrade, and uninstall
 
-Build a newer checked-out tag with `makepkg -si` to upgrade. Downgrade with a
+Run `./install` from a newer checkout to upgrade. Downgrade with a
 previous package from `/var/cache/pacman/pkg` using `sudo pacman -U`. Uninstall
 with `sudo pacman -Rns eagle-browse`. Pacman removes program files and unit
 templates only; user data is preserved.

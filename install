@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVICES=(eagle-inbox-watch.service eagle-phone-browse.service)
+active_services=()
+
+for service in "${SERVICES[@]}"; do
+  if systemctl --user is-active --quiet "$service"; then
+    active_services+=("$service")
+  fi
+done
+
+cd "$ROOT"
+makepkg -si
+
+# Remove only obsolete launchers that point back into this source checkout.
+for name in eagle-browse eagle-api eagle-inbox-watch phone-browse; do
+  launcher="$HOME/.local/bin/$name"
+  if [[ -L "$launcher" ]]; then
+    target="$(readlink -f "$launcher")"
+    if [[ "$target" == "$ROOT"/* ]]; then
+      unlink "$launcher"
+    fi
+  fi
+done
+
+# Remove the old copied desktop entry only when it launches the user-local shim.
+desktop="$HOME/.local/share/applications/eagle-browse.desktop"
+if [[ -f "$desktop" ]] && grep -q '^Exec=.*/\.local/bin/eagle-browse\([[:space:]]\|$\)' "$desktop"; then
+  rm "$desktop"
+fi
+
+systemctl --user daemon-reload
+if ((${#active_services[@]})); then
+  systemctl --user restart "${active_services[@]}"
+fi
+
+echo "Eagle Browse installed. Run: eagle-browse"
