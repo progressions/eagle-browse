@@ -137,7 +137,7 @@ Packaged commands never invoke this source updater.
 | `i` | Open **Intake**, the new assets with no category |
 | `←` / `→` or `h` / `l` | Previous / next image |
 | `↑` / `↓` or `k` / `j` | Image above / below (one row) |
-| `gg` / `G` | Jump to the first / last asset in the full filtered view |
+| `gg` / `Shift+G` | Jump to the first / last asset in the full filtered view |
 | `Enter` / `o` | Open larger: **images and videos → inline viewer**, **audio → mpv** |
 | `1`–`5` | Set **star rating** (selection; also click stars in the right inspector) |
 | `0` | Clear rating |
@@ -428,7 +428,7 @@ The **Folders** heading starts **collapsed** (same idea as top-level smart folde
 | `d` | Toggle “include subfolders” (regular folders only) |
 
 Smart folders start **collapsed** at the top level. Expand only the category you’re working in.
-| `gg` / `G` | Jump to the first / last asset in the full filtered view |
+| `gg` / `Shift+G` | Jump to the first / last asset in the full filtered view |
 | `gs` | **Group** selected items into a set (`set:` tag) |
 | `gr` | **Remove** selection from its set |
 | `r` | Reload library from disk |
