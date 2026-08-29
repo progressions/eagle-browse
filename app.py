@@ -4651,10 +4651,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._integrations_actions_ready = True
 
         menu = Gio.Menu()
-        # Mnemonics after u opens the menu: u / b / w (Fizzy #478).
-        menu.append("_Upscale", "win.int-upscale")
-        menu.append("Enhance _bust…", "win.int-bust")
-        menu.append("Add _wardrobe…", "win.int-wardrobe")
+        # Mnemonics + visible key on each row after u opens the menu (#478).
+        for label, action, accel in (
+            ("_Upscale", "win.int-upscale", "u"),
+            ("Enhance _bust…", "win.int-bust", "b"),
+            ("Add _wardrobe…", "win.int-wardrobe", "w"),
+        ):
+            item = Gio.MenuItem.new(f"{label}   {accel}", action)
+            # Right-aligned accel when the popover theme draws it; label still
+            # shows the key if the theme omits accel.
+            item.set_attribute_value("accel", GLib.Variant.new_string(accel))
+            menu.append_item(item)
         btn = Gtk.MenuButton(
             icon_name="view-fullscreen-symbolic",
             menu_model=menu,
