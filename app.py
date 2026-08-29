@@ -53,6 +53,13 @@ from sets import (  # noqa: E402
     set_tags_of,
 )
 from sounds import mark_gui_running, mark_gui_stopped, play_sound  # noqa: E402
+from integrations_queue import (  # noqa: E402
+    DEFAULT_BUST_ENGINE,
+    DEFAULT_WARDROBE_ENGINE,
+    IntegrationResult,
+    post_bust_enhance,
+    post_wardrobe_apply,
+)
 from upscale_queue import (  # noqa: E402
     UpscaleResult,
     already_reason,
@@ -586,10 +593,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             "image-crop-symbolic", "Crop (x)", self.open_crop_dialog
         )
         self.crop_btn.set_sensitive(False)
-        self.upscale_btn = _tool_icon(
-            "view-fullscreen-symbolic", "Upscale", self.queue_upscale
-        )
-        self.upscale_btn.set_sensitive(False)
+        self.upscale_btn = self._build_integrations_menu_button()
         self.viewer_zoom_out_btn = _tool_icon(
             "zoom-out-symbolic", "Zoom out (scroll / −)", lambda: self.viewer_toggle_zoom(larger=False)
         )
@@ -4629,23 +4633,64 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             on_close=on_close,
         )
 
+    def _build_integrations_menu_button(self) -> Gtk.MenuButton:
+        """Toolbar menu: Upscale / Enhance bust / Add wardrobe (Fizzy #477)."""
+        if not getattr(self, "_integrations_actions_ready", False):
+            for name, handler in (
+                ("int-upscale", self.queue_upscale),
+                ("int-bust", self.queue_enhance_bust_dialog),
+                ("int-wardrobe", self.queue_add_wardrobe_dialog),
+            ):
+                action = Gio.SimpleAction.new(name, None)
+                action.connect(
+                    "activate",
+                    lambda *_a, cb=handler: cb(),
+                )
+                self.add_action(action)
+            self._integrations_actions_ready = True
+
+        menu = Gio.Menu()
+        menu.append("Upscale", "win.int-upscale")
+        menu.append("Enhance bust…", "win.int-bust")
+        menu.append("Add wardrobe…", "win.int-wardrobe")
+        btn = Gtk.MenuButton(
+            icon_name="view-fullscreen-symbolic",
+            menu_model=menu,
+        )
+        btn.add_css_class("flat")
+        btn.set_tooltip_text("Integrations: upscale, enhance bust, add wardrobe")
+        btn.set_sensitive(False)
+        return btn
+
+    def _integrations_focus_item(
+        self, *, still_only: bool = False, allow_video: bool = True
+    ) -> Item | None:
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return None
+        if len(items) != 1:
+            self._toast("Select one item")
+            return None
+        item = items[0]
+        if still_only:
+            if not item.is_image:
+                self._toast("This action is for stills")
+                return None
+        elif not (item.is_image or (allow_video and item.is_video)):
+            self._toast("Select a still or video")
+            return None
+        if not item.path.is_file():
+            self._toast("File missing")
+            return None
+        return item
+
     def queue_upscale(self) -> None:
         """Queue a PromptForge upscale for the focused still or video."""
         from write import WriteError
 
-        items = self._effective_hand_off_items()
-        if not items:
-            self._toast("Nothing selected")
-            return
-        if len(items) != 1:
-            self._toast("Select one still or video")
-            return
-        item = items[0]
-        if not (item.is_image or item.is_video):
-            self._toast("Upscale is for stills and videos")
-            return
-        if not item.path.is_file():
-            self._toast("File missing")
+        item = self._integrations_focus_item(still_only=False, allow_video=True)
+        if item is None:
             return
         prior = already_reason(item)
         if prior:
@@ -4690,6 +4735,171 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             GLib.idle_add(apply)
 
         threading.Thread(target=work, name="eagle-upscale", daemon=True).start()
+
+    def queue_enhance_bust_dialog(self) -> None:
+        """Pick bust engine (Krea / Qwen / Flux), then enqueue."""
+        item = self._integrations_focus_item(still_only=True)
+        if item is None:
+            return
+
+        dialog = Adw.AlertDialog(
+            heading="Enhance bust",
+            body="Choose the edit engine. Default is Flux Klein (#474 mid prompt).",
+        )
+        engines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        group: Gtk.CheckButton | None = None
+        buttons: dict[str, Gtk.CheckButton] = {}
+        for key, label in (
+            ("klein", "Flux Klein (default)"),
+            ("qwen", "Qwen"),
+            ("krea2", "Krea 2"),
+        ):
+            btn = Gtk.CheckButton(label=label)
+            if group is None:
+                group = btn
+            else:
+                btn.set_group(group)
+            if key == DEFAULT_BUST_ENGINE:
+                btn.set_active(True)
+            engines.append(btn)
+            buttons[key] = btn
+        dialog.set_extra_child(engines)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("queue", "Queue")
+        dialog.set_response_appearance("queue", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("queue")
+        dialog.set_close_response("cancel")
+
+        def on_response(_dialog, response: str) -> None:
+            if response != "queue":
+                return
+            engine = DEFAULT_BUST_ENGINE
+            for key, btn in buttons.items():
+                if btn.get_active():
+                    engine = key
+                    break
+            self._queue_bust_enhance(item, engine)
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+
+    def _queue_bust_enhance(self, item: Item, engine: str) -> None:
+        inflight = getattr(self, "_bust_inflight", None)
+        if inflight is None:
+            inflight = set()
+            self._bust_inflight = inflight
+        if item.id in inflight:
+            self._toast("Already queued")
+            return
+        inflight.add(item.id)
+
+        def work() -> None:
+            try:
+                result = post_bust_enhance(item, engine=engine)
+            except Exception:  # noqa: BLE001
+                result = IntegrationResult("offline", "PromptForge not answering")
+
+            def apply() -> bool:
+                inflight.discard(item.id)
+                self._toast(result.toast)
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(target=work, name="eagle-bust", daemon=True).start()
+
+    def queue_add_wardrobe_dialog(self) -> None:
+        """Ask for wardrobe Eagle id + engine, then enqueue apply-to-still."""
+        item = self._integrations_focus_item(still_only=True)
+        if item is None:
+            return
+
+        dialog = Adw.AlertDialog(
+            heading="Add wardrobe",
+            body="Wardrobe Eagle id (flat-lay / outfit sheet), then engine.",
+        )
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("Wardrobe Eagle id")
+        entry.set_hexpand(True)
+        entry.set_activates_default(True)
+        box.append(entry)
+
+        engines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        group: Gtk.CheckButton | None = None
+        buttons: dict[str, Gtk.CheckButton] = {}
+        for key, label in (
+            ("qwen", "Qwen (default)"),
+            ("krea2", "Krea 2"),
+            ("klein", "Flux Klein"),
+        ):
+            btn = Gtk.CheckButton(label=label)
+            if group is None:
+                group = btn
+            else:
+                btn.set_group(group)
+            if key == DEFAULT_WARDROBE_ENGINE:
+                btn.set_active(True)
+            engines.append(btn)
+            buttons[key] = btn
+        box.append(engines)
+        dialog.set_extra_child(box)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("queue", "Queue")
+        dialog.set_response_appearance("queue", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("queue")
+        dialog.set_close_response("cancel")
+
+        def on_response(_dialog, response: str) -> None:
+            if response != "queue":
+                return
+            ward_id = (entry.get_text() or "").strip()
+            if not ward_id:
+                self._toast("Wardrobe Eagle id required")
+                return
+            engine = DEFAULT_WARDROBE_ENGINE
+            for key, btn in buttons.items():
+                if btn.get_active():
+                    engine = key
+                    break
+            self._queue_wardrobe_apply(item, ward_id, engine)
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+
+        def focus_entry() -> bool:
+            entry.grab_focus()
+            return False
+
+        GLib.idle_add(focus_entry)
+
+    def _queue_wardrobe_apply(self, item: Item, wardrobe_eagle_id: str, engine: str) -> None:
+        inflight = getattr(self, "_wardrobe_inflight", None)
+        if inflight is None:
+            inflight = set()
+            self._wardrobe_inflight = inflight
+        key = f"{item.id}:{wardrobe_eagle_id}:{engine}"
+        if key in inflight:
+            self._toast("Already queued")
+            return
+        inflight.add(key)
+
+        def work() -> None:
+            try:
+                result = post_wardrobe_apply(
+                    item, wardrobe_eagle_id=wardrobe_eagle_id, engine=engine
+                )
+            except Exception:  # noqa: BLE001
+                result = IntegrationResult("offline", "PromptForge not answering")
+
+            def apply() -> bool:
+                inflight.discard(key)
+                self._toast(result.toast)
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(target=work, name="eagle-wardrobe", daemon=True).start()
 
     def _invalidate_thumb_cache_for(self, item: Item) -> None:
         """Drop cached textures for this item so the grid reloads after crop."""
