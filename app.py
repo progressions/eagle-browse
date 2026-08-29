@@ -4674,8 +4674,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if not btn.get_sensitive():
             self._toast("Select a still or video")
             return
-        # Gtk.MenuButton: set_active(True) shows the popover / menu.
-        btn.set_active(True)
+        # popup() anchors to the button; set_active(True) often opens at (0,0).
+        btn.popup()
 
     def _integrations_focus_item(
         self, *, still_only: bool = False, allow_video: bool = True
