@@ -834,7 +834,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             label=(
                 "Enter open (image inline · video/audio mpv) · Esc close viewer · "
                 "i/o video marks · x cut · p save frame · Shift+E add to editor · Ctrl+Shift+E new editor project · "
-                "t tags · f folders · gg / Shift+G jump · gs / gr set · Ctrl+A all · Del · Ctrl+Z · Super+W · ?"
+                "t tags · f folders · u integrations · gg / Shift+G jump · gs / gr set · Ctrl+A all · Del · Ctrl+Z · Super+W · ?"
             ),
             xalign=0,
         )
@@ -2393,6 +2393,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 ("Shift+Y  or  c", "Copy file path"),
                 ("s", "Stage marked assets"),
                 ("x", "Crop the focused image"),
+                ("u", "Integrations menu (then u upscale, b bust, w wardrobe)"),
                 ("r", "Reload the library"),
             )),
             ("Video viewer", (
@@ -4650,17 +4651,34 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._integrations_actions_ready = True
 
         menu = Gio.Menu()
-        menu.append("Upscale", "win.int-upscale")
-        menu.append("Enhance bust…", "win.int-bust")
-        menu.append("Add wardrobe…", "win.int-wardrobe")
+        # Mnemonics + visible key on each row after u opens the menu (#478).
+        for label, action, accel in (
+            ("_Upscale", "win.int-upscale", "u"),
+            ("Enhance _bust…", "win.int-bust", "b"),
+            ("Add _wardrobe…", "win.int-wardrobe", "w"),
+        ):
+            menu.append(f"{label}   {accel}", action)
         btn = Gtk.MenuButton(
             icon_name="view-fullscreen-symbolic",
             menu_model=menu,
         )
         btn.add_css_class("flat")
-        btn.set_tooltip_text("Integrations: upscale, enhance bust, add wardrobe")
+        btn.set_tooltip_text(
+            "Integrations (u): upscale, enhance bust, add wardrobe"
+        )
         btn.set_sensitive(False)
         return btn
+
+    def open_integrations_menu(self) -> None:
+        """Open the Integrations MenuButton popup (keyboard: u)."""
+        btn = getattr(self, "upscale_btn", None)
+        if btn is None:
+            return
+        if not btn.get_sensitive():
+            self._toast("Select a still or video")
+            return
+        # popup() anchors to the button; set_active(True) often opens at (0,0).
+        btn.popup()
 
     def _integrations_focus_item(
         self, *, still_only: bool = False, allow_video: bool = True
@@ -9018,6 +9036,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 return True
             if keyval in (Gdk.KEY_x, Gdk.KEY_X):
                 self.open_crop_dialog()
+                return True
+            if keyval in (Gdk.KEY_u, Gdk.KEY_U):
+                # Integrations: open menu; then u/b/w via menu mnemonics (#478).
+                self.open_integrations_menu()
                 return True
             if keyval == Gdk.KEY_F2:
                 self.open_rename_dialog()
