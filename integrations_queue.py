@@ -89,13 +89,18 @@ def _parse_body(raw: str) -> Any:
         return raw
 
 
-def _http_reason(status: int, body: Any) -> str:
+def _http_reason(status: int, body: Any, *, path: str = "") -> str:
     if isinstance(body, dict):
         err = body.get("error")
         if err:
             text = str(err).strip()
             if text:
                 return text[:160]
+    if status == 404 and path in (WARDROBE_PATH, BUST_PATH):
+        return (
+            f"PromptForge has no {path} yet — merge/redeploy "
+            "(or set PROMPTFORGE_URL to a preview that has it)"
+        )
     return f"PromptForge HTTP {status}"
 
 
@@ -120,6 +125,7 @@ def _post(url: str, payload: dict[str, Any], *, token: str | None) -> tuple[int,
 
 def _post_json(path: str, payload: dict[str, Any]) -> IntegrationResult:
     token = (os.environ.get("PROMPTFORGE_API_TOKEN") or "").strip() or None
+    last_http: IntegrationResult | None = None
     for base in candidate_bases():
         url = f"{base}{path}"
         try:
@@ -137,8 +143,15 @@ def _post_json(path: str, payload: dict[str, Any]) -> IntegrationResult:
             continue
         if 200 <= status < 300:
             return IntegrationResult(STATUS_OK, "Queued on Eric")
-        return IntegrationResult(STATUS_HTTP_ERROR, _http_reason(status, body))
-    return IntegrationResult(STATUS_OFFLINE, OFFLINE_TOAST)
+        # 404 on a host that is up but missing the route — try the next base
+        # (e.g. production :4000 vs preview with wardrobe/bust).
+        last_http = IntegrationResult(
+            STATUS_HTTP_ERROR, _http_reason(status, body, path=path)
+        )
+        if status == 404:
+            continue
+        return last_http
+    return last_http or IntegrationResult(STATUS_OFFLINE, OFFLINE_TOAST)
 
 
 def _file_missing(item: Any) -> bool:
