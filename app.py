@@ -57,8 +57,11 @@ from integrations_queue import (  # noqa: E402
     DEFAULT_BUST_ENGINE,
     DEFAULT_WARDROBE_ENGINE,
     IntegrationResult,
+    NO_PROMPT_LINKED_TOAST,
     post_bust_enhance,
     post_wardrobe_apply,
+    promptforge_build_url,
+    resolve_promptforge_history_id,
 )
 from upscale_queue import (  # noqa: E402
     UpscaleResult,
@@ -2393,7 +2396,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 ("Shift+Y  or  c", "Copy file path"),
                 ("s", "Stage marked assets"),
                 ("x", "Crop the focused image"),
-                ("u", "Integrations menu (then u upscale, b bust, w wardrobe)"),
+                ("u", "Integrations menu (then u upscale, b bust, w wardrobe, m make more)"),
                 ("r", "Reload the library"),
             )),
             ("Video viewer", (
@@ -4635,12 +4638,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
 
     def _build_integrations_menu_button(self) -> Gtk.MenuButton:
-        """Toolbar menu: Upscale / Enhance bust / Add wardrobe (Fizzy #477)."""
+        """Toolbar menu: Upscale / bust / wardrobe / Make more (Fizzy #477/#483)."""
         if not getattr(self, "_integrations_actions_ready", False):
             for name, handler in (
                 ("int-upscale", self.queue_upscale),
                 ("int-bust", self.queue_enhance_bust_dialog),
                 ("int-wardrobe", self.queue_add_wardrobe_dialog),
+                ("int-make-more", self.open_make_more_in_promptforge),
             ):
                 action = Gio.SimpleAction.new(name, None)
                 action.connect(
@@ -4656,6 +4660,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ("_Upscale", "win.int-upscale", "u"),
             ("Enhance _bust…", "win.int-bust", "b"),
             ("Add _wardrobe…", "win.int-wardrobe", "w"),
+            ("_Make more in PromptForge…", "win.int-make-more", "m"),
         ):
             menu.append(f"{label}   {accel}", action)
         btn = Gtk.MenuButton(
@@ -4664,7 +4669,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         btn.add_css_class("flat")
         btn.set_tooltip_text(
-            "Integrations (u): upscale, enhance bust, add wardrobe"
+            "Integrations (u): upscale, bust, wardrobe, make more"
         )
         btn.set_sensitive(False)
         return btn
@@ -4702,6 +4707,26 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast("File missing")
             return None
         return item
+
+    def open_make_more_in_promptforge(self) -> None:
+        """Open PromptForge Build for the focused item's linked history id (#483)."""
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        if len(items) != 1:
+            self._toast("Select one item")
+            return
+        item = items[0]
+        history_id = resolve_promptforge_history_id(item)
+        if history_id is None:
+            self._toast(NO_PROMPT_LINKED_TOAST)
+            return
+        url = promptforge_build_url(history_id)
+        if not _spawn_detached(["xdg-open", url]):
+            self._toast(f"Could not open {url}")
+            return
+        self._toast(f"Opened PromptForge Build #{history_id}")
 
     def queue_upscale(self) -> None:
         """Queue a PromptForge upscale for the focused still or video."""
@@ -9038,7 +9063,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.open_crop_dialog()
                 return True
             if keyval in (Gdk.KEY_u, Gdk.KEY_U):
-                # Integrations: open menu; then u/b/w via menu mnemonics (#478).
+                # Integrations: open menu; then u/b/w/m via menu mnemonics (#478/#483).
                 self.open_integrations_menu()
                 return True
             if keyval == Gdk.KEY_F2:
