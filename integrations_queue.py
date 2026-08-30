@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import urllib.error
 import urllib.request
@@ -28,11 +29,18 @@ TIMEOUT_S = 5.0
 WARDROBE_PATH = "/api/v1/wardrobe"
 BUST_PATH = "/api/v1/bust"
 OFFLINE_TOAST = "PromptForge not answering"
+NO_PROMPT_LINKED_TOAST = "No PromptForge prompt linked"
 
 BUST_ENGINES = ("klein", "qwen", "krea2")
 WARDROBE_ENGINES = ("qwen", "krea2", "klein")
 DEFAULT_BUST_ENGINE = "klein"
 DEFAULT_WARDROBE_ENGINE = "qwen"
+
+# Continuity stamps (#483): pf:<id> / pf-<id> tags, annotation, image-<id>- filename.
+_PF_TAG_RE = re.compile(r"^(?:pf:|pf-)(\d+)$", re.IGNORECASE)
+_PF_ANNOTATION_RE = re.compile(r"promptforge:(\d+)", re.IGNORECASE)
+# Same spirit as PromptForge QueueLive.parse_image_history_id.
+_IMAGE_HISTORY_RE = re.compile(r"(?:^|[/\\_])image-(\d+)(?:[-_.]|$)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -51,6 +59,65 @@ def _tag_set(item: Any) -> set[str]:
 
 def character_for(item: Any) -> str:
     return "Sofie" if TAG_SOFIE in _tag_set(item) else "Eunbi"
+
+
+def resolve_promptforge_history_id(item: Any) -> int | None:
+    """Resolve a PromptForge prompt_histories id from an Eagle library Item.
+
+    Order: pf:/pf- tag → annotation ``promptforge:<id>`` → ``image-<id>-`` in
+    name/path (QueueLive.parse_image_history_id spirit).
+    """
+    tags = list(getattr(item, "tags", None) or [])
+    tag_set = getattr(item, "tag_set", None)
+    if tag_set:
+        for t in tag_set:
+            if t not in tags:
+                tags.append(t)
+    for raw in tags:
+        m = _PF_TAG_RE.match(str(raw).strip())
+        if m:
+            return int(m.group(1))
+
+    annotation = getattr(item, "annotation", None) or ""
+    m = _PF_ANNOTATION_RE.search(str(annotation))
+    if m:
+        return int(m.group(1))
+
+    texts: list[str] = []
+    name = getattr(item, "name", None)
+    if name:
+        texts.append(str(name))
+    display = getattr(item, "display_name", None)
+    if display:
+        texts.append(str(display))
+    path = getattr(item, "path", None)
+    if path is not None:
+        texts.append(str(path))
+        try:
+            texts.append(path.name)
+        except Exception:  # noqa: BLE001
+            pass
+
+    seen: set[str] = set()
+    for text in texts:
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        m = _IMAGE_HISTORY_RE.search(text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def promptforge_base_url() -> str:
+    bases = candidate_bases()
+    if bases:
+        return bases[0]
+    return "http://promptforge.local:4000"
+
+
+def promptforge_build_url(history_id: int) -> str:
+    return f"{promptforge_base_url()}/build?id={int(history_id)}"
 
 
 def normalize_bust_engine(raw: str | None) -> str | None:
