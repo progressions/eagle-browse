@@ -554,8 +554,12 @@ class EagleLibrary:
         item = self.load_item(item_id)
         if item is None:
             return None
+        from promptforge_stamp import apply_stamp_to_item
         from sets import join_imported_by_name
 
+        # Idempotent: import_file usually stamped already; catches older paths.
+        apply_stamp_to_item(self, item)
+        item = self.items_by_id.get(item_id) or item
         join_imported_by_name(self, item)
         return self.items_by_id.get(item_id) or item
 

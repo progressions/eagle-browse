@@ -10,6 +10,7 @@ Human-readable tables by default; pass --json for machine-readable output.
   eagle-api group <source> <child>
   eagle-api crop <id> --aspect 9:16 --mode new
   eagle-api smart-folder create --name "Sofie videos 3+" --tag sofie --type video --rating-min 3
+  eagle-api backfill-pf --dry-run
 """
 
 from __future__ import annotations
@@ -458,6 +459,23 @@ environment:
     sub.add_parser("folders", parents=[shared], help="List categories (tree)")
     sub.add_parser("reload", parents=[shared], help="Reload library from disk")
 
+    bf = sub.add_parser(
+        "backfill-pf",
+        parents=[shared],
+        help="Add pf:<id> tags from image-<id>- filenames (Fizzy #482)",
+    )
+    bf.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would change; do not write",
+    )
+    bf.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Max items to stamp",
+    )
+
     sf = sub.add_parser("smart-folder", parents=[shared], help="Smart folders")
     sfs = sf.add_subparsers(dest="sf_cmd", required=True)
     sfs.add_parser("list", parents=[shared], help="List smart folders")
@@ -658,6 +676,26 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cmd == "tags":
             return out(api.list_tags(), _fmt_tags)
+
+        if args.cmd == "backfill-pf":
+            from backfill_pf_tags import backfill, resolve_library
+
+            library = resolve_library(args.library or None)
+            stats = backfill(
+                library,
+                dry_run=bool(args.dry_run),
+                limit=args.limit,
+            )
+            return out(
+                {"ok": stats.get("errors", 0) == 0, **stats},
+                lambda d: print(
+                    "summary: "
+                    f"scanned={d['scanned']} candidates={d['candidates']} "
+                    f"would_change={d['would_change']} updated={d['updated']} "
+                    f"skipped={d['skipped']} errors={d['errors']} "
+                    f"dry_run={bool(d['dry_run'])}"
+                ),
+            )
 
         if args.cmd == "folders":
             return out(api.list_folders(), _fmt_folders)
