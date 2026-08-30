@@ -1120,6 +1120,13 @@ def import_file(
                 "lastModified": now,
                 "palettes": [],
             }
+            # Build stills: image-<history_id>-… → pf:<id> + promptforge:<id> (#482)
+            try:
+                from promptforge_stamp import stamp_metadata
+
+                stamp_metadata(meta, name=name)
+            except Exception:  # noqa: BLE001
+                pass
             if kind == "video":
                 meta["duration"] = duration
                 meta["resolutionWidth"] = width
