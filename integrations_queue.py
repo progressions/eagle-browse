@@ -1,4 +1,4 @@
-"""Queue PromptForge integrations from Eagle Browse (upscale / bust / wardrobe)."""
+"""Queue PromptForge integrations from Eagle Browse (upscale / bust / wardrobe / edit)."""
 
 from __future__ import annotations
 
@@ -28,13 +28,17 @@ from upscale_queue import (  # noqa: F401 — re-export for callers
 TIMEOUT_S = 5.0
 WARDROBE_PATH = "/api/v1/wardrobe"
 BUST_PATH = "/api/v1/bust"
+EDIT_PATH = "/api/v1/edit"
 OFFLINE_TOAST = "PromptForge not answering"
 NO_PROMPT_LINKED_TOAST = "No PromptForge prompt linked"
 
 BUST_ENGINES = ("klein", "qwen", "krea2")
 WARDROBE_ENGINES = ("qwen", "krea2", "klein")
+# Edit API expects UI labels (PF may map flux→klein server-side).
+EDIT_ENGINES = ("qwen", "flux", "krea")
 DEFAULT_BUST_ENGINE = "klein"
 DEFAULT_WARDROBE_ENGINE = "qwen"
+DEFAULT_EDIT_ENGINE = "qwen"
 
 # Continuity stamps (#483): pf:<id> / pf-<id> tags, annotation, image-<id>- filename.
 _PF_TAG_RE = re.compile(r"^(?:pf:|pf-)(\d+)$", re.IGNORECASE)
@@ -146,6 +150,20 @@ def normalize_wardrobe_engine(raw: str | None) -> str | None:
     return aliases.get(key)
 
 
+def normalize_edit_engine(raw: str | None) -> str | None:
+    """Map edit engine to API labels: qwen | flux | krea."""
+    key = (raw or "").strip().lower()
+    aliases = {
+        "qwen": "qwen",
+        "flux": "flux",
+        "klein": "flux",
+        "flux-klein": "flux",
+        "krea": "krea",
+        "krea2": "krea",
+    }
+    return aliases.get(key)
+
+
 def _parse_body(raw: str) -> Any:
     raw = (raw or "").strip()
     if not raw:
@@ -163,7 +181,7 @@ def _http_reason(status: int, body: Any, *, path: str = "") -> str:
             text = str(err).strip()
             if text:
                 return text[:160]
-    if status == 404 and path in (WARDROBE_PATH, BUST_PATH):
+    if status == 404 and path in (WARDROBE_PATH, BUST_PATH, EDIT_PATH):
         return (
             f"PromptForge has no {path} yet — merge/redeploy "
             "(or set PROMPTFORGE_URL to a preview that has it)"
@@ -291,4 +309,36 @@ def post_wardrobe_apply(
     if result.status == STATUS_OK:
         label = {"klein": "Flux Klein", "qwen": "Qwen", "krea2": "Krea 2"}.get(eng, eng)
         return IntegrationResult(STATUS_OK, f"Queued wardrobe ({label}) on Eric")
+    return result
+
+
+def post_edit(
+    item: Any,
+    *,
+    prompt: str,
+    engine: str = DEFAULT_EDIT_ENGINE,
+) -> IntegrationResult:
+    """POST /api/v1/edit for the focused still (PromptForge edit queue, #503)."""
+    if not getattr(item, "is_image", False):
+        return IntegrationResult(STATUS_UNSUPPORTED, "Edit is for stills")
+    if _file_missing(item):
+        return IntegrationResult(STATUS_FILE_MISSING, "File missing")
+
+    text = (prompt or "").strip()
+    if not text:
+        return IntegrationResult(STATUS_UNSUPPORTED, "Edit prompt required")
+
+    eng = normalize_edit_engine(engine)
+    if eng is None:
+        return IntegrationResult(STATUS_UNSUPPORTED, "Unknown edit engine")
+
+    payload = {
+        "eagle_id": str(item.id),
+        "prompt": text,
+        "engine": eng,
+    }
+    result = _post_json(EDIT_PATH, payload)
+    if result.status == STATUS_OK:
+        label = {"qwen": "Qwen", "flux": "Flux", "krea": "Krea"}.get(eng, eng)
+        return IntegrationResult(STATUS_OK, f"Queued edit ({label}) on Eric")
     return result
