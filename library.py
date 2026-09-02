@@ -17,6 +17,23 @@ from write import canonicalize_tags
 class QueryCancelled(Exception):
     """Raised when a caller cancels an in-progress library query."""
 
+
+@dataclass(frozen=True, slots=True)
+class DurationBackfillBatch:
+    """One bounded backfill pass."""
+
+    written: list[tuple[str, float]]
+    probed: int
+    remaining: int
+
+
+# Startup duration backfill: probe outside the library write lock.
+DURATION_BACKFILL_LIMIT = 25
+DURATION_BACKFILL_TIME_BUDGET_S = 20.0
+DURATION_PROBE_MAX_FAILURES = 5
+DURATION_PROBE_BASE_BACKOFF_S = 30.0
+_DURATION_SKIP_STATE = Path.home() / ".local" / "state" / "eagle-browse" / "duration-probe-skips.json"
+
 VIDEO_EXTS = frozenset({"mp4", "mov", "webm", "mkv", "m4v", "avi", "wmv", "flv"})
 AUDIO_EXTS = frozenset({"mp3", "wav", "flac", "aac", "m4a", "ogg", "wma", "aiff", "aif"})
 IMAGE_EXTS = frozenset(
@@ -439,6 +456,8 @@ class EagleLibrary:
         self._user_tags_cache: list[str] | None = None
         self._cache_generation = 0
         self._lock = threading.Lock()
+        # id -> (failure_count, next_eligible_monotonic)
+        self._duration_probe_failures: dict[str, tuple[int, float]] = {}
 
     def _clear_derived_caches(self) -> None:
         """Drop derived caches and bump generation. Caller must hold ``_lock``."""
@@ -799,43 +818,187 @@ class EagleLibrary:
             return sum(1 for it in self.items if not it.is_deleted and not it.folders)
         raise ValueError(f"unknown special view: {view}")
 
-    def backfill_missing_durations(self) -> list[tuple[str, float]]:
-        """ffprobe audio/video items that have no duration; write it onto disk.
+    def _duration_skip_key(self) -> str:
+        try:
+            return str(self.root.resolve())
+        except OSError:
+            return str(self.root)
 
-        Does not bump Eagle modificationTime. Returns (id, seconds) written.
+    def _load_duration_skips(self) -> set[str]:
+        try:
+            raw = json.loads(_DURATION_SKIP_STATE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return set()
+        if not isinstance(raw, dict):
+            return set()
+        entry = raw.get(self._duration_skip_key())
+        if not isinstance(entry, dict):
+            return set()
+        return {str(k) for k, v in entry.items() if v}
+
+    def _persist_duration_skip(self, item_id: str) -> None:
+        key = self._duration_skip_key()
+        try:
+            _DURATION_SKIP_STATE.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                raw = json.loads(_DURATION_SKIP_STATE.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, TypeError):
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            bucket = raw.get(key)
+            if not isinstance(bucket, dict):
+                bucket = {}
+            bucket[item_id] = {"skipped_at": time.time()}
+            raw[key] = bucket
+            _DURATION_SKIP_STATE.write_text(
+                json.dumps(raw, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _duration_probe_eligible(
+        self, item_id: str, *, now_mono: float, skipped: set[str]
+    ) -> bool:
+        if item_id in skipped:
+            return False
+        state = self._duration_probe_failures.get(item_id)
+        if state is None:
+            return True
+        _count, next_ok = state
+        return now_mono >= next_ok
+
+    def _record_duration_probe_failure(self, item_id: str, *, now_mono: float) -> None:
+        count, _ = self._duration_probe_failures.get(item_id, (0, 0.0))
+        count += 1
+        if count >= DURATION_PROBE_MAX_FAILURES:
+            self._duration_probe_failures[item_id] = (count, float("inf"))
+            self._persist_duration_skip(item_id)
+            return
+        backoff = DURATION_PROBE_BASE_BACKOFF_S * (2 ** (count - 1))
+        self._duration_probe_failures[item_id] = (count, now_mono + backoff)
+
+    def _clear_duration_probe_failure(self, item_id: str) -> None:
+        self._duration_probe_failures.pop(item_id, None)
+
+    def backfill_missing_durations(
+        self,
+        *,
+        limit: int | None = DURATION_BACKFILL_LIMIT,
+        time_budget_s: float | None = DURATION_BACKFILL_TIME_BUDGET_S,
+        probe_fn: Callable[[Path], tuple[int, int, float]] | None = None,
+        monotonic: Callable[[], float] | None = None,
+        lock_hold_times: list[float] | None = None,
+    ) -> DurationBackfillBatch:
+        """ffprobe audio/video items that have no duration; write onto disk.
+
+        Probing runs **outside** the shared library write lock. The lock is
+        taken only for a short metadata-write batch with per-item revalidation.
+
+        Does not bump Eagle modificationTime. Bounded by ``limit`` and
+        ``time_budget_s`` so callers can resume across passes. Repeated probe
+        failures use in-process backoff, then a durable skip list.
         """
         from import_media import _video_meta
         from write import WriteError, write_item_duration, write_session
 
-        missing: list[Item] = []
-        for it in self.items:
-            if it.is_deleted:
+        probe = probe_fn or _video_meta
+        now_mono = (monotonic or time.monotonic)()
+        skipped = self._load_duration_skips()
+
+        with self._lock:
+            candidates = [
+                it
+                for it in self.items
+                if not it.is_deleted
+                and (it.is_video or it.is_audio)
+                and not it.duration
+                and it.item_dir is not None
+                and it.path.is_file()
+                and self._duration_probe_eligible(
+                    it.id, now_mono=now_mono, skipped=skipped
+                )
+            ]
+
+        if not candidates:
+            return DurationBackfillBatch(written=[], probed=0, remaining=0)
+
+        to_probe = candidates if limit is None else candidates[: max(0, int(limit))]
+        probed_ok: list[tuple[str, Path, Path, float]] = []
+        probed = 0
+        deadline = (
+            None
+            if time_budget_s is None
+            else now_mono + max(0.0, float(time_budget_s))
+        )
+
+        for it in to_probe:
+            if deadline is not None and (monotonic or time.monotonic)() >= deadline:
+                break
+            probed += 1
+            try:
+                _w, _h, duration = probe(it.path)
+            except Exception:  # noqa: BLE001
+                duration = 0.0
+            if duration <= 0:
+                self._record_duration_probe_failure(
+                    it.id, now_mono=(monotonic or time.monotonic)()
+                )
                 continue
-            if not (it.is_video or it.is_audio):
-                continue
-            if it.duration:
-                continue
-            if it.item_dir is None or not it.path.is_file():
-                continue
-            missing.append(it)
-        if not missing:
-            return []
+            probed_ok.append((it.id, it.item_dir, it.path, float(duration)))
+
         written: list[tuple[str, float]] = []
-        try:
-            with write_session(self.root):
-                for it in missing:
-                    _w, _h, duration = _video_meta(it.path)
-                    if duration <= 0:
-                        continue
-                    try:
-                        write_item_duration(it.item_dir, duration)
-                    except WriteError:
-                        continue
-                    it.duration = duration
-                    written.append((it.id, duration))
-        except WriteError:
-            return written
-        return written
+        if probed_ok:
+            hold_start = (monotonic or time.monotonic)()
+            try:
+                with write_session(self.root):
+                    for item_id, item_dir, path, duration in probed_ok:
+                        current = self.items_by_id.get(item_id)
+                        if current is None or current.is_deleted:
+                            continue
+                        if current.duration:
+                            self._clear_duration_probe_failure(item_id)
+                            continue
+                        if current.item_dir != item_dir or current.path != path:
+                            continue
+                        if not item_dir.is_dir() or not path.is_file():
+                            continue
+                        try:
+                            write_item_duration(item_dir, duration)
+                        except WriteError:
+                            self._record_duration_probe_failure(
+                                item_id,
+                                now_mono=(monotonic or time.monotonic)(),
+                            )
+                            continue
+                        current.duration = duration
+                        self._clear_duration_probe_failure(item_id)
+                        written.append((item_id, duration))
+            except WriteError:
+                pass
+            if lock_hold_times is not None:
+                lock_hold_times.append((monotonic or time.monotonic)() - hold_start)
+
+        # Recompute remaining eligible after this pass (backoff/skips applied).
+        now_after = (monotonic or time.monotonic)()
+        skipped_after = self._load_duration_skips()
+        with self._lock:
+            remaining = sum(
+                1
+                for it in self.items
+                if not it.is_deleted
+                and (it.is_video or it.is_audio)
+                and not it.duration
+                and it.item_dir is not None
+                and it.path.is_file()
+                and self._duration_probe_eligible(
+                    it.id, now_mono=now_after, skipped=skipped_after
+                )
+            )
+        return DurationBackfillBatch(
+            written=written, probed=probed, remaining=remaining
+        )
 
     def items_in_set(self, tag: str) -> list[Item]:
         """Non-deleted items that carry this set: tag."""
