@@ -15,8 +15,6 @@ authors = [{name = "Isaac Priestley"}]
 eagle-browse = "app:main"
 eagle-api = "cli:main"
 eagle-inbox-watch = "inbox_watch:main"
-eagle-phone-index = "build_phone_index:main"
-phone-browse = "phone_server:main"
 
 [tool.setuptools]
 py-modules = [
@@ -24,7 +22,6 @@ py-modules = [
   "app",
   "audio_crop",
   "backfill_pf_tags",
-  "build_phone_index",
   "cli",
   "config",
   "crop",
@@ -34,7 +31,6 @@ py-modules = [
   "integrations_queue",
   "latest_job",
   "library",
-  "phone_server",
   "picker",
   "pixbuf_io",
   "promptforge_stamp",
@@ -50,11 +46,6 @@ py-modules = [
 ]
 
 [tool.setuptools.data-files]
-"share/eagle-browse/phone_web" = [
-  "phone_web/app.js",
-  "phone_web/index.html",
-  "phone_web/styles.css",
-]
 "share/eagle-browse/sounds" = [
   "sounds/duplicate.wav",
   "sounds/error.wav",

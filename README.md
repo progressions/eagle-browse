@@ -17,11 +17,10 @@ cd eagle-browse
 makepkg -si
 ```
 
-The package installs `/usr/bin/eagle-browse`, `eagle-api`, `phone-browse`,
-`eagle-phone-index`, and `eagle-inbox-watch`, plus the desktop entry, phone UI,
-sounds, and user systemd units. Pacman installs the required Python, GTK,
-libadwaita, GStreamer, and FFmpeg dependencies. Optional integrations are
-listed by `pacman -Qi eagle-browse`.
+The package installs `/usr/bin/eagle-browse`, `eagle-api`, and
+`eagle-inbox-watch`, plus the desktop entry, sounds, and user systemd units.
+Pacman installs the required Python, GTK, libadwaita, GStreamer, and FFmpeg
+dependencies. Optional integrations are listed by `pacman -Qi eagle-browse`.
 
 Installed commands do not run Git or update themselves. Package upgrades own
 application updates.
@@ -35,7 +34,7 @@ entry if they exist:
 unlink ~/.local/bin/eagle-browse
 unlink ~/.local/bin/eagle-api
 unlink ~/.local/bin/eagle-inbox-watch
-unlink ~/.local/bin/phone-browse
+unlink ~/.local/bin/phone-browse   # obsolete; phone browse left this package
 rm ~/.local/share/applications/eagle-browse.desktop
 ```
 
@@ -50,16 +49,16 @@ The package installs user-unit templates. Machine overrides can be placed in
 ```bash
 EAGLE_LIBRARY=/path/to/Eunbi.library
 EAGLE_INBOX=/path/to/intake
-EAGLE_PHONE_MDNS=eagle
 ```
 
-Enable only the services appropriate for that machine. The inbox watcher must
-run on one machine only.
+Enable the inbox watcher only on the machine that should import into the
+library (one machine only).
 
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now eagle-inbox-watch.service
-systemctl --user enable --now eagle-phone-browse.service
+# If an older package left phone browse installed:
+#   systemctl --user disable --now eagle-phone-browse.service
 ```
 
 ### Upgrade, downgrade, and uninstall
@@ -449,24 +448,9 @@ Add a desktop entry or Hyprland bind if you want Super+key access:
 bind = SUPER SHIFT, E, exec, /usr/bin/eagle-browse
 ```
 
-## Phone browse (LAN)
+## Phone browse
 
-Browse the library on a phone **on the same Wi‑Fi** — no App Store, no deploy, no Dropbox OAuth.
-
-```bash
-# optional: build/refresh index (~few seconds, writes phone-index.json in the library)
-eagle-phone-index
-
-# serve UI + media on all interfaces (port 8787)
-phone-browse
-```
-
-On the phone open **`http://eagle.local:8787/`** (mDNS via Avahi; printed at startup).
-IP fallback is also printed if `.local` fails. Override name with `--mdns-name other` or `EAGLE_PHONE_MDNS`.
-
-- Filter chips: **Eunbi** / **Sofie** (folder **or** tag)
-- Drawer: **smart folders** (same rules as desktop Eagle Browse), folder tree, top tags
-- Thumbnails and full media served from the local `*.library` path
-- **Rebuild index** in the drawer after bulk tagging (also refreshes smart-folder rules)
-
-`phone-index.json` is also what a future Dropbox-hosted web app can download instead of scanning every item.
+LAN phone browse is **no longer part of this package**. Use the separate phone
+app. Older installs may still have `/usr/bin/phone-browse` and
+`eagle-phone-browse.service` until you upgrade past the release that removed
+them; disable that unit if it is still running.

@@ -19,7 +19,6 @@ depends=(
 )
 makedepends=('git' 'python-build' 'python-installer' 'python-setuptools' 'python-wheel')
 optdepends=(
-  'avahi: phone-browse mDNS publication'
   'clip-editor: send selected video or audio to Clip Editor'
   'imagemagick: image thumbnail and crop fallback'
   'imv: external image preview'
@@ -64,8 +63,6 @@ package() {
     "$pkgdir/usr/share/applications/eagle-browse.desktop"
   install -Dm644 eagle-inbox-watch.service \
     "$pkgdir/usr/lib/systemd/user/eagle-inbox-watch.service"
-  install -Dm644 eagle-phone-browse.service \
-    "$pkgdir/usr/lib/systemd/user/eagle-phone-browse.service"
   install -Dm644 config.toml.example \
     "$pkgdir/usr/share/doc/eagle-browse/config.toml.example"
   install -Dm644 docs/API.md docs/SMART_FOLDERS.md \

@@ -38,7 +38,7 @@ eagle_browse_self_update() {
     return 0
   fi
 
-  # Serialize concurrent starts (phone-browse + inbox-watch at login).
+  # Serialize concurrent starts (GUI + inbox-watch at login).
   # Release the lock on every function return so the long-lived python process
   # does not hold it for hours.
   local lock="$ROOT/.update.lock"
