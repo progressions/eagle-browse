@@ -20,9 +20,9 @@ class InstalledDataTest(unittest.TestCase):
     def test_data_prefers_source_checkout_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            source = root / "source/phone_web"
+            source = root / "source/sounds"
             source.mkdir(parents=True)
-            selected = data_dir("phone_web", module_dir=source.parent, prefix=root)
+            selected = data_dir("sounds", module_dir=source.parent, prefix=root)
             self.assertEqual(selected, source)
 
     def test_data_directory_can_be_overridden(self) -> None:
