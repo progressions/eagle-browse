@@ -74,7 +74,11 @@ from upscale_queue import (  # noqa: E402
     already_reason,
     post_upscale,
 )
-from thumb_cache import DEFAULT_BYTE_BUDGET, ThumbTextureCache  # noqa: E402
+from thumb_cache import (  # noqa: E402
+    DEFAULT_BYTE_BUDGET,
+    ThumbTextureCache,
+    best_reuse_size,
+)
 from write import INBOX_SIGNAL_FILENAME  # noqa: E402
 
 # Override with EAGLE_BROWSE_APP_ID so a worktree can run beside the packaged app
@@ -203,6 +207,8 @@ _thumb_inflight: set[str] = set()
 # Waiters for an in-flight key: (list_item, gen)
 _thumb_waiters: dict[str, list[tuple[object, int]]] = {}
 _thumb_lock = threading.Lock()
+# Inspector preview: at most one decode in flight; pending is overwritten on navigate.
+_insp_preview_lock = threading.Lock()
 
 
 def thumb_cache_metrics() -> dict[str, int]:
@@ -353,6 +359,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._scope_text = "all"
         self._thumb_size = THUMB_SIZE_DEFAULT
         self._thumb_zoom_reclaim_source = 0
+        # Inspector preview generation + coalesced off-thread decode (#523)
+        self._insp_preview_gen = 0
+        self._insp_preview_pending: tuple[str, int, int] | None = None
+        self._insp_preview_inflight = False
         # Sort key id from SORT_OPTIONS (default: newest added first)
         self._sort_key = "added_desc"
         # Smart-folder id → last known item count for sidebar "(N)" labels
@@ -1525,22 +1535,109 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.inspector_sidebar = wrap
         return wrap
 
+    def _thumb_sizes_for_reuse(self) -> list[int]:
+        """Zoom levels to probe in the grid thumb cache (largest first)."""
+        sizes = set(
+            range(THUMB_SIZE_MAX, THUMB_SIZE_MIN - 1, -THUMB_SIZE_STEP)
+        )
+        sizes.add(int(self._thumb_size))
+        sizes.add(THUMB_SIZE_DEFAULT)
+        return sorted(sizes, reverse=True)
+
+    def _reuse_grid_thumb_texture(
+        self, path: str, need: int
+    ) -> Gdk.Texture | None:
+        """Return a cached grid thumb if any decoded size is >= *need*."""
+        sizes = self._thumb_sizes_for_reuse()
+        if best_reuse_size(need, sizes) is None:
+            return None
+        # Prefer current zoom when it qualifies; otherwise try larger sizes first.
+        order: list[int] = []
+        if self._thumb_size >= need:
+            order.append(int(self._thumb_size))
+        for s in sizes:
+            if s >= need and s not in order:
+                order.append(s)
+        with _thumb_lock:
+            for size in order:
+                cached = _thumb_cache.get(_thumb_cache_key(path, size))
+                if cached is not None:
+                    return cached
+        return None
+
     def _set_inspector_preview(self, path: str | None) -> None:
         """Load inspector thumbnail scaled to the fixed preview box.
 
         Full-resolution textures make Gtk.Picture report a huge natural size,
         which expands the inspector and gets clipped on Hyprland fractional
         scale (surface wider than the visible client).
+
+        Decode runs off the GTK thread (#523). When the grid thumb cache
+        already holds a large enough texture, reuse it and skip I/O.
         """
+        self._insp_preview_gen += 1
+        gen = self._insp_preview_gen
         if not path:
             self.insp_picture.set_paintable(None)
             return
         size = int(getattr(self, "_insp_preview_px", 180) or 180)
-        pix = _pixbuf_from_path(path, size, size)
-        if pix is None:
-            self.insp_picture.set_paintable(None)
+
+        reused = self._reuse_grid_thumb_texture(path, size)
+        if reused is not None:
+            self.insp_picture.set_paintable(reused)
             return
-        self.insp_picture.set_paintable(Gdk.Texture.new_for_pixbuf(pix))
+
+        # No reusable grid thumb — clear so the prior asset is not shown under
+        # a new selection while decode runs. Rapid nav coalesces to one job.
+        self.insp_picture.set_paintable(None)
+        with _insp_preview_lock:
+            self._insp_preview_pending = (path, gen, size)
+            if self._insp_preview_inflight:
+                return
+            self._insp_preview_inflight = True
+
+        def work() -> None:
+            while True:
+                with _insp_preview_lock:
+                    job = self._insp_preview_pending
+                    self._insp_preview_pending = None
+                    if job is None:
+                        self._insp_preview_inflight = False
+                        return
+                job_path, job_gen, job_size = job
+                if job_gen != self._insp_preview_gen:
+                    continue
+                # Prefer a grid thumb that landed while we waited.
+                reused_tex = self._reuse_grid_thumb_texture(job_path, job_size)
+                pix = None
+                if reused_tex is None:
+                    pix = _pixbuf_from_path(job_path, job_size, job_size)
+
+                def apply(
+                    g: int = job_gen,
+                    texture: Gdk.Texture | None = reused_tex,
+                    pb: GdkPixbuf.Pixbuf | None = pix,
+                ) -> bool:
+                    if g != self._insp_preview_gen:
+                        return False
+                    if texture is not None:
+                        self.insp_picture.set_paintable(texture)
+                    elif pb is not None:
+                        self.insp_picture.set_paintable(
+                            Gdk.Texture.new_for_pixbuf(pb)
+                        )
+                    else:
+                        self.insp_picture.set_paintable(None)
+                    return False
+
+                GLib.idle_add(apply)
+
+        try:
+            _thumb_executor.submit(work)
+        except RuntimeError:
+            with _insp_preview_lock:
+                self._insp_preview_inflight = False
+                self._insp_preview_pending = None
 
     @staticmethod
     def _fmt_size(n: int) -> str:
@@ -1558,6 +1655,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return f"{n / (1024 * 1024 * 1024):.2f} GB"
 
     def _inspector_empty(self) -> None:
+        # Invalidate any in-flight inspector decode for a prior selection.
+        self._insp_preview_gen += 1
         self.insp_title.set_text("No selection")
         self.insp_dims.set_text("")
         self.insp_subtitle.set_text("Select an asset in the grid")
