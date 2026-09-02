@@ -437,12 +437,15 @@ class EagleLibrary:
         self._query_cache: dict[tuple, list[Item]] = {}
         self._all_tags_cache: list[str] | None = None
         self._user_tags_cache: list[str] | None = None
+        self._cache_generation = 0
         self._lock = threading.Lock()
 
     def _clear_derived_caches(self) -> None:
+        """Drop derived caches and bump generation. Caller must hold ``_lock``."""
         self._query_cache.clear()
         self._all_tags_cache = None
         self._user_tags_cache = None
+        self._cache_generation += 1
 
     def load(self) -> None:
         if not self.root.is_dir():
@@ -656,6 +659,7 @@ class EagleLibrary:
             if cached is not None:
                 return cached
             items_snapshot = self.items[:]
+            cache_generation = self._cache_generation
 
         folder_ids: set[str] | None = None
         if folder_id:
@@ -688,7 +692,10 @@ class EagleLibrary:
                     pool = pool[:limit]
                 check_cancelled()
                 with self._lock:
-                    if len(self._query_cache) < 256:
+                    if (
+                        cache_generation == self._cache_generation
+                        and len(self._query_cache) < 256
+                    ):
                         self._query_cache[cache_key] = pool
                 return pool
             pool = items_snapshot
@@ -728,7 +735,10 @@ class EagleLibrary:
         if not tokens:
             check_cancelled()
             with self._lock:
-                if len(self._query_cache) < 256:
+                if (
+                    cache_generation == self._cache_generation
+                    and len(self._query_cache) < 256
+                ):
                     self._query_cache[cache_key] = results
         return results
 
@@ -760,12 +770,16 @@ class EagleLibrary:
 
     def invalidate_smart_folder_cache(self, smart_folder_id: str | None = None) -> None:
         """Drop cached query results for one smart folder, or all if None."""
-        if smart_folder_id is None:
-            self._query_cache.clear()
-            return
-        self._query_cache = {
-            k: v for k, v in self._query_cache.items() if k[1] != smart_folder_id
-        }
+        with self._lock:
+            if smart_folder_id is None:
+                self._query_cache.clear()
+            else:
+                self._query_cache = {
+                    k: v
+                    for k, v in self._query_cache.items()
+                    if k[1] != smart_folder_id
+                }
+            self._cache_generation += 1
 
     def count_smart_folder(
         self, smart_folder_id: str, *, fresh: bool = False
@@ -832,7 +846,8 @@ class EagleLibrary:
     # ── Writes (tags, ratings) ────────────────────────────────────────
 
     def _invalidate_caches(self) -> None:
-        self._clear_derived_caches()
+        with self._lock:
+            self._clear_derived_caches()
 
     def _refresh_item_derived(self, item: Item) -> None:
         item.tags = canonicalize_tags(item.tags)
