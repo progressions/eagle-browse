@@ -5082,16 +5082,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         dialog.connect("response", on_response)
 
         def on_key(_c, keyval: int, _kc: int, state: Gdk.ModifierType) -> bool:
+            # Ctrl+Enter / Ctrl+KP_Enter submits (plain Enter inserts a newline in TextView)
             ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
             if ctrl and keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
                 do_submit(close=True)
                 return True
             return False
 
+        # Capture on the dialog so the shortcut works while the TextView has focus
+        # (same pattern as the notes editor window).
         key = Gtk.EventControllerKey()
         key.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         key.connect("key-pressed", on_key)
-        text.add_controller(key)
+        dialog.add_controller(key)
 
         dialog.present(self)
 
