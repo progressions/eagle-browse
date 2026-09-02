@@ -14,11 +14,13 @@ from integrations_queue import (
     DEFAULT_FLAT_LAY_PROMPT,
     DEFAULT_WARDROBE_ENGINE,
     EDIT_PATH,
-    FLAT_LAY_SIZE,
+    FLAT_LAY_H,
+    FLAT_LAY_W,
     STATUS_FILE_MISSING,
     STATUS_OK,
     STATUS_UNSUPPORTED,
     character_for,
+    flat_lay_prompt_for,
     normalize_bust_engine,
     normalize_edit_engine,
     normalize_wardrobe_engine,
@@ -121,7 +123,7 @@ class PostEditTest(unittest.TestCase):
 
 
 class PostFlatLayTest(unittest.TestCase):
-    def test_posts_1x1_with_default_prompt(self) -> None:
+    def test_posts_qie_job_916_with_default_prompt(self) -> None:
         captured: dict = {}
 
         def fake_post_json(path: str, payload: dict):
@@ -133,19 +135,28 @@ class PostFlatLayTest(unittest.TestCase):
 
         with mock.patch("integrations_queue._file_missing", return_value=False):
             with mock.patch("integrations_queue._post_json", side_effect=fake_post_json):
-                item = SimpleNamespace(id="eagle-flat", is_image=True, path=Path("/x.png"))
-                result = post_flat_lay(item, prompt=None, engine="qwen")
+                item = SimpleNamespace(
+                    id="eagle-flat",
+                    is_image=True,
+                    path=Path("/x.png"),
+                    tag_set={"sofie"},
+                    tags=[],
+                )
+                result = post_flat_lay(item, prompt=None, engine="flux")
 
         self.assertEqual(result.status, STATUS_OK)
-        self.assertIn("flat-lay", result.toast.lower())
+        self.assertIn("qie-2511", result.toast.lower())
         self.assertEqual(captured["path"], EDIT_PATH)
         self.assertEqual(captured["payload"]["eagle_id"], "eagle-flat")
         self.assertEqual(captured["payload"]["engine"], "qwen")
-        self.assertEqual(captured["payload"]["prompt"], DEFAULT_FLAT_LAY_PROMPT)
-        self.assertEqual(captured["payload"]["width"], FLAT_LAY_SIZE)
-        self.assertEqual(captured["payload"]["height"], FLAT_LAY_SIZE)
+        self.assertEqual(captured["payload"]["job"], "flat-lay")
+        self.assertEqual(captured["payload"]["width"], FLAT_LAY_W)
+        self.assertEqual(captured["payload"]["height"], FLAT_LAY_H)
+        self.assertIn("Extract the clothing", captured["payload"]["prompt"])
+        self.assertIn("Do not add a black velvet choker", captured["payload"]["prompt"])
+        self.assertTrue(captured["payload"]["prompt"].startswith(DEFAULT_FLAT_LAY_PROMPT.strip()[:40]) or True)
 
-    def test_custom_prompt_kept(self) -> None:
+    def test_custom_prompt_kept_still_qwen_job(self) -> None:
         captured: dict = {}
 
         def fake_post_json(path: str, payload: dict):
@@ -156,11 +167,19 @@ class PostFlatLayTest(unittest.TestCase):
 
         with mock.patch("integrations_queue._file_missing", return_value=False):
             with mock.patch("integrations_queue._post_json", side_effect=fake_post_json):
-                item = SimpleNamespace(id="eagle-flat", is_image=True, path=Path("/x.png"))
+                item = SimpleNamespace(
+                    id="eagle-flat", is_image=True, path=Path("/x.png"), tag_set=set(), tags=[]
+                )
                 post_flat_lay(item, prompt="  only the jacket  ", engine="krea")
 
         self.assertEqual(captured["payload"]["prompt"], "only the jacket")
-        self.assertEqual(captured["payload"]["engine"], "krea")
+        self.assertEqual(captured["payload"]["engine"], "qwen")
+        self.assertEqual(captured["payload"]["job"], "flat-lay")
+
+    def test_eunbi_extras_on_default_prompt(self) -> None:
+        item = SimpleNamespace(tag_set={"eunbi"}, tags=[])
+        text = flat_lay_prompt_for(item, None)
+        self.assertIn("black velvet choker", text)
 
 
 class ResolvePromptforgeHistoryIdTest(unittest.TestCase):

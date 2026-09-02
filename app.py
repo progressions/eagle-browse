@@ -58,10 +58,10 @@ from sounds import mark_gui_running, mark_gui_stopped, play_sound  # noqa: E402
 from integrations_queue import (  # noqa: E402
     DEFAULT_BUST_ENGINE,
     DEFAULT_EDIT_ENGINE,
-    DEFAULT_FLAT_LAY_PROMPT,
     DEFAULT_WARDROBE_ENGINE,
     IntegrationResult,
     NO_PROMPT_LINKED_TOAST,
+    flat_lay_prompt_for,
     post_bust_enhance,
     post_edit,
     post_flat_lay,
@@ -5120,10 +5120,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._prompt_engine_dialog(
             heading="Flat-lay",
             body=(
-                "Extract the outfit as a flat-lay sheet (1:1). "
+                "Qwen + QIE-2511 Extract Outfit → 9:16 wood wardrobe sheet. "
                 "Default prompt is fine — edit if needed. Queues on PromptForge."
             ),
-            initial_prompt=DEFAULT_FLAT_LAY_PROMPT,
+            initial_prompt=flat_lay_prompt_for(item, None),
             require_prompt=False,
             empty_toast="",
             on_submit=on_submit,
