@@ -32,6 +32,7 @@ py-modules = [
   "import_media",
   "inbox_watch",
   "integrations_queue",
+  "latest_job",
   "library",
   "phone_server",
   "picker",
