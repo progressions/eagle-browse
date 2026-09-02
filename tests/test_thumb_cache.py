@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from thumb_cache import ThumbTextureCache, estimate_texture_bytes
+from thumb_cache import (
+    ThumbTextureCache,
+    best_reuse_size,
+    estimate_texture_bytes,
+)
 
 
 class ThumbTextureCacheTest(unittest.TestCase):
@@ -73,3 +77,9 @@ class ThumbTextureCacheTest(unittest.TestCase):
         self.assertEqual(cache.bytes, before)
         self.assertEqual(cache.get("k"), "new")
         self.assertEqual(len(cache), 1)
+
+    def test_best_reuse_size_picks_largest_sufficient(self) -> None:
+        self.assertEqual(best_reuse_size(180, [72, 160, 192, 360]), 360)
+        self.assertEqual(best_reuse_size(180, [72, 160]), None)
+        self.assertEqual(best_reuse_size(160, [160]), 160)
+        self.assertIsNone(best_reuse_size(180, []))

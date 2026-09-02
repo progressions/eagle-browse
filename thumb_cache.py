@@ -18,6 +18,13 @@ def estimate_texture_bytes(edge_px: int) -> int:
     return side * side * 4
 
 
+def best_reuse_size(need: int, available: list[int] | tuple[int, ...]) -> int | None:
+    """Largest cached thumb edge that is >= *need*, or None if none suffice."""
+    need_i = int(need)
+    ok = [int(s) for s in available if int(s) >= need_i]
+    return max(ok) if ok else None
+
+
 @dataclass(frozen=True, slots=True)
 class ThumbCacheMetrics:
     entries: int
