@@ -88,6 +88,31 @@ class DurationBackfillTest(unittest.TestCase):
         # Backfill must not bump Eagle modificationTime.
         self.assertEqual(data["modificationTime"], 1)
 
+    def test_cancelled_stops_further_probes(self) -> None:
+        items = [_make_media_item(self.root, f"vid{i}") for i in range(4)]
+        self.library.items = items
+        self.library.items_by_id = {it.id: it for it in items}
+        probed: list[str] = []
+        stop = threading.Event()
+
+        def probe(path: Path) -> tuple[int, int, float]:
+            probed.append(path.stem)
+            if len(probed) >= 2:
+                stop.set()
+            return 0, 0, 9.0
+
+        batch = self.library.backfill_missing_durations(
+            limit=10,
+            time_budget_s=None,
+            probe_fn=probe,
+            cancelled=stop.is_set,
+        )
+
+        self.assertEqual(len(probed), 2)
+        self.assertEqual(len(batch.written), 2)
+        self.assertTrue(all(it.duration == 9.0 for it in items[:2]))
+        self.assertTrue(all(not it.duration for it in items[2:]))
+
     def test_lock_hold_time_excludes_probe_cost(self) -> None:
         items = [_make_media_item(self.root, f"vid{i}") for i in range(3)]
         self.library.items = items

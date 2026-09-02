@@ -890,6 +890,7 @@ class EagleLibrary:
         probe_fn: Callable[[Path], tuple[int, int, float]] | None = None,
         monotonic: Callable[[], float] | None = None,
         lock_hold_times: list[float] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> DurationBackfillBatch:
         """ffprobe audio/video items that have no duration; write onto disk.
 
@@ -934,6 +935,8 @@ class EagleLibrary:
         )
 
         for it in to_probe:
+            if cancelled is not None and cancelled():
+                break
             if deadline is not None and (monotonic or time.monotonic)() >= deadline:
                 break
             probed += 1
@@ -949,6 +952,7 @@ class EagleLibrary:
             probed_ok.append((it.id, it.item_dir, it.path, float(duration)))
 
         written: list[tuple[str, float]] = []
+        # Finish a short write batch for probes already done, even if cancelled.
         if probed_ok:
             hold_start = (monotonic or time.monotonic)()
             try:
