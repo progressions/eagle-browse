@@ -74,6 +74,7 @@ from upscale_queue import (  # noqa: E402
     already_reason,
     post_upscale,
 )
+from shutdown_gate import wrap_idle_callback  # noqa: E402
 from thumb_cache import (  # noqa: E402
     DEFAULT_BYTE_BUDGET,
     ThumbTextureCache,
@@ -353,6 +354,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._insp_pane_w = 260
         self._query_gen = 0  # bump to cancel stale background queries
         self._query_worker = LatestJobWorker(name="eagle-query")
+        # Window-owned shutdown: workers check this and skip UI idle (#525)
+        self._shutdown = threading.Event()
         self._search_timeout_id = 0
         self._cols_sync_timeout_id = 0
         self._inbox_importing = False
@@ -900,8 +903,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _start_library_load(self) -> None:
         """Scan the library off the UI thread so the window can appear first."""
+        if self._shutdown.is_set():
+            return
 
         def work() -> None:
+            if self._shutdown.is_set():
+                return
             try:
                 self.library.load()
                 err = None
@@ -924,7 +931,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._start_duration_backfill()
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(target=work, name="eagle-library-load", daemon=True).start()
 
@@ -934,14 +941,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         Runs in bounded batches so the library write lock is only held for short
         metadata writes between probes, keeping imports/edits responsive.
         """
+        if self._shutdown.is_set():
+            return
 
         def work() -> None:
             written: list[tuple[str, float]] = []
             try:
-                while True:
-                    batch = self.library.backfill_missing_durations()
+                while not self._shutdown.is_set():
+                    batch = self.library.backfill_missing_durations(
+                        cancelled=self._shutdown.is_set
+                    )
                     written.extend(batch.written)
                     if batch.probed == 0 or batch.remaining == 0:
+                        break
+                    if self._shutdown.is_set():
                         break
                     # Brief yield so other writers can acquire the lock.
                     time.sleep(0.05)
@@ -953,7 +966,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self.refresh_items(reset_selection=False, scroll_to_top=False)
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(
             target=work, name="eagle-duration-fill", daemon=True
@@ -1630,7 +1643,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                         self.insp_picture.set_paintable(None)
                     return False
 
-                GLib.idle_add(apply)
+                self._ui_idle(apply)
 
         try:
             _thumb_executor.submit(work)
@@ -1936,8 +1949,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._picker_blocking = False
         return True
 
+    def _ui_idle(self, callback, *args) -> None:
+        """Queue a GLib idle that no-ops once window shutdown has begun (#525)."""
+        if self._shutdown.is_set():
+            return
+        GLib.idle_add(wrap_idle_callback(self._shutdown, callback), *args)
+
     def _shutdown_background(self) -> None:
         """Stop timers / workers so the process can actually exit."""
+        # Signal first so in-flight workers skip further UI callbacks (#525).
+        self._shutdown.set()
+        self._query_gen += 1
+        self._insp_preview_gen += 1
+        if hasattr(self, "_images_scan_again"):
+            self._images_scan_again = False
         mark_gui_stopped()
         if self._search_timeout_id:
             try:
@@ -2707,7 +2732,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._update_special_count_label(view, n)
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(
             target=work, name="eagle-special-count", daemon=True
@@ -2866,7 +2891,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._update_smart_count_label(sid, n)
                     return False
 
-                GLib.idle_add(apply)
+                self._ui_idle(apply)
 
             # Count in background so large smart folders don't freeze the UI
             threading.Thread(
@@ -2885,7 +2910,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._update_special_count_label(view, n)
                     return False
 
-                GLib.idle_add(apply)
+                self._ui_idle(apply)
 
             threading.Thread(
                 target=recount_special, name="eagle-special-count", daemon=True
@@ -3314,6 +3339,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         when changing sidebar scope. scroll_to_top defaults to that same flag;
         sidebar clicks pass True even when the folder is already selected.
         """
+        if self._shutdown.is_set():
+            return
         self._query_gen += 1
         gen = self._query_gen
         folder_id = self.current_folder_id
@@ -3422,8 +3449,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             page = items[:load_n]
 
             def apply() -> bool:
-                if cancel.is_set() or gen != self._query_gen:
-                    return False  # stale
+                if (
+                    cancel.is_set()
+                    or gen != self._query_gen
+                    or self._shutdown.is_set()
+                ):
+                    return False  # stale or shutting down
                 self._rebuild_set_counts()
                 if smart_id and not search and not vf.active() and special is None:
                     self._update_smart_count_label(smart_id, total)
@@ -3532,7 +3563,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._set_grid_scroll_value(0.0)
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         self._query_worker.submit(work)
 
@@ -3918,7 +3949,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                         icn.set_visible(False)
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         try:
             _thumb_executor.submit(work)
@@ -4817,7 +4848,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._restore_grid_scroll(scroll)
                 return False
 
-            GLib.idle_add(after_close)
+            self._ui_idle(after_close)
 
         scroll = self._grid_scroll_value()
         _open(
@@ -4970,7 +5001,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._toast(result.toast)
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(target=work, name="eagle-upscale", daemon=True).start()
 
@@ -5042,7 +5073,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._toast(result.toast)
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(target=work, name="eagle-bust", daemon=True).start()
 
@@ -5135,7 +5166,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._toast(result.toast)
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(target=work, name="eagle-wardrobe", daemon=True).start()
 
@@ -5316,7 +5347,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._toast(result.toast)
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(target=work, name="eagle-edit", daemon=True).start()
 
@@ -5342,7 +5373,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._toast(result.toast)
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(target=work, name="eagle-flat-lay", daemon=True).start()
 
@@ -6576,6 +6607,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def stage_marked(self) -> None:
         """Copy marked (or focused) files into the stage/outbox directory and open it."""
+        if self._shutdown.is_set():
+            return
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing to stage — mark with Space, or select one")
@@ -6587,11 +6620,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             try:
                 stage.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                GLib.idle_add(lambda: self._toast(f"Stage dir failed: {exc}") or False)
+                self._ui_idle(lambda: self._toast(f"Stage dir failed: {exc}") or False)
                 return
             ok = 0
             errors = 0
             for it in items:
+                if self._shutdown.is_set():
+                    break
                 src = it.path
                 if not src.is_file():
                     errors += 1
@@ -6618,7 +6653,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._toast(msg)
                 return False
 
-            GLib.idle_add(done)
+            self._ui_idle(done)
 
         threading.Thread(target=work, name="eagle-stage", daemon=True).start()
 
@@ -6677,6 +6712,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _start_images_scan(self) -> None:
         """One images/ walker at a time. Extra mtime bumps queue a follow-up."""
+        if self._shutdown.is_set():
+            return
         if self._images_scan_running:
             self._images_scan_again = True
             return
@@ -6687,6 +6724,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             unknown: list[str] = []
             try:
                 for p in images.iterdir():
+                    if self._shutdown.is_set():
+                        break
                     if not p.is_dir() or not p.name.endswith(".info"):
                         continue
                     iid = p.name.removesuffix(".info")
@@ -6697,6 +6736,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
             def done() -> bool:
                 self._images_scan_running = False
+                if self._shutdown.is_set():
+                    self._images_scan_again = False
+                    return False
                 if unknown:
                     self._ingest_item_ids(unknown)
                 if self._images_scan_again:
@@ -6704,7 +6746,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._start_images_scan()
                 return False
 
-            GLib.idle_add(done)
+            self._ui_idle(done)
 
         threading.Thread(target=work, name="eagle-scan-new", daemon=True).start()
 
@@ -6944,6 +6986,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         Manual only (hotkey ``i``). Prefer the headless watcher for day-to-day
         intake so the GUI can stay open without consuming the inbox.
         """
+        if self._shutdown.is_set():
+            return
         if self._inbox_importing:
             if manual:
                 self._toast("Import already running…")
@@ -7005,6 +7049,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 if unique:
                     with write_session(self.library.root):
                         for f in unique:
+                            if self._shutdown.is_set():
+                                break
                             results.append(
                                 import_file(
                                     self.library.root,
@@ -7022,15 +7068,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._toast(f"Import locked: {err}")
                     return False
 
-                GLib.idle_add(fail)
+                self._ui_idle(fail)
                 return
 
-            # 2) Duplicates → interactive review on the UI thread
-            if dups:
+            # 2) Duplicates → interactive review on the UI thread.
+            # On shutdown, leave remaining dups in the inbox (#525).
+            if dups and not self._shutdown.is_set():
                 decisions = self._review_duplicates_blocking(dups)
                 try:
                     with write_session(self.library.root):
                         for match, action in decisions:
+                            if self._shutdown.is_set():
+                                break
                             if action == "skip":
                                 continue
                             if action == "reuse":
@@ -7061,7 +7110,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                         self._toast(f"Import locked: {err}")
                         return False
 
-                    GLib.idle_add(fail2)
+                    self._ui_idle(fail2)
                     return
 
             ok = sum(1 for r in results if getattr(r, "ok", False))
@@ -7136,7 +7185,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._toast(msg)
                 return False
 
-            GLib.idle_add(done)
+            self._ui_idle(done)
 
         threading.Thread(target=work, name="eagle-import", daemon=True).start()
 
@@ -7177,11 +7226,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             event.clear()
             state["apply_all"] = False
             state["action"] = "skip"
-            GLib.idle_add(present_one, match, i + 1, len(remaining))
+            if self._shutdown.is_set():
+                break
+            self._ui_idle(present_one, match, i + 1, len(remaining))
             # Wait until user responds (main loop runs dialog)
             while not event.wait(timeout=0.05):
                 # keep waiting; import thread is not the main loop
-                if not self.get_realized():
+                if self._shutdown.is_set() or not self.get_realized():
                     state["action"] = "skip"
                     break
             action = state.get("action") or "skip"
@@ -8372,6 +8423,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         from video_trim import save_video_trim_as_new_item
         from write import WriteError
 
+        if self._shutdown.is_set():
+            return
         if self._trim_exporting:
             return
         if not self.is_viewer_open() or self._viewer_mode != "video":
@@ -8424,7 +8477,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 )
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(target=work, name="eagle-video-trim", daemon=True).start()
 
@@ -8433,6 +8486,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         from import_media import save_video_frame_as_item
         from write import WriteError
 
+        if self._shutdown.is_set():
+            return
         if self._frame_saving:
             return
         if not self.is_viewer_open() or self._viewer_mode != "video":
@@ -8484,7 +8539,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 )
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(target=work, name="eagle-save-frame", daemon=True).start()
 
@@ -8936,9 +8991,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._open_external_media(item)
 
     def reload_library(self) -> None:
+        if self._shutdown.is_set():
+            return
         self._toast("Reloading library…")
 
         def work() -> None:
+            if self._shutdown.is_set():
+                return
             try:
                 self.library.load()
                 err = None
@@ -8960,7 +9019,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 )
                 return False
 
-            GLib.idle_add(apply)
+            self._ui_idle(apply)
 
         threading.Thread(target=work, name="eagle-reload", daemon=True).start()
 
