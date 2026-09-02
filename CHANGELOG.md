@@ -22,6 +22,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 - Flat-lay remains Qwen + QIE-2511 only (recipe lock); other edit surfaces support multi-engine submit.
 
+### Fixed
+
+- Package `py-modules` now includes `thumb_cache` and `shutdown_gate` so installed builds match source imports.
+
 ### Notes
 
 - Spicy variations are not a Browse surface yet; multi-engine toggles cover Edit / wardrobe / bust only (#512).
