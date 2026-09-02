@@ -61,8 +61,10 @@ from integrations_queue import (  # noqa: E402
     DEFAULT_WARDROBE_ENGINE,
     IntegrationResult,
     NO_PROMPT_LINKED_TOAST,
+    flat_lay_prompt_for,
     post_bust_enhance,
     post_edit,
+    post_flat_lay,
     post_wardrobe_apply,
     promptforge_build_url,
     resolve_promptforge_history_id,
@@ -2402,7 +2404,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 ("Shift+Y  or  c", "Copy file path"),
                 ("s", "Stage marked assets"),
                 ("x", "Crop the focused image"),
-                ("u", "Integrations menu (then u upscale, b bust, w wardrobe, m make more, e edit)"),
+                ("u", "Integrations menu (then u upscale, b bust, w wardrobe, f flat-lay, m make more, e edit)"),
                 ("r", "Reload the library"),
             )),
             ("Video viewer", (
@@ -4665,12 +4667,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
 
     def _build_integrations_menu_button(self) -> Gtk.MenuButton:
-        """Toolbar menu: Upscale / bust / wardrobe / Make more / Edit (Fizzy #477/#483/#503)."""
+        """Toolbar menu: Upscale / bust / wardrobe / flat-lay / Make more / Edit (#477/#483/#503/#510)."""
         if not getattr(self, "_integrations_actions_ready", False):
             for name, handler in (
                 ("int-upscale", self.queue_upscale),
                 ("int-bust", self.queue_enhance_bust_dialog),
                 ("int-wardrobe", self.queue_add_wardrobe_dialog),
+                ("int-flat-lay", self.queue_flat_lay_dialog),
                 ("int-make-more", self.open_make_more_in_promptforge),
                 ("int-edit", self.queue_edit_dialog),
             ):
@@ -4688,6 +4691,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ("_Upscale", "win.int-upscale", "u"),
             ("Enhance _bust…", "win.int-bust", "b"),
             ("Add _wardrobe…", "win.int-wardrobe", "w"),
+            ("_Flat-lay…", "win.int-flat-lay", "f"),
             ("_Make more in PromptForge…", "win.int-make-more", "m"),
             ("_Edit…", "win.int-edit", "e"),
         ):
@@ -4698,7 +4702,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         btn.add_css_class("flat")
         btn.set_tooltip_text(
-            "Integrations (u): upscale, bust, wardrobe, make more, edit"
+            "Integrations (u): upscale, bust, wardrobe, flat-lay, make more, edit"
         )
         btn.set_sensitive(False)
         return btn
@@ -4973,16 +4977,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=work, name="eagle-wardrobe", daemon=True).start()
 
-    def queue_edit_dialog(self) -> None:
-        """Edit prompt + engine (Qwen / Flux / Krea), then enqueue on PromptForge (#503)."""
-        item = self._integrations_focus_item(still_only=True)
-        if item is None:
-            return
-
-        dialog = Adw.AlertDialog(
-            heading="Edit",
-            body="Edit instruction and engine. Queues on PromptForge (does not run Comfy here).",
-        )
+    def _prompt_engine_dialog(
+        self,
+        *,
+        heading: str,
+        body: str,
+        initial_prompt: str,
+        require_prompt: bool,
+        empty_toast: str,
+        on_submit,
+    ) -> None:
+        """Shared Edit / Flat-lay dialog: TextView + Qwen/Flux/Krea + Ctrl+Enter."""
+        dialog = Adw.AlertDialog(heading=heading, body=body)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
         scroll = Gtk.ScrolledWindow()
@@ -5001,6 +5007,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         text.set_left_margin(6)
         text.set_right_margin(6)
         buf = text.get_buffer()
+        if initial_prompt:
+            buf.set_text(initial_prompt)
         scroll.set_child(text)
         box.append(scroll)
 
@@ -5034,21 +5042,46 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             end = buf.get_end_iter()
             return buf.get_text(start, end, include_hidden_chars=False)
 
+        def chosen_engine() -> str:
+            for key, btn in buttons.items():
+                if btn.get_active():
+                    return key
+            return DEFAULT_EDIT_ENGINE
+
+        submitted = {"done": False}
+
+        def do_submit(*, close: bool = False) -> bool:
+            if submitted["done"]:
+                return True
+            prompt = (read_prompt() or "").strip()
+            if require_prompt and not prompt:
+                self._toast(empty_toast)
+                return False
+            submitted["done"] = True
+            on_submit(prompt, chosen_engine())
+            if close:
+                dialog.close()
+            return True
+
         def on_response(_dialog, response: str) -> None:
             if response != "submit":
                 return
-            prompt = (read_prompt() or "").strip()
-            if not prompt:
-                self._toast("Edit prompt required")
-                return
-            engine = DEFAULT_EDIT_ENGINE
-            for key, btn in buttons.items():
-                if btn.get_active():
-                    engine = key
-                    break
-            self._queue_edit(item, prompt, engine)
+            do_submit(close=False)
 
         dialog.connect("response", on_response)
+
+        def on_key(_c, keyval: int, _kc: int, state: Gdk.ModifierType) -> bool:
+            ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+            if ctrl and keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                do_submit(close=True)
+                return True
+            return False
+
+        key = Gtk.EventControllerKey()
+        key.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        key.connect("key-pressed", on_key)
+        text.add_controller(key)
+
         dialog.present(self)
 
         def focus_text() -> bool:
@@ -5056,6 +5089,45 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return False
 
         GLib.idle_add(focus_text)
+
+    def queue_edit_dialog(self) -> None:
+        """Edit prompt + engine (Qwen / Flux / Krea), then enqueue on PromptForge (#503)."""
+        item = self._integrations_focus_item(still_only=True)
+        if item is None:
+            return
+
+        def on_submit(prompt: str, engine: str) -> None:
+            self._queue_edit(item, prompt, engine)
+
+        self._prompt_engine_dialog(
+            heading="Edit",
+            body="Edit instruction and engine. Queues on PromptForge (does not run Comfy here).",
+            initial_prompt="",
+            require_prompt=True,
+            empty_toast="Edit prompt required",
+            on_submit=on_submit,
+        )
+
+    def queue_flat_lay_dialog(self) -> None:
+        """Flat-lay extract: worn still → wardrobe sheet via PromptForge edit (#510)."""
+        item = self._integrations_focus_item(still_only=True)
+        if item is None:
+            return
+
+        def on_submit(prompt: str, engine: str) -> None:
+            self._queue_flat_lay(item, prompt, engine)
+
+        self._prompt_engine_dialog(
+            heading="Flat-lay",
+            body=(
+                "Qwen + QIE-2511 Extract Outfit → 9:16 wood wardrobe sheet. "
+                "Default prompt is fine — edit if needed. Queues on PromptForge."
+            ),
+            initial_prompt=flat_lay_prompt_for(item, None),
+            require_prompt=False,
+            empty_toast="",
+            on_submit=on_submit,
+        )
 
     def _queue_edit(self, item: Item, prompt: str, engine: str) -> None:
         inflight = getattr(self, "_edit_inflight", None)
@@ -5082,6 +5154,32 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             GLib.idle_add(apply)
 
         threading.Thread(target=work, name="eagle-edit", daemon=True).start()
+
+    def _queue_flat_lay(self, item: Item, prompt: str, engine: str) -> None:
+        inflight = getattr(self, "_flat_lay_inflight", None)
+        if inflight is None:
+            inflight = set()
+            self._flat_lay_inflight = inflight
+        key = f"{item.id}:{engine}:flat-lay"
+        if key in inflight:
+            self._toast("Already queued")
+            return
+        inflight.add(key)
+
+        def work() -> None:
+            try:
+                result = post_flat_lay(item, prompt=prompt or None, engine=engine)
+            except Exception:  # noqa: BLE001
+                result = IntegrationResult("offline", "PromptForge not answering")
+
+            def apply() -> bool:
+                inflight.discard(key)
+                self._toast(result.toast)
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(target=work, name="eagle-flat-lay", daemon=True).start()
 
     def _invalidate_thumb_cache_for(self, item: Item) -> None:
         """Drop cached textures for this item so the grid reloads after crop."""

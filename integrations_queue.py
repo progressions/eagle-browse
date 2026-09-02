@@ -39,6 +39,30 @@ EDIT_ENGINES = ("qwen", "flux", "krea")
 DEFAULT_BUST_ENGINE = "klein"
 DEFAULT_WARDROBE_ENGINE = "qwen"
 DEFAULT_EDIT_ENGINE = "qwen"
+# Flat-lay (#510): wardrobe-flatlay skill recipe — QIE-2511 @ 1.0, 9:16 wood pad.
+FLAT_LAY_W = 864
+FLAT_LAY_H = 1536
+DEFAULT_FLAT_LAY_PROMPT = """Extract the clothing and create a flat mockup.
+Create a flat lay wardrobe sheet from the outfit shown in the reference image.
+Remove any human figure completely. Extract each individual clothing item and
+accessory and arrange them separately on a clean light tan wood surface.
+Do not add any printed labels, handwritten cards, tags, captions, or text of any kind.
+
+Include a large physical photograph (Polaroid or print) of the original
+reference so the viewer can see the outfit worn.
+
+Style: clean editorial flat lay, light tan wood background, soft shadows,
+ultra-realistic product photography, 9:16 vertical, photorealistic. No text."""
+
+EUNBI_FLAT_LAY_EXTRAS = (
+    "Always include on the display: a black velvet choker collar with a small "
+    "silver heart pendant, and a cherry blossom hair pin."
+)
+
+NON_EUNBI_FLAT_LAY_EXTRAS = (
+    "Do not add a black velvet choker, a cherry blossom hair pin, a pink phone, "
+    "or any item that is not in the reference."
+)
 
 # Continuity stamps (#483): pf:<id> / pf-<id> tags, annotation, image-<id>- filename.
 _PF_TAG_RE = re.compile(r"^(?:pf:|pf-)(\d+)$", re.IGNORECASE)
@@ -317,10 +341,13 @@ def post_edit(
     *,
     prompt: str,
     engine: str = DEFAULT_EDIT_ENGINE,
+    width: int | None = None,
+    height: int | None = None,
+    toast_kind: str = "edit",
 ) -> IntegrationResult:
-    """POST /api/v1/edit for the focused still (PromptForge edit queue, #503)."""
+    """POST /api/v1/edit for the focused still (PromptForge edit queue, #503/#510)."""
     if not getattr(item, "is_image", False):
-        return IntegrationResult(STATUS_UNSUPPORTED, "Edit is for stills")
+        return IntegrationResult(STATUS_UNSUPPORTED, f"{toast_kind.capitalize()} is for stills")
     if _file_missing(item):
         return IntegrationResult(STATUS_FILE_MISSING, "File missing")
 
@@ -332,13 +359,62 @@ def post_edit(
     if eng is None:
         return IntegrationResult(STATUS_UNSUPPORTED, "Unknown edit engine")
 
-    payload = {
+    payload: dict[str, Any] = {
         "eagle_id": str(item.id),
         "prompt": text,
         "engine": eng,
     }
+    if width is not None and height is not None:
+        payload["width"] = max(1, int(width))
+        payload["height"] = max(1, int(height))
     result = _post_json(EDIT_PATH, payload)
     if result.status == STATUS_OK:
         label = {"qwen": "Qwen", "flux": "Flux", "krea": "Krea"}.get(eng, eng)
-        return IntegrationResult(STATUS_OK, f"Queued edit ({label}) on Eric")
+        kind = (toast_kind or "edit").strip() or "edit"
+        return IntegrationResult(STATUS_OK, f"Queued {kind} ({label}) on Eric")
+    return result
+
+
+def flat_lay_prompt_for(item: Any, prompt: str | None = None) -> str:
+    """Default QIE extract prompt; append character extras when using the stock text."""
+    custom = (prompt or "").strip()
+    if custom:
+        return custom
+    extras = (
+        EUNBI_FLAT_LAY_EXTRAS
+        if character_for(item) == "Eunbi"
+        else NON_EUNBI_FLAT_LAY_EXTRAS
+    )
+    return f"{DEFAULT_FLAT_LAY_PROMPT.strip()}\n\n{extras}"
+
+
+def post_flat_lay(
+    item: Any,
+    *,
+    prompt: str | None = None,
+    engine: str = DEFAULT_EDIT_ENGINE,
+) -> IntegrationResult:
+    """POST /api/v1/edit as wardrobe flat-lay (#510). Qwen + QIE-2511, 9:16 wood pad."""
+    text = flat_lay_prompt_for(item, prompt)
+    # Flat-lay is the QIE-2511 recipe; always queue as qwen + job=flat-lay so
+    # PromptForge attaches QIE-2511-Extract-Outfit and pads 864×1536.
+    _ = engine  # UI may still show engines; QIE path is Qwen-only.
+    eng = "qwen"
+    if _file_missing(item):
+        return IntegrationResult(STATUS_FILE_MISSING, "File missing")
+    if not getattr(item, "is_image", False):
+        return IntegrationResult(STATUS_UNSUPPORTED, "Flat-lay is for stills")
+
+    payload: dict[str, Any] = {
+        "eagle_id": str(item.id),
+        "prompt": text,
+        "engine": eng,
+        "job": "flat-lay",
+        "character": character_for(item),
+        "width": FLAT_LAY_W,
+        "height": FLAT_LAY_H,
+    }
+    result = _post_json(EDIT_PATH, payload)
+    if result.status == STATUS_OK:
+        return IntegrationResult(STATUS_OK, "Queued flat-lay (Qwen + QIE-2511) on Eric")
     return result
