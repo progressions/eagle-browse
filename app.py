@@ -888,13 +888,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         threading.Thread(target=work, name="eagle-library-load", daemon=True).start()
 
     def _start_duration_backfill(self) -> None:
-        """ffprobe audio/video that Eagle stored without duration; then refresh."""
+        """ffprobe audio/video that Eagle stored without duration; then refresh.
+
+        Runs in bounded batches so the library write lock is only held for short
+        metadata writes between probes, keeping imports/edits responsive.
+        """
 
         def work() -> None:
+            written: list[tuple[str, float]] = []
             try:
-                written = self.library.backfill_missing_durations()
+                while True:
+                    batch = self.library.backfill_missing_durations()
+                    written.extend(batch.written)
+                    if batch.probed == 0 or batch.remaining == 0:
+                        break
+                    # Brief yield so other writers can acquire the lock.
+                    time.sleep(0.05)
             except Exception:  # noqa: BLE001
-                written = []
+                pass
 
             def apply() -> bool:
                 if written:
