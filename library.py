@@ -917,6 +917,7 @@ class EagleLibrary:
             set_folder_auto_tags(self.root, folder_id, cleaned)
         folder = self.folders_by_id[folder_id]
         folder.tags = cleaned
+        self._invalidate_caches()
         return folder
 
     def set_items_deleted(
