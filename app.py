@@ -42,9 +42,11 @@ from pixbuf_io import pixbuf_from_path as _pixbuf_from_path  # noqa: E402
 from library import (  # noqa: E402
     EagleLibrary,
     Item,
+    QueryCancelled,
     SmartFolder,
     eval_smart_conditions,
 )
+from latest_job import LatestJobWorker  # noqa: E402
 from sets import (  # noqa: E402
     SET_PREFIX,
     is_set_tag,
@@ -312,6 +314,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._left_pane_w = 280
         self._insp_pane_w = 260
         self._query_gen = 0  # bump to cancel stale background queries
+        self._query_worker = LatestJobWorker(name="eagle-query")
         self._search_timeout_id = 0
         self._cols_sync_timeout_id = 0
         self._inbox_importing = False
@@ -1833,6 +1836,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 pass
         except Exception:  # noqa: BLE001
             pass
+        self._query_worker.shutdown(wait=False)
 
     def _on_window_close_request(self, *_args) -> bool:
         """Window closed (including Hyprland Super+W killactive)."""
@@ -3193,7 +3197,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if scroll_to_top:
             self._cancel_scroll_restore()
 
-        def work() -> None:
+        def work(cancel: threading.Event) -> None:
+            def keep(items: list[Item], predicate) -> list[Item]:
+                kept: list[Item] = []
+                for candidate in items:
+                    if cancel.is_set():
+                        raise QueryCancelled
+                    if predicate(candidate):
+                        kept.append(candidate)
+                return kept
+
             # Always drop query cache so tag/star/folder edits re-evaluate
             # smart folders. Scan disk only when changing sidebar scope.
             if reset_selection:
@@ -3201,38 +3214,50 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self.library.scan_new_items()
                 except Exception:  # noqa: BLE001
                     pass
-            self.library._invalidate_caches()  # noqa: SLF001
-            if special == "set":
-                items = self.library.query(
-                    search=search,
-                    include_deleted=False,
-                )
-                if set_tag:
-                    items = [it for it in items if set_tag in it.tag_set]
+            try:
+                self.library._invalidate_caches()  # noqa: SLF001
+                if special == "set":
+                    items = self.library.query(
+                        search=search,
+                        include_deleted=False,
+                        cancelled=cancel.is_set,
+                    )
+                    if set_tag:
+                        items = keep(items, lambda it: set_tag in it.tag_set)
+                    else:
+                        items = []
+                elif special in ("untagged", "uncategorized"):
+                    items = self.library.query(
+                        search=search,
+                        include_deleted=False,
+                        cancelled=cancel.is_set,
+                    )
+                    if special == "untagged":
+                        # Only assets with zero tags
+                        items = keep(items, lambda it: not it.tags)
+                    else:
+                        # Only assets with zero folders/categories
+                        items = keep(items, lambda it: not it.folders)
                 else:
-                    items = []
-            elif special in ("untagged", "uncategorized"):
-                items = self.library.query(
-                    search=search,
-                    include_deleted=False,
-                )
-                if special == "untagged":
-                    # Only assets with zero tags
-                    items = [it for it in items if not it.tags]
-                else:
-                    # Only assets with zero folders/categories
-                    items = [it for it in items if not it.folders]
-            else:
-                items = self.library.query(
-                    folder_id=folder_id,
-                    smart_folder_id=smart_id,
-                    include_descendants=descendants,
-                    search=search,
-                    include_deleted=False,
-                )
-            if vf.active():
-                items = [it for it in items if item_matches_view_filters(it, vf)]
+                    items = self.library.query(
+                        folder_id=folder_id,
+                        smart_folder_id=smart_id,
+                        include_descendants=descendants,
+                        search=search,
+                        include_deleted=False,
+                        cancelled=cancel.is_set,
+                    )
+                if vf.active():
+                    items = keep(
+                        items, lambda it: item_matches_view_filters(it, vf)
+                    )
+            except QueryCancelled:
+                return
+            if cancel.is_set():
+                return
             items = self._sort_items(items)
+            if cancel.is_set():
+                return
             total = len(items)
             # Keep smart-folder / special sidebar counts in sync with this view
             # (no search or type filters — those shrink the grid but not the badge)
@@ -3254,7 +3279,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             page = items[:load_n]
 
             def apply() -> bool:
-                if gen != self._query_gen:
+                if cancel.is_set() or gen != self._query_gen:
                     return False  # stale
                 self._rebuild_set_counts()
                 if smart_id and not search and not vf.active() and special is None:
@@ -3366,7 +3391,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
             GLib.idle_add(apply)
 
-        threading.Thread(target=work, name="eagle-query", daemon=True).start()
+        self._query_worker.submit(work)
 
     def _on_sort_changed(self, dropdown: Gtk.DropDown, *_args: object) -> None:
         idx = int(dropdown.get_selected())

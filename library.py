@@ -8,10 +8,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from config import DEFAULT_LIBRARY, inbox_path, library_path  # noqa: F401
 from write import canonicalize_tags
+
+
+class QueryCancelled(Exception):
+    """Raised when a caller cancels an in-progress library query."""
 
 VIDEO_EXTS = frozenset({"mp4", "mov", "webm", "mkv", "m4v", "avi", "wmv", "flv"})
 AUDIO_EXTS = frozenset({"mp3", "wav", "flac", "aac", "m4a", "ogg", "wma", "aiff", "aif"})
@@ -629,7 +633,13 @@ class EagleLibrary:
         include_deleted: bool = False,
         images_only: bool = False,
         limit: int | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> list[Item]:
+        def check_cancelled() -> None:
+            if cancelled is not None and cancelled():
+                raise QueryCancelled
+
+        check_cancelled()
         search = search.strip().lower()
         tokens = tuple(t for t in search.split() if t)
         cache_key = (
@@ -667,14 +677,16 @@ class EagleLibrary:
                     smart_folder_id=smart.parent_id,
                     include_deleted=include_deleted,
                     images_only=images_only,
+                    cancelled=cancelled,
                 )
-                pool = [
-                    item
-                    for item in parent_pool
-                    if eval_smart_conditions(item, smart.conditions)
-                ]
+                pool = []
+                for item in parent_pool:
+                    check_cancelled()
+                    if eval_smart_conditions(item, smart.conditions):
+                        pool.append(item)
                 if limit is not None:
                     pool = pool[:limit]
+                check_cancelled()
                 with self._lock:
                     if len(self._query_cache) < 256:
                         self._query_cache[cache_key] = pool
@@ -685,6 +697,7 @@ class EagleLibrary:
 
         results: list[Item] = []
         for item in pool:
+            check_cancelled()
             if not include_deleted and item.is_deleted:
                 continue
             if images_only and not item.is_image:
@@ -713,6 +726,7 @@ class EagleLibrary:
 
         # Only cache unbounded smart/folder views (search changes too often)
         if not tokens:
+            check_cancelled()
             with self._lock:
                 if len(self._query_cache) < 256:
                     self._query_cache[cache_key] = results
