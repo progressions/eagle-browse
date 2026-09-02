@@ -11,8 +11,10 @@ from unittest import mock
 from integrations_queue import (
     DEFAULT_BUST_ENGINE,
     DEFAULT_EDIT_ENGINE,
+    DEFAULT_FLAT_LAY_PROMPT,
     DEFAULT_WARDROBE_ENGINE,
     EDIT_PATH,
+    FLAT_LAY_SIZE,
     STATUS_FILE_MISSING,
     STATUS_OK,
     STATUS_UNSUPPORTED,
@@ -21,6 +23,7 @@ from integrations_queue import (
     normalize_edit_engine,
     normalize_wardrobe_engine,
     post_edit,
+    post_flat_lay,
     promptforge_base_url,
     promptforge_build_url,
     resolve_promptforge_history_id,
@@ -115,6 +118,49 @@ class PostEditTest(unittest.TestCase):
         item = SimpleNamespace(id="eagle-1", is_image=True, path=Path("/missing-nope.png"))
         result = post_edit(item, prompt="edit me", engine="qwen")
         self.assertEqual(result.status, STATUS_FILE_MISSING)
+
+
+class PostFlatLayTest(unittest.TestCase):
+    def test_posts_1x1_with_default_prompt(self) -> None:
+        captured: dict = {}
+
+        def fake_post_json(path: str, payload: dict):
+            captured["path"] = path
+            captured["payload"] = payload
+            from integrations_queue import IntegrationResult
+
+            return IntegrationResult(STATUS_OK, "Queued on Eric")
+
+        with mock.patch("integrations_queue._file_missing", return_value=False):
+            with mock.patch("integrations_queue._post_json", side_effect=fake_post_json):
+                item = SimpleNamespace(id="eagle-flat", is_image=True, path=Path("/x.png"))
+                result = post_flat_lay(item, prompt=None, engine="qwen")
+
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertIn("flat-lay", result.toast.lower())
+        self.assertEqual(captured["path"], EDIT_PATH)
+        self.assertEqual(captured["payload"]["eagle_id"], "eagle-flat")
+        self.assertEqual(captured["payload"]["engine"], "qwen")
+        self.assertEqual(captured["payload"]["prompt"], DEFAULT_FLAT_LAY_PROMPT)
+        self.assertEqual(captured["payload"]["width"], FLAT_LAY_SIZE)
+        self.assertEqual(captured["payload"]["height"], FLAT_LAY_SIZE)
+
+    def test_custom_prompt_kept(self) -> None:
+        captured: dict = {}
+
+        def fake_post_json(path: str, payload: dict):
+            captured["payload"] = payload
+            from integrations_queue import IntegrationResult
+
+            return IntegrationResult(STATUS_OK, "Queued on Eric")
+
+        with mock.patch("integrations_queue._file_missing", return_value=False):
+            with mock.patch("integrations_queue._post_json", side_effect=fake_post_json):
+                item = SimpleNamespace(id="eagle-flat", is_image=True, path=Path("/x.png"))
+                post_flat_lay(item, prompt="  only the jacket  ", engine="krea")
+
+        self.assertEqual(captured["payload"]["prompt"], "only the jacket")
+        self.assertEqual(captured["payload"]["engine"], "krea")
 
 
 class ResolvePromptforgeHistoryIdTest(unittest.TestCase):

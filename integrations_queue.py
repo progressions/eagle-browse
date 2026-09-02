@@ -39,6 +39,15 @@ EDIT_ENGINES = ("qwen", "flux", "krea")
 DEFAULT_BUST_ENGINE = "klein"
 DEFAULT_WARDROBE_ENGINE = "qwen"
 DEFAULT_EDIT_ENGINE = "qwen"
+# Flat-lay (#510): 1:1 studio extract. PromptForge edit defaults to source aspect
+# unless width/height are set.
+FLAT_LAY_SIZE = 1152
+DEFAULT_FLAT_LAY_PROMPT = (
+    "Extract the clothing and create a flat mockup. "
+    "Extract the full outfit onto a clean white studio background as a fashion "
+    "flat-lay / mockup. Keep garment colors, prints, and construction. "
+    "No person, no mannequin, no hangers, no polaroid of the worn look."
+)
 
 # Continuity stamps (#483): pf:<id> / pf-<id> tags, annotation, image-<id>- filename.
 _PF_TAG_RE = re.compile(r"^(?:pf:|pf-)(\d+)$", re.IGNORECASE)
@@ -317,10 +326,13 @@ def post_edit(
     *,
     prompt: str,
     engine: str = DEFAULT_EDIT_ENGINE,
+    width: int | None = None,
+    height: int | None = None,
+    toast_kind: str = "edit",
 ) -> IntegrationResult:
-    """POST /api/v1/edit for the focused still (PromptForge edit queue, #503)."""
+    """POST /api/v1/edit for the focused still (PromptForge edit queue, #503/#510)."""
     if not getattr(item, "is_image", False):
-        return IntegrationResult(STATUS_UNSUPPORTED, "Edit is for stills")
+        return IntegrationResult(STATUS_UNSUPPORTED, f"{toast_kind.capitalize()} is for stills")
     if _file_missing(item):
         return IntegrationResult(STATUS_FILE_MISSING, "File missing")
 
@@ -332,13 +344,35 @@ def post_edit(
     if eng is None:
         return IntegrationResult(STATUS_UNSUPPORTED, "Unknown edit engine")
 
-    payload = {
+    payload: dict[str, Any] = {
         "eagle_id": str(item.id),
         "prompt": text,
         "engine": eng,
     }
+    if width is not None and height is not None:
+        payload["width"] = max(1, int(width))
+        payload["height"] = max(1, int(height))
     result = _post_json(EDIT_PATH, payload)
     if result.status == STATUS_OK:
         label = {"qwen": "Qwen", "flux": "Flux", "krea": "Krea"}.get(eng, eng)
-        return IntegrationResult(STATUS_OK, f"Queued edit ({label}) on Eric")
+        kind = (toast_kind or "edit").strip() or "edit"
+        return IntegrationResult(STATUS_OK, f"Queued {kind} ({label}) on Eric")
     return result
+
+
+def post_flat_lay(
+    item: Any,
+    *,
+    prompt: str | None = None,
+    engine: str = DEFAULT_EDIT_ENGINE,
+) -> IntegrationResult:
+    """POST /api/v1/edit as a wardrobe flat-lay extract (#510). Always 1:1."""
+    text = (prompt or "").strip() or DEFAULT_FLAT_LAY_PROMPT
+    return post_edit(
+        item,
+        prompt=text,
+        engine=engine,
+        width=FLAT_LAY_SIZE,
+        height=FLAT_LAY_SIZE,
+        toast_kind="flat-lay",
+    )
