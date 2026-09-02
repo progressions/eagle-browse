@@ -3429,8 +3429,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                         kept.append(candidate)
                 return kept
 
-            # Always drop query cache so tag/star/folder edits re-evaluate
-            # smart folders. Scan disk only when changing sidebar scope.
+            # Scan disk only when changing sidebar scope. Library mutation
+            # methods invalidate derived caches at the point of change.
             if reset_selection:
                 try:
                     self.library.scan_new_items()
@@ -3452,7 +3452,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     # this query is superseded before its UI callback runs.
                     self._ui_idle(lambda: self._queue_external_changes(changes))
             try:
-                self.library._invalidate_caches()  # noqa: SLF001
                 if special == "set":
                     items = self.library.query(
                         search=search,
@@ -5566,7 +5565,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 if old.id == it.id:
                     lst[i] = it
         self.selected_item = it
-        self.library._invalidate_caches()  # noqa: SLF001
         self._rebind_grid_keep_selection()
         self._update_path_label()
         viewing = (
