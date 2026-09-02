@@ -68,6 +68,7 @@ from integrations_queue import (  # noqa: E402
     post_wardrobe_apply,
     promptforge_build_url,
     resolve_promptforge_history_id,
+    summarize_integration_results,
 )
 from upscale_queue import (  # noqa: E402
     UpscaleResult,
@@ -5005,33 +5006,58 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=work, name="eagle-upscale", daemon=True).start()
 
+    @staticmethod
+    def _engine_toggle_row(
+        choices: list[tuple[str, str]],
+        *,
+        default_key: str,
+        multi: bool = True,
+    ) -> tuple[Gtk.Box, dict[str, Gtk.CheckButton]]:
+        """Independent CheckButtons (multi) or radio group (multi=False)."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        buttons: dict[str, Gtk.CheckButton] = {}
+        group: Gtk.CheckButton | None = None
+        for key, label in choices:
+            btn = Gtk.CheckButton(label=label)
+            if not multi:
+                if group is None:
+                    group = btn
+                else:
+                    btn.set_group(group)
+            if key == default_key:
+                btn.set_active(True)
+            box.append(btn)
+            buttons[key] = btn
+        return box, buttons
+
+    @staticmethod
+    def _selected_engine_keys(
+        buttons: dict[str, Gtk.CheckButton],
+    ) -> list[str]:
+        return [key for key, btn in buttons.items() if btn.get_active()]
+
     def queue_enhance_bust_dialog(self) -> None:
-        """Pick bust engine (Krea / Qwen / Flux), then enqueue."""
+        """Pick one or more bust engines (Krea / Qwen / Flux), then enqueue."""
         item = self._integrations_focus_item(still_only=True)
         if item is None:
             return
 
         dialog = Adw.AlertDialog(
             heading="Enhance bust",
-            body="Choose the edit engine. Default is Flux Klein (#474 mid prompt).",
+            body=(
+                "Toggle engines (multi-select). Default is Flux Klein. "
+                "Submit queues one PromptForge job per selected engine."
+            ),
         )
-        engines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        group: Gtk.CheckButton | None = None
-        buttons: dict[str, Gtk.CheckButton] = {}
-        for key, label in (
-            ("klein", "Flux Klein (default)"),
-            ("qwen", "Qwen"),
-            ("krea2", "Krea 2"),
-        ):
-            btn = Gtk.CheckButton(label=label)
-            if group is None:
-                group = btn
-            else:
-                btn.set_group(group)
-            if key == DEFAULT_BUST_ENGINE:
-                btn.set_active(True)
-            engines.append(btn)
-            buttons[key] = btn
+        engines, buttons = self._engine_toggle_row(
+            [
+                ("klein", "Flux Klein (default)"),
+                ("qwen", "Qwen"),
+                ("krea2", "Krea 2"),
+            ],
+            default_key=DEFAULT_BUST_ENGINE,
+            multi=True,
+        )
         dialog.set_extra_child(engines)
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("queue", "Queue")
@@ -5042,35 +5068,41 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         def on_response(_dialog, response: str) -> None:
             if response != "queue":
                 return
-            engine = DEFAULT_BUST_ENGINE
-            for key, btn in buttons.items():
-                if btn.get_active():
-                    engine = key
-                    break
-            self._queue_bust_enhance(item, engine)
+            selected = self._selected_engine_keys(buttons)
+            if not selected:
+                self._toast("Pick at least one engine")
+                return
+            self._queue_bust_enhance(item, selected)
 
         dialog.connect("response", on_response)
         dialog.present(self)
 
-    def _queue_bust_enhance(self, item: Item, engine: str) -> None:
+    def _queue_bust_enhance(self, item: Item, engines: list[str]) -> None:
         inflight = getattr(self, "_bust_inflight", None)
         if inflight is None:
             inflight = set()
             self._bust_inflight = inflight
-        if item.id in inflight:
+        keys = [f"{item.id}:{eng}" for eng in engines]
+        if any(k in inflight for k in keys):
             self._toast("Already queued")
             return
-        inflight.add(item.id)
+        for k in keys:
+            inflight.add(k)
 
         def work() -> None:
-            try:
-                result = post_bust_enhance(item, engine=engine)
-            except Exception:  # noqa: BLE001
-                result = IntegrationResult("offline", "PromptForge not answering")
+            results: list[IntegrationResult] = []
+            for eng in engines:
+                try:
+                    results.append(post_bust_enhance(item, engine=eng))
+                except Exception:  # noqa: BLE001
+                    results.append(
+                        IntegrationResult("offline", "PromptForge not answering")
+                    )
 
             def apply() -> bool:
-                inflight.discard(item.id)
-                self._toast(result.toast)
+                for k in keys:
+                    inflight.discard(k)
+                self._toast(summarize_integration_results(results))
                 return False
 
             self._ui_idle(apply)
@@ -5078,14 +5110,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         threading.Thread(target=work, name="eagle-bust", daemon=True).start()
 
     def queue_add_wardrobe_dialog(self) -> None:
-        """Ask for wardrobe Eagle id + engine, then enqueue apply-to-still."""
+        """Ask for wardrobe Eagle id + engines, then enqueue apply-to-still."""
         item = self._integrations_focus_item(still_only=True)
         if item is None:
             return
 
         dialog = Adw.AlertDialog(
             heading="Add wardrobe",
-            body="Wardrobe Eagle id (flat-lay / outfit sheet), then engine.",
+            body=(
+                "Wardrobe Eagle id (flat-lay / outfit sheet), then toggle engines. "
+                "Multi-select queues one job per engine."
+            ),
         )
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         entry = Gtk.Entry()
@@ -5094,23 +5129,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         entry.set_activates_default(True)
         box.append(entry)
 
-        engines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        group: Gtk.CheckButton | None = None
-        buttons: dict[str, Gtk.CheckButton] = {}
-        for key, label in (
-            ("qwen", "Qwen (default)"),
-            ("krea2", "Krea 2"),
-            ("klein", "Flux Klein"),
-        ):
-            btn = Gtk.CheckButton(label=label)
-            if group is None:
-                group = btn
-            else:
-                btn.set_group(group)
-            if key == DEFAULT_WARDROBE_ENGINE:
-                btn.set_active(True)
-            engines.append(btn)
-            buttons[key] = btn
+        engines, buttons = self._engine_toggle_row(
+            [
+                ("qwen", "Qwen (default)"),
+                ("krea2", "Krea 2"),
+                ("klein", "Flux Klein"),
+            ],
+            default_key=DEFAULT_WARDROBE_ENGINE,
+            multi=True,
+        )
         box.append(engines)
         dialog.set_extra_child(box)
         dialog.add_response("cancel", "Cancel")
@@ -5126,12 +5153,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if not ward_id:
                 self._toast("Wardrobe Eagle id required")
                 return
-            engine = DEFAULT_WARDROBE_ENGINE
-            for key, btn in buttons.items():
-                if btn.get_active():
-                    engine = key
-                    break
-            self._queue_wardrobe_apply(item, ward_id, engine)
+            selected = self._selected_engine_keys(buttons)
+            if not selected:
+                self._toast("Pick at least one engine")
+                return
+            self._queue_wardrobe_apply(item, ward_id, selected)
 
         dialog.connect("response", on_response)
         dialog.present(self)
@@ -5142,28 +5168,40 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         GLib.idle_add(focus_entry)
 
-    def _queue_wardrobe_apply(self, item: Item, wardrobe_eagle_id: str, engine: str) -> None:
+    def _queue_wardrobe_apply(
+        self, item: Item, wardrobe_eagle_id: str, engines: list[str]
+    ) -> None:
         inflight = getattr(self, "_wardrobe_inflight", None)
         if inflight is None:
             inflight = set()
             self._wardrobe_inflight = inflight
-        key = f"{item.id}:{wardrobe_eagle_id}:{engine}"
-        if key in inflight:
+        keys = [f"{item.id}:{wardrobe_eagle_id}:{eng}" for eng in engines]
+        if any(k in inflight for k in keys):
             self._toast("Already queued")
             return
-        inflight.add(key)
+        for k in keys:
+            inflight.add(k)
 
         def work() -> None:
-            try:
-                result = post_wardrobe_apply(
-                    item, wardrobe_eagle_id=wardrobe_eagle_id, engine=engine
-                )
-            except Exception:  # noqa: BLE001
-                result = IntegrationResult("offline", "PromptForge not answering")
+            results: list[IntegrationResult] = []
+            for eng in engines:
+                try:
+                    results.append(
+                        post_wardrobe_apply(
+                            item,
+                            wardrobe_eagle_id=wardrobe_eagle_id,
+                            engine=eng,
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    results.append(
+                        IntegrationResult("offline", "PromptForge not answering")
+                    )
 
             def apply() -> bool:
-                inflight.discard(key)
-                self._toast(result.toast)
+                for k in keys:
+                    inflight.discard(k)
+                self._toast(summarize_integration_results(results))
                 return False
 
             self._ui_idle(apply)
@@ -5179,8 +5217,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         require_prompt: bool,
         empty_toast: str,
         on_submit,
+        engine_choices: list[tuple[str, str]] | None = None,
+        default_engine: str = DEFAULT_EDIT_ENGINE,
+        multi_engine: bool = True,
     ) -> None:
-        """Shared Edit / Flat-lay dialog: TextView + Qwen/Flux/Krea + Ctrl+Enter."""
+        """Shared Edit / Flat-lay dialog: TextView + engines + Ctrl+Enter."""
         dialog = Adw.AlertDialog(heading=heading, body=body)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
@@ -5205,23 +5246,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         scroll.set_child(text)
         box.append(scroll)
 
-        engines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        group: Gtk.CheckButton | None = None
-        buttons: dict[str, Gtk.CheckButton] = {}
-        for key, label in (
+        choices = engine_choices or [
             ("qwen", "Qwen (default)"),
             ("flux", "Flux"),
             ("krea", "Krea"),
-        ):
-            btn = Gtk.CheckButton(label=label)
-            if group is None:
-                group = btn
-            else:
-                btn.set_group(group)
-            if key == DEFAULT_EDIT_ENGINE:
-                btn.set_active(True)
-            engines.append(btn)
-            buttons[key] = btn
+        ]
+        engines, buttons = self._engine_toggle_row(
+            choices, default_key=default_engine, multi=multi_engine
+        )
         box.append(engines)
         dialog.set_extra_child(box)
         dialog.add_response("cancel", "Cancel")
@@ -5235,12 +5267,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             end = buf.get_end_iter()
             return buf.get_text(start, end, include_hidden_chars=False)
 
-        def chosen_engine() -> str:
-            for key, btn in buttons.items():
-                if btn.get_active():
-                    return key
-            return DEFAULT_EDIT_ENGINE
-
         submitted = {"done": False}
 
         def do_submit(*, close: bool = False) -> bool:
@@ -5250,8 +5276,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if require_prompt and not prompt:
                 self._toast(empty_toast)
                 return False
+            selected = self._selected_engine_keys(buttons)
+            if not selected:
+                self._toast("Pick at least one engine")
+                return False
             submitted["done"] = True
-            on_submit(prompt, chosen_engine())
+            on_submit(prompt, selected)
             if close:
                 dialog.close()
             return True
@@ -5287,21 +5317,25 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         GLib.idle_add(focus_text)
 
     def queue_edit_dialog(self) -> None:
-        """Edit prompt + engine (Qwen / Flux / Krea), then enqueue on PromptForge (#503)."""
+        """Edit prompt + multi-engine toggles, then enqueue on PromptForge (#503/#512)."""
         item = self._integrations_focus_item(still_only=True)
         if item is None:
             return
 
-        def on_submit(prompt: str, engine: str) -> None:
-            self._queue_edit(item, prompt, engine)
+        def on_submit(prompt: str, engines: list[str]) -> None:
+            self._queue_edit(item, prompt, engines)
 
         self._prompt_engine_dialog(
             heading="Edit",
-            body="Edit instruction and engine. Queues on PromptForge (does not run Comfy here).",
+            body=(
+                "Edit instruction and toggle engines (Qwen / Flux / Krea). "
+                "Multi-select queues one PromptForge job per engine."
+            ),
             initial_prompt="",
             require_prompt=True,
             empty_toast="Edit prompt required",
             on_submit=on_submit,
+            multi_engine=True,
         )
 
     def queue_flat_lay_dialog(self) -> None:
@@ -5310,41 +5344,51 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if item is None:
             return
 
-        def on_submit(prompt: str, engine: str) -> None:
-            self._queue_flat_lay(item, prompt, engine)
+        def on_submit(prompt: str, engines: list[str]) -> None:
+            # Flat-lay is QIE-2511 / Qwen-only; ignore other toggles.
+            self._queue_flat_lay(item, prompt, engines[0] if engines else "qwen")
 
         self._prompt_engine_dialog(
             heading="Flat-lay",
             body=(
                 "Qwen + QIE-2511 Extract Outfit → 9:16 wood wardrobe sheet. "
-                "Default prompt is fine — edit if needed. Queues on PromptForge."
+                "Engine is locked to Qwen for this recipe. Queues on PromptForge."
             ),
             initial_prompt=flat_lay_prompt_for(item, None),
             require_prompt=False,
             empty_toast="",
             on_submit=on_submit,
+            engine_choices=[("qwen", "Qwen (QIE-2511)")],
+            default_engine="qwen",
+            multi_engine=False,
         )
 
-    def _queue_edit(self, item: Item, prompt: str, engine: str) -> None:
+    def _queue_edit(self, item: Item, prompt: str, engines: list[str]) -> None:
         inflight = getattr(self, "_edit_inflight", None)
         if inflight is None:
             inflight = set()
             self._edit_inflight = inflight
-        key = f"{item.id}:{engine}"
-        if key in inflight:
+        keys = [f"{item.id}:{eng}" for eng in engines]
+        if any(k in inflight for k in keys):
             self._toast("Already queued")
             return
-        inflight.add(key)
+        for k in keys:
+            inflight.add(k)
 
         def work() -> None:
-            try:
-                result = post_edit(item, prompt=prompt, engine=engine)
-            except Exception:  # noqa: BLE001
-                result = IntegrationResult("offline", "PromptForge not answering")
+            results: list[IntegrationResult] = []
+            for eng in engines:
+                try:
+                    results.append(post_edit(item, prompt=prompt, engine=eng))
+                except Exception:  # noqa: BLE001
+                    results.append(
+                        IntegrationResult("offline", "PromptForge not answering")
+                    )
 
             def apply() -> bool:
-                inflight.discard(key)
-                self._toast(result.toast)
+                for k in keys:
+                    inflight.discard(k)
+                self._toast(summarize_integration_results(results))
                 return False
 
             self._ui_idle(apply)

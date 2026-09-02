@@ -188,6 +188,22 @@ def normalize_edit_engine(raw: str | None) -> str | None:
     return aliases.get(key)
 
 
+def summarize_integration_results(results: list[IntegrationResult]) -> str:
+    """Toast text for one or more per-engine queue attempts (#512)."""
+    if not results:
+        return "No engines selected"
+    ok = [r for r in results if r.status == STATUS_OK]
+    bad = [r for r in results if r.status != STATUS_OK]
+    if len(results) == 1:
+        return results[0].toast
+    if ok and not bad:
+        return f"Queued {len(ok)}"
+    if ok and bad:
+        first_err = bad[0].toast
+        return f"Queued {len(ok)}, {len(bad)} failed · {first_err}"
+    return bad[0].toast if bad else "Nothing queued"
+
+
 def _parse_body(raw: str) -> Any:
     raw = (raw or "").strip()
     if not raw:
