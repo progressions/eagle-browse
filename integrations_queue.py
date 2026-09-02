@@ -45,15 +45,14 @@ FLAT_LAY_H = 1536
 DEFAULT_FLAT_LAY_PROMPT = """Extract the clothing and create a flat mockup.
 Create a flat lay wardrobe sheet from the outfit shown in the reference image.
 Remove any human figure completely. Extract each individual clothing item and
-accessory and arrange them separately on a clean light tan wood surface, with
-small handwritten-style label cards beneath each item.
+accessory and arrange them separately on a clean light tan wood surface.
+Do not add any printed labels, handwritten cards, tags, captions, or text of any kind.
 
 Include a large physical photograph (Polaroid or print) of the original
 reference so the viewer can see the outfit worn.
 
-Style: clean editorial flat lay, light tan wood background, elegant handwritten
-labels, soft shadows, ultra-realistic product photography, 9:16 vertical,
-photorealistic."""
+Style: clean editorial flat lay, light tan wood background, soft shadows,
+ultra-realistic product photography, 9:16 vertical, photorealistic. No text."""
 
 EUNBI_FLAT_LAY_EXTRAS = (
     "Always include on the display: a black velvet choker collar with a small "
