@@ -19,6 +19,7 @@ from integrations_queue import (
     STATUS_FILE_MISSING,
     STATUS_OK,
     STATUS_UNSUPPORTED,
+    IntegrationResult,
     character_for,
     flat_lay_prompt_for,
     normalize_bust_engine,
@@ -29,6 +30,7 @@ from integrations_queue import (
     promptforge_base_url,
     promptforge_build_url,
     resolve_promptforge_history_id,
+    summarize_integration_results,
 )
 
 
@@ -62,6 +64,22 @@ class IntegrationsQueueTest(unittest.TestCase):
         eunbi = SimpleNamespace(tag_set={"eunbi"}, tags=[])
         self.assertEqual(character_for(sofie), "Sofie")
         self.assertEqual(character_for(eunbi), "Eunbi")
+
+    def test_summarize_multi_engine_results(self) -> None:
+        self.assertEqual(summarize_integration_results([]), "No engines selected")
+        one = IntegrationResult(STATUS_OK, "Queued edit (Qwen) on Eric")
+        self.assertEqual(summarize_integration_results([one]), one.toast)
+        three_ok = [
+            IntegrationResult(STATUS_OK, "Queued edit (Qwen) on Eric"),
+            IntegrationResult(STATUS_OK, "Queued edit (Flux) on Eric"),
+            IntegrationResult(STATUS_OK, "Queued edit (Krea) on Eric"),
+        ]
+        self.assertEqual(summarize_integration_results(three_ok), "Queued 3")
+        mixed = [
+            IntegrationResult(STATUS_OK, "Queued edit (Qwen) on Eric"),
+            IntegrationResult(STATUS_UNSUPPORTED, "Unknown edit engine"),
+        ]
+        self.assertIn("Queued 1, 1 failed", summarize_integration_results(mixed))
 
 
 class PostEditTest(unittest.TestCase):
