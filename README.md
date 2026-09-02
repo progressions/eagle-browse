@@ -127,6 +127,34 @@ remote is ahead). Untracked files are ignored for that check.
 
 Packaged commands never invoke this source updater.
 
+## Testing
+
+Standard suite (also run by `makepkg` `check()`):
+
+```bash
+cd ~/tech/eagle-browse   # or a feat/* worktree
+PYTHONPATH=. python -m unittest discover -s tests -v
+PYTHONPYCACHEPREFIX=/tmp/eagle-browse-pyc python -m compileall -q -x '(^|/)(pkg|src|build)/' .
+```
+
+Optional large-catalog fixture / query timing (synthetic data only — no private library):
+
+```bash
+PYTHONPATH=. python3 scripts/synth_catalog.py --count 5000 --bench
+PYTHONPATH=. python3 scripts/synth_catalog.py --count 20000 --out /tmp/synth.library --bench --keep
+```
+
+Optional runtime profiling while navigating a real library:
+
+```bash
+EAGLE_BROWSE_APP_ID=cool.eagle.Browse.Dev EAGLE_BROWSE_NO_UPDATE=1 \
+  EAGLE_BROWSE_THUMB_DEBUG=1 ./eagle-browse --no-update
+# Then zoom (+/-) and watch thumb-cache toast metrics; or:
+python3 -c 'from app import thumb_cache_metrics; print(thumb_cache_metrics())'
+```
+
+Do not add phone-browse tests — that stack was removed (#519).
+
 ## Hotkeys
 
 | Key | Action |
