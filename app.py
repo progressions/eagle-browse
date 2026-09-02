@@ -74,9 +74,12 @@ from upscale_queue import (  # noqa: E402
     already_reason,
     post_upscale,
 )
+from thumb_cache import DEFAULT_BYTE_BUDGET, ThumbTextureCache  # noqa: E402
 from write import INBOX_SIGNAL_FILENAME  # noqa: E402
 
-APP_ID = "cool.eagle.Browse"
+# Override with EAGLE_BROWSE_APP_ID so a worktree can run beside the packaged app
+# (same default id would activate the existing instance and exit).
+APP_ID = os.environ.get("EAGLE_BROWSE_APP_ID", "cool.eagle.Browse").strip() or "cool.eagle.Browse"
 THUMB_SIZE_DEFAULT = 160  # square cell edge (Eagle-style uniform tiles)
 THUMB_SIZE_MIN = 72
 THUMB_SIZE_MAX = 360
@@ -87,6 +90,7 @@ VIEWER_ZOOM_COOLDOWN_S = 0.12
 PAGE_CHUNK = 500  # first page + each infinite-scroll increment
 BULK_EDIT_CONFIRM = 100  # confirm tag/folder writes above this many items
 SEARCH_DEBOUNCE_MS = 150
+THUMB_ZOOM_RECLAIM_MS = 400
 G_PREFIX_TIMEOUT_MS = 800
 # Staging handoff (copy out of library — never writes into .library)
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
@@ -180,14 +184,40 @@ def _spawn_detached(cmd: list[str], env: dict[str, str] | None = None) -> bool:
 
 # Decode thumbs off the UI thread; textures are applied on the main loop.
 _thumb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="eagle-thumb")
-# cache_key → Gdk.Texture (main thread writes; lock for inflight + cache)
-_thumb_textures: dict[str, Gdk.Texture] = {}
-_THUMB_CACHE_MAX = 400
+
+
+def _thumb_byte_budget() -> int:
+    raw = os.environ.get("EAGLE_BROWSE_THUMB_CACHE_MB", "").strip()
+    if raw:
+        try:
+            return max(8, int(raw)) * 1024 * 1024
+        except ValueError:
+            pass
+    return DEFAULT_BYTE_BUDGET
+
+
+# Byte-bounded LRU of decoded textures (main thread writes; lock shared with inflight).
+_thumb_cache: ThumbTextureCache[Gdk.Texture] = ThumbTextureCache(_thumb_byte_budget())
 # Keys currently decoding — skip a second submit for the same key.
 _thumb_inflight: set[str] = set()
 # Waiters for an in-flight key: (list_item, gen)
 _thumb_waiters: dict[str, list[tuple[object, int]]] = {}
 _thumb_lock = threading.Lock()
+
+
+def thumb_cache_metrics() -> dict[str, int]:
+    """Debug snapshot: entries, estimated bytes, inflight, hits/misses/evictions."""
+    with _thumb_lock:
+        m = _thumb_cache.metrics(inflight=len(_thumb_inflight))
+    return {
+        "entries": m.entries,
+        "bytes": m.bytes,
+        "byte_budget": m.byte_budget,
+        "hits": m.hits,
+        "misses": m.misses,
+        "evictions": m.evictions,
+        "inflight": m.inflight,
+    }
 
 
 class ItemObject(GObject.Object):
@@ -322,6 +352,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._inbox_importing = False
         self._scope_text = "all"
         self._thumb_size = THUMB_SIZE_DEFAULT
+        self._thumb_zoom_reclaim_source = 0
         # Sort key id from SORT_OPTIONS (default: newest added first)
         self._sort_key = "added_desc"
         # Smart-folder id → last known item count for sidebar "(N)" labels
@@ -3733,7 +3764,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         cache_key = _thumb_cache_key(path, size)
         with _thumb_lock:
-            cached = _thumb_textures.get(cache_key)
+            cached = _thumb_cache.get(cache_key)
         if cached is not None:
             picture.set_paintable(cached)
             picture.set_visible(True)
@@ -3772,13 +3803,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     _thumb_inflight.discard(cache_key)
                     waiters = _thumb_waiters.pop(cache_key, [])
                     if texture is not None:
-                        if len(_thumb_textures) >= _THUMB_CACHE_MAX:
-                            for _ in range(40):
-                                try:
-                                    _thumb_textures.pop(next(iter(_thumb_textures)))
-                                except StopIteration:
-                                    break
-                        _thumb_textures[cache_key] = texture
+                        _thumb_cache.put(cache_key, texture, size=size)
                 if texture is None:
                     return False
                 for li, waiter_gen in waiters:
@@ -4047,7 +4072,34 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._thumb_size = new
         self._rebind_grid_keep_selection()
         self._sync_columns()
+        self._schedule_thumb_zoom_reclaim()
         self._toast(f"Thumb size · {self._thumb_size}px")
+
+    def _schedule_thumb_zoom_reclaim(self) -> None:
+        """After zoom settles, drop textures decoded for other zoom sizes."""
+        if self._thumb_zoom_reclaim_source:
+            try:
+                GLib.source_remove(self._thumb_zoom_reclaim_source)
+            except Exception:  # noqa: BLE001
+                pass
+            self._thumb_zoom_reclaim_source = 0
+
+        def reclaim() -> bool:
+            self._thumb_zoom_reclaim_source = 0
+            with _thumb_lock:
+                dropped = _thumb_cache.discard_sizes_except(self._thumb_size)
+            if dropped and os.environ.get("EAGLE_BROWSE_THUMB_DEBUG"):
+                m = thumb_cache_metrics()
+                self._toast(
+                    f"Thumb cache · {m['entries']} entries · "
+                    f"{m['bytes'] // (1024 * 1024)}/{m['byte_budget'] // (1024 * 1024)} MiB · "
+                    f"evicted {dropped} old zoom"
+                )
+            return False
+
+        self._thumb_zoom_reclaim_source = GLib.timeout_add(
+            THUMB_ZOOM_RECLAIM_MS, reclaim
+        )
 
     def delete_selected(self) -> None:
         """
@@ -5204,11 +5256,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         with _thumb_lock:
             drop = [
                 k
-                for k in list(_thumb_textures.keys())
+                for k in _thumb_cache.keys()
                 if any(k.startswith(p + "@") or k == p for p in paths)
             ]
             for k in drop:
-                _thumb_textures.pop(k, None)
+                _thumb_cache.pop(k)
                 _thumb_waiters.pop(k, None)
                 _thumb_inflight.discard(k)
 
