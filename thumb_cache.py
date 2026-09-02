@@ -43,6 +43,35 @@ class _Entry(Generic[T]):
     nbytes: int
 
 
+class ThumbWaiterRegistry:
+    """Coalesce decode waiters per cache key (one inflight decode per key)."""
+
+    def __init__(self) -> None:
+        self._waiters: dict[str, list[object]] = {}
+        self._inflight: set[str] = set()
+
+    @property
+    def inflight_count(self) -> int:
+        return len(self._inflight)
+
+    def begin(self, key: str, waiter: object) -> bool:
+        """Register *waiter*. Return True if this caller should start decode."""
+        self._waiters.setdefault(key, []).append(waiter)
+        if key in self._inflight:
+            return False
+        self._inflight.add(key)
+        return True
+
+    def finish(self, key: str) -> list[object]:
+        """Clear inflight and return waiters for *key* (may be empty)."""
+        self._inflight.discard(key)
+        return self._waiters.pop(key, [])
+
+    def discard(self, key: str) -> None:
+        self._inflight.discard(key)
+        self._waiters.pop(key, None)
+
+
 class ThumbTextureCache(Generic[T]):
     """LRU map keyed by thumb cache key; retention limited by byte budget."""
 
