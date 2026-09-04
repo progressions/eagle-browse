@@ -7,6 +7,12 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-09-04
+
+### Added
+
+- Shift+E sends every selected video/audio to the current Clip Editor project; Ctrl+Shift+E starts a new project with the whole selection ([#539](https://app.fizzy.do/6109848/cards/539) / PR #29). Requires Clip Editor with repeated `--video`/`--audio` (#540).
+
 ## [0.1.4] — 2026-09-02
 
 ### Added
@@ -64,7 +70,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 - Initial packaged release of the keyboard-first GTK Eagle.cool browser and inbox watcher.
 
-[Unreleased]: https://github.com/progressions/eagle-browse/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/progressions/eagle-browse/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/progressions/eagle-browse/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/progressions/eagle-browse/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/progressions/eagle-browse/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/progressions/eagle-browse/compare/v0.1.1...v0.1.2
