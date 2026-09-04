@@ -889,7 +889,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints = Gtk.Label(
             label=(
                 "Enter open (image inline · video/audio mpv) · Esc close viewer · "
-                "i/o video marks · x cut · p save frame · Shift+E add to editor · Ctrl+Shift+E new editor project · "
+                "i/o video marks · x cut · p save frame · Shift+E add selected to editor · Ctrl+Shift+E new editor project · "
                 "t tags · f folders · u integrations · gg / Shift+G jump · gs / gr set · Ctrl+A all · Del · Ctrl+Z · Super+W · ?"
             ),
             xalign=0,
@@ -2566,8 +2566,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             )),
             ("Use assets", (
                 ("e", "Reveal in Files"),
-                ("Shift+E", "Add to the current clip-editor project"),
-                ("Ctrl+Shift+E", "Create a clip-editor project"),
+                ("Shift+E", "Add selected video/audio to the current clip-editor project"),
+                ("Ctrl+Shift+E", "New clip-editor project from the selected video/audio"),
                 ("y", "Copy Eagle ID"),
                 ("Shift+Y  or  c", "Copy file path"),
                 ("s", "Stage marked assets"),
