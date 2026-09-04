@@ -75,6 +75,7 @@ from upscale_queue import (  # noqa: E402
     already_reason,
     post_upscale,
 )
+from clip_editor_hand import clip_editor_argv, media_flag  # noqa: E402
 from shutdown_gate import wrap_idle_callback  # noqa: E402
 from thumb_cache import (  # noqa: E402
     DEFAULT_BYTE_BUDGET,
@@ -888,7 +889,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints = Gtk.Label(
             label=(
                 "Enter open (image inline · video/audio mpv) · Esc close viewer · "
-                "i/o video marks · x cut · p save frame · Shift+E add to editor · Ctrl+Shift+E new editor project · "
+                "i/o video marks · x cut · p save frame · Shift+E add selected to editor · Ctrl+Shift+E new editor project · "
                 "t tags · f folders · u integrations · gg / Shift+G jump · gs / gr set · Ctrl+A all · Del · Ctrl+Z · Super+W · ?"
             ),
             xalign=0,
@@ -2565,8 +2566,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             )),
             ("Use assets", (
                 ("e", "Reveal in Files"),
-                ("Shift+E", "Add to the current clip-editor project"),
-                ("Ctrl+Shift+E", "Create a clip-editor project"),
+                ("Shift+E", "Add selected video/audio to the current clip-editor project"),
+                ("Ctrl+Shift+E", "New clip-editor project from the selected video/audio"),
                 ("y", "Copy Eagle ID"),
                 ("Shift+Y  or  c", "Copy file path"),
                 ("s", "Stage marked assets"),
@@ -4387,27 +4388,31 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._toast(f"Copied Eagle id · {iid}")
 
     def open_selected_in_clip_editor(self, *, new_project: bool = False) -> None:
-        """Shift+E adds to the current clip-editor project. Ctrl+Shift+E starts a new one."""
+        """Shift+E adds all selected video/audio to the current clip-editor project.
+
+        Ctrl+Shift+E starts a new project, then adds every selected video/audio.
+        """
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing selected")
             return
-        item = items[0]
-        sid = self.selected_item.id if self.selected_item is not None else None
-        if sid:
-            for it in items:
-                if it.id == sid:
-                    item = it
-                    break
-        if not item.path.is_file():
-            self._toast("File missing")
-            return
-        if item.is_video:
-            flag = "--video"
-        elif item.is_audio:
-            flag = "--audio"
-        else:
-            self._toast("Clip editor is for video or audio")
+        pairs: list[tuple[str, str]] = []
+        skipped_stills = 0
+        missing = 0
+        for it in items:
+            flag = media_flag(is_video=it.is_video, is_audio=it.is_audio)
+            if flag is None:
+                skipped_stills += 1
+                continue
+            if not it.path.is_file():
+                missing += 1
+                continue
+            pairs.append((flag, str(it.path.resolve())))
+        if not pairs:
+            if missing and not skipped_stills:
+                self._toast("File missing")
+            else:
+                self._toast("Clip editor is for video or audio")
             return
         exe = shutil.which("clip-editor")
         if not exe:
@@ -4416,20 +4421,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if not exe:
             self._toast("clip-editor not found")
             return
-        path = str(item.path.resolve())
-        cmd = [exe, "gui"]
-        if new_project:
-            cmd.append("--new")
-        cmd.extend([flag, path])
+        cmd = clip_editor_argv(exe, pairs, new_project=new_project)
         if not _spawn_detached(cmd):
             self._toast("Could not open clip editor")
             return
+        n = len(pairs)
+        extra = []
+        if skipped_stills:
+            extra.append(f"{skipped_stills} stills skipped")
+        if missing:
+            extra.append(f"{missing} missing")
+        suffix = f" ({', '.join(extra)})" if extra else ""
         if new_project:
-            self._toast(f"Editor new · {item.display_name}")
-        elif item.is_audio:
-            self._toast(f"Editor audio · {item.display_name}")
+            self._toast(f"Editor new · {n} clip{'s' if n != 1 else ''}{suffix}")
         else:
-            self._toast(f"Editor add · {item.display_name}")
+            self._toast(f"Editor add · {n} clip{'s' if n != 1 else ''}{suffix}")
 
     def reveal_selected_in_files(self) -> None:
         """Open Nautilus with the focused (or first marked) file selected."""
