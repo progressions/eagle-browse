@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eagle-browse"
-version = "0.1.4"
+version = "0.1.5"
 description = "Keyboard-first GTK browser and tools for an Eagle.cool library"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,7 @@ py-modules = [
   "audio_crop",
   "backfill_pf_tags",
   "cli",
+  "clip_editor_hand",
   "config",
   "crop",
   "filters",
