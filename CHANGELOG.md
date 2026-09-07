@@ -7,6 +7,17 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-09-07
+
+### Added
+
+- Opt-in `inbox_subfolders_as_categories` configuration (default false): recursively import intake media into the category named by its first subfolder. Category matching is case-insensitive, and new names are lowercase ([#551](https://app.fizzy.do/6109848/cards/551) / PR #31).
+
+### Fixed
+
+- Track intake readiness and duplicate-review signals by relative path so identical filenames in different subfolders remain independent.
+- Refresh newly created categories in the browser sidebar and reload reused items so category membership, filtered views, and counts update immediately.
+
 ## [0.1.5] — 2026-09-04
 
 ### Added
