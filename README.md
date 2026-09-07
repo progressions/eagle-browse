@@ -302,6 +302,20 @@ Inbox path comes from a TOML config, not from code:
 
 See `config.toml.example`. Relative paths are resolved from the file that set them.
 
+Set `inbox_subfolders_as_categories = true` in the TOML configuration to import
+media recursively beneath intake subfolders. The default is `false` (flat intake).
+For example, `intake/video/dance.mp4` is imported into the Eagle `video` category.
+Deeper paths such as `intake/video/dance/clip.mp4` also use the first directory,
+`video`. Existing top-level categories are reused case-insensitively; new names
+are lowercase (`IMage` and `image` resolve to one category). Existing category
+spelling is preserved. Files at the intake root keep their usual behavior.
+Category membership is also added when reusing an existing duplicate, preserving
+its other categories and applying folder auto-tags. Successfully imported files
+are consumed; directories remain available for future drops. Hidden directories
+(including `.dup-queue`) and symlinks are not scanned. ZIP intake continues to
+unpack root-level archives flat; directories inside archives do not create categories.
+Restart the watcher after changing configuration.
+
 **Only one process should auto-consume the inbox** — the headless
 `eagle-inbox-watch` on a single machine (see below). The GUI does **not**
 poll or import on open. Opening Eagle Browse on Ginger, Jack, and Eric at

@@ -7069,7 +7069,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     unzipped += n
             files = list_inbox_files(inbox)
             if only_names is not None:
-                files = [p for p in files if p.name in only_names]
+                files = [p for p in files if str(p.relative_to(inbox)) in only_names]
             # Drop zero-byte / incomplete stubs (leave partials in inbox)
             ready: list[Path] = []
             deferred_names: list[str] = []

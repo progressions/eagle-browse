@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from config import DEFAULT_INBOX  # noqa: F401
+from config import DEFAULT_INBOX, load_settings  # noqa: F401
 from write import (
     WriteError,
     announce_imported_ids,
@@ -240,6 +240,7 @@ def reimport_existing(
     source: Path | None = None,
     move_source: bool = True,
     hold_lock: bool = False,
+    inbox_root: Path | None = None,
 ) -> ImportResult:
     """
     Eagle "use existing": bump import timestamps, do not create a new item.
@@ -258,6 +259,12 @@ def reimport_existing(
     def _do() -> ImportResult:
         try:
             data = load_item_metadata(item_dir)
+            if source is not None:
+                from write import apply_folders, apply_tags, folder_auto_tags_from_metadata
+
+                folders = intake_category_ids(library_root, source, inbox_root)
+                apply_folders(data, add_folders=folders)
+                apply_tags(data, add_tags=folder_auto_tags_from_metadata(library_root, folders))
             # save_item_metadata sets modificationTime + lastModified + mtime.json
             save_item_metadata(library_root, item_dir, data, do_backup=True)
             if move_source and source is not None:
@@ -466,9 +473,45 @@ def is_not_ready_error(error: str | None) -> bool:
 def list_inbox_files(inbox: Path) -> list[Path]:
     if not inbox.is_dir():
         return []
-    files = [p for p in inbox.iterdir() if is_importable(p)]
+    if load_settings().inbox_subfolders_as_categories:
+        candidates = []
+        for root, dirs, names in os.walk(inbox, followlinks=False):
+            dirs[:] = [d for d in dirs if not d.startswith(".")
+                       and not (Path(root) / d).is_symlink()]
+            candidates.extend(Path(root) / name for name in names)
+    else:
+        candidates = inbox.iterdir()
+    files = [p for p in candidates if not p.is_symlink() and is_importable(p)]
     files.sort(key=lambda p: p.stat().st_mtime)
     return files
+
+
+def intake_category_ids(
+    library_root: Path, source: Path, inbox_root: Path | None = None,
+) -> list[str]:
+    """Resolve the first intake directory under the caller's write_session."""
+    settings = load_settings()
+    if not settings.inbox_subfolders_as_categories:
+        return []
+    inbox = (inbox_root or settings.inbox).expanduser().resolve()
+    try:
+        parts = source.resolve().relative_to(inbox).parts
+    except ValueError:
+        return []
+    if len(parts) < 2 or any(p.startswith(".") for p in parts):
+        return []
+    from write import load_library_metadata, save_library_metadata, new_library_id
+
+    name = parts[0].casefold()
+    meta = load_library_metadata(library_root)
+    folders = meta.setdefault("folders", [])
+    for folder in folders:
+        if str(folder.get("name", "")).casefold() == name:
+            return [folder["id"]]
+    folder_id = new_library_id()
+    folders.append({"id": folder_id, "name": name, "children": [], "tags": []})
+    save_library_metadata(library_root, meta)
+    return [folder_id]
 
 
 def list_inbox_zips(inbox: Path) -> list[Path]:
@@ -989,6 +1032,7 @@ def import_file(
     source: Path,
     *,
     folder_ids: list[str] | None = None,
+    inbox_root: Path | None = None,
     tags: list[str] | None = None,
     move_source: bool = True,
     hold_lock: bool = False,
@@ -1079,6 +1123,9 @@ def import_file(
         thumb_path = item_dir / f"{name}_thumbnail.png"
 
         try:
+            assigned_folders = list(dict.fromkeys(
+                folder_ids + intake_category_ids(library_root, source, inbox_root)
+            ))
             shutil.copy2(source, dest_media)
             if kind == "image":
                 if not _make_image_thumbnail(dest_media, thumb_path):
@@ -1093,9 +1140,9 @@ def import_file(
             from write import canonicalize_tags, folder_auto_tags_from_metadata
 
             item_tags = canonicalize_tags(tags)
-            if folder_ids:
+            if assigned_folders:
                 try:
-                    for t in folder_auto_tags_from_metadata(library_root, folder_ids):
+                    for t in folder_auto_tags_from_metadata(library_root, assigned_folders):
                         if t not in item_tags:
                             item_tags.append(t)
                     item_tags = canonicalize_tags(item_tags)
@@ -1110,7 +1157,7 @@ def import_file(
                 "mtime": file_mtime,
                 "ext": ext,
                 "tags": item_tags,
-                "folders": folder_ids,
+                "folders": assigned_folders,
                 "isDeleted": False,
                 "url": "",
                 "annotation": "",
@@ -1203,6 +1250,7 @@ def import_inbox(
                         library_root,
                         f,
                         folder_ids=folder_ids,
+                        inbox_root=inbox,
                         tags=tags,
                         move_source=move_source,
                         hold_lock=True,
