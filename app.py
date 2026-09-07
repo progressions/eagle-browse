@@ -6914,6 +6914,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         """
         if not items:
             return
+        self._refresh_import_categories()
         visible = [it for it in items if self._item_matches_current_view(it)]
         can_prepend = (
             bool(visible)
@@ -6945,6 +6946,38 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast(f"{len(items)} new")
             # Watcher skips its chime while the GUI pid file is live.
             play_sound("notification", once=True)
+
+    def _refresh_import_categories(self) -> None:
+        """Make categories created by intake visible before filtering new items."""
+        previous = dict(self.library.folder_paths)
+        self.library.reload_metadata_trees()
+        self._smart_counts.clear()
+        if self.library.folder_paths != previous:
+            self._populate_sidebar(select_current=True)
+
+    def _finish_inbox_import(self, results: list) -> None:
+        """Refresh both new and reused items after an interactive intake batch."""
+        new_items: list[Item] = []
+        reused = False
+        for result in results:
+            if not result.ok or not result.item_id:
+                continue
+            if result.reused:
+                self.library.load_item(result.item_id)
+                reused = True
+            else:
+                item = self.library.ingest_imported(result.item_id)
+                if item is not None:
+                    new_items.append(item)
+        self._rebuild_set_counts(force=True)
+        if new_items:
+            self._apply_new_items(new_items, toast=False)
+        else:
+            self._refresh_import_categories()
+        if reused or not new_items:
+            # Re-query even in mixed batches: prepend alone retains stale rows.
+            self.refresh_items(reset_selection=False, scroll_to_top=False)
+            self._refresh_special_counts()
 
     def _restore_selection_after_grid_insert(self) -> None:
         """After prepending store rows, re-pin selection by item id (not index).
@@ -7069,7 +7102,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     unzipped += n
             files = list_inbox_files(inbox)
             if only_names is not None:
-                files = [p for p in files if p.name in only_names]
+                files = [p for p in files if str(p.relative_to(inbox)) in only_names]
             # Drop zero-byte / incomplete stubs (leave partials in inbox)
             ready: list[Path] = []
             deferred_names: list[str] = []
@@ -7188,21 +7221,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._inbox_importing = False
                 if ok:
                     play_sound("notification", once=True)
-                    self._rebuild_set_counts(force=True)
-                    new_items: list[Item] = []
-                    for r in results:
-                        if (
-                            getattr(r, "ok", False)
-                            and getattr(r, "item_id", None)
-                            and not getattr(r, "reused", False)
-                        ):
-                            item = self.library.ingest_imported(r.item_id)
-                            if item is not None:
-                                new_items.append(item)
-                    if new_items:
-                        self._apply_new_items(new_items, toast=False)
-                    else:
-                        self.refresh_items()
+                    self._finish_inbox_import(results)
                 elif fail_n:
                     play_sound("error")
                 parts: list[str] = []

@@ -32,6 +32,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from sounds import gui_is_running, play_sound  # noqa: E402
+from config import load_settings  # noqa: E402
 from import_media import (  # noqa: E402
     DEFAULT_INBOX,
     check_zip_complete,
@@ -112,22 +113,23 @@ def _stable_ready(
             continue
         if sz <= 0:
             continue
-        current[p.name] = sz
-        prev = sizes.get(p.name)
+        path_key = str(p.relative_to(inbox))
+        current[path_key] = sz
+        prev = sizes.get(path_key)
         if prev is not None and prev == sz:
             ok, reason = check_media_complete(p)
             if ok:
                 ready.append(p)
                 if wait_logged is not None:
-                    wait_logged.discard(p.name)
+                    wait_logged.discard(path_key)
             else:
                 # Still downloading or corrupt — keep waiting.
-                key = f"{p.name}:{sz}"
+                key = f"{path_key}:{sz}"
                 if wait_logged is not None and key not in wait_logged:
                     wait_logged.add(key)
                     # Drop stale keys for this name
                     wait_logged.difference_update(
-                        {k for k in list(wait_logged) if k.startswith(p.name + ":") and k != key}
+                        {k for k in list(wait_logged) if k.startswith(path_key + ":") and k != key}
                     )
                     LOG.info("waiting on %s: %s", p.name, reason)
     return ready, current
@@ -209,6 +211,7 @@ def process_ready(
     notify: bool,
     sound: bool,
     announced_dups: set[tuple] | None = None,
+    inbox_root: Path | None = None,
 ) -> tuple[int, int, int]:
     """
     Import ready files. Returns (new_count, reused_count, fail_count).
@@ -239,6 +242,7 @@ def process_ready(
                 r = import_file(
                     library.root,
                     f,
+                    inbox_root=inbox_root,
                     move_source=True,
                     hold_lock=True,
                     force_new=True,
@@ -259,14 +263,19 @@ def process_ready(
                 # Open GUI owns keep-original / import-new. Leave the file
                 # in intake and signal the browser instead of auto-reusing.
                 if gui_up and dup_policy == "reuse":
+                    intake = (inbox_root or load_settings().inbox).resolve()
+                    try:
+                        source_name = str(match.source.resolve().relative_to(intake))
+                    except ValueError:
+                        source_name = match.source.name
                     try:
                         st = match.source.stat()
-                        key = (match.source.name, int(st.st_size), int(st.st_mtime))
+                        key = (source_name, int(st.st_size), int(st.st_mtime))
                     except OSError:
-                        key = (match.source.name, match.size, 0)
+                        key = (source_name, match.size, 0)
                     if key not in announced:
                         announced.add(key)
-                        pending_dups.append(match.source.name)
+                        pending_dups.append(source_name)
                         LOG.info(
                             "left duplicate %s for GUI (matches %s)",
                             match.source.name,
@@ -278,6 +287,7 @@ def process_ready(
                         library.root,
                         match.existing_id,
                         source=match.source,
+                        inbox_root=inbox_root,
                         move_source=True,
                         hold_lock=True,
                     )
@@ -295,6 +305,7 @@ def process_ready(
                     r = import_file(
                         library.root,
                         match.source,
+                        inbox_root=inbox_root,
                         move_source=True,
                         hold_lock=True,
                         force_new=True,
@@ -398,6 +409,7 @@ def run_loop(
                     notify=notify,
                     sound=sound,
                     announced_dups=announced_dups,
+                    inbox_root=inbox,
                 )
         except Exception:  # noqa: BLE001
             LOG.exception("poll error")
