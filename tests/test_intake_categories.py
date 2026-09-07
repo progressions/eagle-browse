@@ -3,12 +3,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 from config import Settings, load_settings
 from import_media import import_file, list_inbox_files, reimport_existing
 from inbox_watch import _stable_ready, process_ready
+from library import EagleLibrary
 
 
 class IntakeCategoriesTest(unittest.TestCase):
@@ -131,6 +132,71 @@ class IntakeCategoriesTest(unittest.TestCase):
             self.assertTrue(load_settings().inbox_subfolders_as_categories)
             config.write_text('inbox_subfolders_as_categories = "false"')
             self.assertFalse(load_settings().inbox_subfolders_as_categories)
+
+    def window_for(self, library):
+        # Exercise actual completion methods without constructing a GTK window.
+        try:
+            from app import EagleBrowseWindow
+        except (ImportError, ValueError) as exc:
+            self.skipTest(f"GTK dependencies unavailable: {exc}")
+        from types import MethodType
+
+        window = SimpleNamespace(
+            library=library, _smart_counts={"stale": 1},
+            _populate_sidebar=Mock(), _rebuild_set_counts=Mock(),
+            refresh_items=Mock(), _refresh_special_counts=Mock(),
+            _item_matches_current_view=Mock(return_value=False),
+        )
+        for name in ("_refresh_import_categories", "_finish_inbox_import", "_apply_new_items"):
+            setattr(window, name, MethodType(getattr(EagleBrowseWindow, name), window))
+        return window
+
+    def test_watcher_ingest_refreshes_categories_before_matching(self):
+        library = EagleLibrary(self.library)
+        library.load()
+        result, data = self.imported(self.media("Video/new.png"))
+        item = library.load_item(result.item_id)
+        window = self.window_for(library)
+
+        def match(item):
+            self.assertEqual(library.folder_paths[item.folders[0]], "video")
+            return False
+
+        window._item_matches_current_view.side_effect = match
+        window._apply_new_items([item])
+        self.assertEqual(library.folder_paths[data["folders"][0]], "video")
+        window._populate_sidebar.assert_called_once_with(select_current=True)
+        self.assertEqual(window._smart_counts, {})
+
+    def test_reuse_completion_refreshes_membership_and_views(self):
+        original, _ = self.imported(self.media("original.png"))
+        library = EagleLibrary(self.library)
+        library.load()
+        # Prime derived counts before the disk-only write.
+        self.assertEqual(library.count_special_view("uncategorized"), 1)
+        result = reimport_existing(self.library, original.item_id,
+                                   source=self.media("video/copy.png"))
+        window = self.window_for(library)
+        window._finish_inbox_import([result])
+        self.assertTrue(library.items_by_id[original.item_id].folders)
+        self.assertEqual(library.count_special_view("uncategorized"), 0)
+        window._populate_sidebar.assert_called_once_with(select_current=True)
+        window.refresh_items.assert_called_once_with(reset_selection=False, scroll_to_top=False)
+        window._refresh_special_counts.assert_called_once()
+
+    def test_mixed_batch_refreshes_reused_rows_after_new_items(self):
+        original, _ = self.imported(self.media("original.png"))
+        library = EagleLibrary(self.library)
+        library.load()
+        reused = reimport_existing(self.library, original.item_id,
+                                   source=self.media("video/copy.png"))
+        new, _ = self.imported(self.media("video/new.png"))
+        window = self.window_for(library)
+        window._finish_inbox_import([new, reused])
+        self.assertEqual(library.items_by_id[original.item_id].folders,
+                         library.items_by_id[new.item_id].folders)
+        window.refresh_items.assert_called_once_with(reset_selection=False, scroll_to_top=False)
+        window._populate_sidebar.assert_called_once_with(select_current=True)
 
 
 if __name__ == "__main__":
