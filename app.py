@@ -61,6 +61,7 @@ from integrations_queue import (  # noqa: E402
     DEFAULT_WARDROBE_ENGINE,
     IntegrationResult,
     NO_PROMPT_LINKED_TOAST,
+    extra_still_ref_ids,
     flat_lay_prompt_for,
     post_bust_enhance,
     post_edit,
@@ -5322,20 +5323,52 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         GLib.idle_add(focus_text)
 
+    def _edit_primary_and_refs(self) -> tuple[Item, list[str]] | None:
+        """Focused still as ``eagle_id``; other selected stills as refs (#577)."""
+        focus = self.selected_item
+        if focus is None:
+            items = self._effective_hand_off_items()
+            if not items:
+                self._toast("Nothing selected")
+                return None
+            focus = items[0]
+        if not focus.is_image:
+            self._toast("This action is for stills")
+            return None
+        if not focus.path.is_file():
+            self._toast("File missing")
+            return None
+        refs = extra_still_ref_ids(focus, self._effective_hand_off_items())
+        return focus, refs
+
     def queue_edit_dialog(self) -> None:
-        """Edit prompt + multi-engine toggles, then enqueue on PromptForge (#503/#512)."""
-        item = self._integrations_focus_item(still_only=True)
-        if item is None:
+        """Edit prompt + multi-engine toggles, then enqueue on PromptForge (#503/#512/#577)."""
+        pair = self._edit_primary_and_refs()
+        if pair is None:
             return
+        item, ref_ids = pair
 
         def on_submit(prompt: str, engines: list[str]) -> None:
-            self._queue_edit(item, prompt, engines)
+            self._queue_edit(item, prompt, engines, ref_ids)
 
+        if ref_ids:
+            n = len(ref_ids)
+            refs_bit = (
+                f" {n} extra selected still will be sent as a ref."
+                if n == 1
+                else f" {n} extra selected stills will be sent as refs."
+            )
+        else:
+            refs_bit = (
+                " Other selected stills (if any) are sent as extra refs."
+            )
         self._prompt_engine_dialog(
             heading="Edit",
             body=(
                 "Edit instruction and toggle engines (Qwen / Flux / Krea). "
-                "Multi-select queues one PromptForge job per engine."
+                "The focused still is the edit target."
+                f"{refs_bit} "
+                "Engine checkboxes queue one PromptForge job per engine."
             ),
             initial_prompt="",
             require_prompt=True,
@@ -5369,7 +5402,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             multi_engine=False,
         )
 
-    def _queue_edit(self, item: Item, prompt: str, engines: list[str]) -> None:
+    def _queue_edit(
+        self,
+        item: Item,
+        prompt: str,
+        engines: list[str],
+        ref_ids: list[str] | None = None,
+    ) -> None:
         inflight = getattr(self, "_edit_inflight", None)
         if inflight is None:
             inflight = set()
@@ -5380,12 +5419,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         for k in keys:
             inflight.add(k)
+        refs = list(ref_ids or [])
 
         def work() -> None:
             results: list[IntegrationResult] = []
             for eng in engines:
                 try:
-                    results.append(post_edit(item, prompt=prompt, engine=eng))
+                    results.append(
+                        post_edit(
+                            item,
+                            prompt=prompt,
+                            engine=eng,
+                            ref_image_eagle_ids=refs or None,
+                        )
+                    )
                 except Exception:  # noqa: BLE001
                     results.append(
                         IntegrationResult("offline", "PromptForge not answering")

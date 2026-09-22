@@ -39,6 +39,8 @@ EDIT_ENGINES = ("qwen", "flux", "krea")
 DEFAULT_BUST_ENGINE = "klein"
 DEFAULT_WARDROBE_ENGINE = "qwen"
 DEFAULT_EDIT_ENGINE = "qwen"
+# PromptForge Qwen Image 2.1 edit: image1 = focused still, image2–10 = extras (#577).
+EDIT_REF_LIMIT = 9
 # Flat-lay (#510): wardrobe-flatlay skill recipe — QIE-2511 @ 1.0, 9:16 wood pad.
 FLAT_LAY_W = 864
 FLAT_LAY_H = 1536
@@ -186,6 +188,42 @@ def normalize_edit_engine(raw: str | None) -> str | None:
         "krea2": "krea",
     }
     return aliases.get(key)
+
+
+def sanitize_ref_image_eagle_ids(
+    primary_id: str, extra_ids: list[str] | None
+) -> list[str]:
+    """Unique extra Eagle ids, never the primary, capped at ``EDIT_REF_LIMIT``."""
+    primary = str(primary_id or "").strip()
+    out: list[str] = []
+    seen = {primary} if primary else set()
+    for raw in extra_ids or []:
+        iid = str(raw or "").strip()
+        if not iid or iid in seen:
+            continue
+        seen.add(iid)
+        out.append(iid)
+        if len(out) >= EDIT_REF_LIMIT:
+            break
+    return out
+
+
+def extra_still_ref_ids(primary: Any, items: list[Any] | None) -> list[str]:
+    """Other selected stills as PromptForge ``ref_image_eagle_ids`` (max 9).
+
+    Skips the primary id, non-stills, missing files, and duplicates. Order
+    follows *items* (view selection order).
+    """
+    extras: list[str] = []
+    for it in items or []:
+        if not getattr(it, "is_image", False):
+            continue
+        if _file_missing(it):
+            continue
+        iid = str(getattr(it, "id", "") or "").strip()
+        if iid:
+            extras.append(iid)
+    return sanitize_ref_image_eagle_ids(str(getattr(primary, "id", "") or ""), extras)
 
 
 def summarize_integration_results(results: list[IntegrationResult]) -> str:
@@ -360,8 +398,15 @@ def post_edit(
     width: int | None = None,
     height: int | None = None,
     toast_kind: str = "edit",
+    ref_image_eagle_ids: list[str] | None = None,
 ) -> IntegrationResult:
-    """POST /api/v1/edit for the focused still (PromptForge edit queue, #503/#510)."""
+    """POST /api/v1/edit for the focused still (PromptForge edit queue, #503/#510/#577).
+
+    *engine* stays ``qwen`` / ``flux`` / ``krea`` — PromptForge maps ``qwen``
+    to Qwen Image 2.1. Extra selected stills go in ``ref_image_eagle_ids``
+    (``<image2>``…); omit the key when there are none so a one-still queue
+    is unchanged.
+    """
     if not getattr(item, "is_image", False):
         return IntegrationResult(STATUS_UNSUPPORTED, f"{toast_kind.capitalize()} is for stills")
     if _file_missing(item):
@@ -380,6 +425,9 @@ def post_edit(
         "prompt": text,
         "engine": eng,
     }
+    refs = sanitize_ref_image_eagle_ids(str(item.id), ref_image_eagle_ids)
+    if refs:
+        payload["ref_image_eagle_ids"] = refs
     if width is not None and height is not None:
         payload["width"] = max(1, int(width))
         payload["height"] = max(1, int(height))
@@ -387,7 +435,11 @@ def post_edit(
     if result.status == STATUS_OK:
         label = {"qwen": "Qwen", "flux": "Flux", "krea": "Krea"}.get(eng, eng)
         kind = (toast_kind or "edit").strip() or "edit"
-        return IntegrationResult(STATUS_OK, f"Queued {kind} ({label}) on Eric")
+        extra = ""
+        if refs:
+            n = len(refs)
+            extra = f", {n} ref" if n == 1 else f", {n} refs"
+        return IntegrationResult(STATUS_OK, f"Queued {kind} ({label}{extra}) on Eric")
     return result
 
 
