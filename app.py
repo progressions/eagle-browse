@@ -5065,22 +5065,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return [key for key, btn in buttons.items() if btn.get_active()]
 
     def queue_enhance_bust_dialog(self) -> None:
-        """Pick one or more bust engines (Krea / Qwen / Flux), then enqueue."""
+        """Pick one or more bust engines. Qwen is checked; Flux and Krea stay optional."""
         item = self._integrations_focus_item(still_only=True)
         if item is None:
             return
 
         dialog = Adw.AlertDialog(
             heading="Enhance bust",
-            body=(
-                "Toggle engines (multi-select). Default is Flux Klein. "
-                "Submit queues one PromptForge job per selected engine."
-            ),
+            body="",
         )
         engines, buttons = self._engine_toggle_row(
             [
-                ("klein", "Flux Klein (default)"),
-                ("qwen", "Qwen"),
+                ("qwen", "Qwen (default)"),
+                ("klein", "Flux Klein"),
                 ("krea2", "Krea 2"),
             ],
             default_key=DEFAULT_BUST_ENGINE,
