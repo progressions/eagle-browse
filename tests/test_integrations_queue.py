@@ -184,7 +184,7 @@ class PostEditTest(unittest.TestCase):
         self.assertEqual(captured["payload"]["eagle_id"], "eagle-1")
         self.assertEqual(captured["payload"]["engine"], "qwen")
 
-    def test_ref_ids_capped_and_flux_krea_labels_unchanged(self) -> None:
+    def test_qwen_ref_ids_capped(self) -> None:
         captured: dict = {}
 
         def fake_post_json(path: str, payload: dict):
@@ -198,14 +198,36 @@ class PostEditTest(unittest.TestCase):
                 post_edit(
                     item,
                     prompt="use refs",
-                    engine="krea",
+                    engine="qwen",
                     ref_image_eagle_ids=extras,
                 )
 
         refs = captured["payload"]["ref_image_eagle_ids"]
         self.assertEqual(len(refs), EDIT_REF_LIMIT)
         self.assertEqual(refs, extras[:EDIT_REF_LIMIT])
-        self.assertEqual(captured["payload"]["engine"], "krea")
+        self.assertEqual(captured["payload"]["engine"], "qwen")
+
+    def test_flux_and_krea_ignore_qwen_refs(self) -> None:
+        payloads: list[dict] = []
+
+        def fake_post_json(path: str, payload: dict):
+            payloads.append(payload)
+            return IntegrationResult(STATUS_OK, "Queued on Eric")
+
+        item = SimpleNamespace(id="eagle-1", is_image=True, path=Path("/x.png"))
+        with mock.patch("integrations_queue._file_missing", return_value=False):
+            with mock.patch("integrations_queue._post_json", side_effect=fake_post_json):
+                flux = post_edit(
+                    item, prompt="edit", engine="flux", ref_image_eagle_ids=["ref-1"]
+                )
+                krea = post_edit(
+                    item, prompt="edit", engine="krea", ref_image_eagle_ids=["ref-1"]
+                )
+
+        self.assertEqual([p["engine"] for p in payloads], ["flux", "krea"])
+        self.assertTrue(all("ref_image_eagle_ids" not in p for p in payloads))
+        self.assertEqual(flux.toast, "Queued edit (Flux) on Eric")
+        self.assertEqual(krea.toast, "Queued edit (Krea) on Eric")
 
 
 class ExtraStillRefIdsTest(unittest.TestCase):
@@ -235,7 +257,7 @@ class ExtraStillRefIdsTest(unittest.TestCase):
 
 
 class PostFlatLayTest(unittest.TestCase):
-    def test_posts_qie_job_916_with_default_prompt(self) -> None:
+    def test_posts_qwen_21_job_916_with_default_prompt(self) -> None:
         captured: dict = {}
 
         def fake_post_json(path: str, payload: dict):
@@ -257,7 +279,7 @@ class PostFlatLayTest(unittest.TestCase):
                 result = post_flat_lay(item, prompt=None, engine="flux")
 
         self.assertEqual(result.status, STATUS_OK)
-        self.assertIn("qie-2511", result.toast.lower())
+        self.assertIn("qwen 2.1", result.toast.lower())
         self.assertEqual(captured["path"], EDIT_PATH)
         self.assertEqual(captured["payload"]["eagle_id"], "eagle-flat")
         self.assertEqual(captured["payload"]["engine"], "qwen")

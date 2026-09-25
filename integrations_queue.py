@@ -41,7 +41,7 @@ DEFAULT_WARDROBE_ENGINE = "qwen"
 DEFAULT_EDIT_ENGINE = "qwen"
 # PromptForge Qwen Image 2.1 edit: image1 = focused still, image2–10 = extras (#577).
 EDIT_REF_LIMIT = 9
-# Flat-lay (#510): wardrobe-flatlay skill recipe — QIE-2511 @ 1.0, 9:16 wood pad.
+# Flat-lay (#510/#576): Qwen Image 2.1 wardrobe extraction, 9:16 wood pad.
 FLAT_LAY_W = 864
 FLAT_LAY_H = 1536
 DEFAULT_FLAT_LAY_PROMPT = """Extract the clothing and create a flat mockup.
@@ -403,9 +403,9 @@ def post_edit(
     """POST /api/v1/edit for the focused still (PromptForge edit queue, #503/#510/#577).
 
     *engine* stays ``qwen`` / ``flux`` / ``krea`` — PromptForge maps ``qwen``
-    to Qwen Image 2.1. Extra selected stills go in ``ref_image_eagle_ids``
-    (``<image2>``…); omit the key when there are none so a one-still queue
-    is unchanged.
+    to Qwen Image 2.1. Only Qwen receives extra selected stills in
+    ``ref_image_eagle_ids`` (``<image2>``…). Flux and Krea remain single-image
+    edits. Omit the key when there are no Qwen refs.
     """
     if not getattr(item, "is_image", False):
         return IntegrationResult(STATUS_UNSUPPORTED, f"{toast_kind.capitalize()} is for stills")
@@ -425,7 +425,11 @@ def post_edit(
         "prompt": text,
         "engine": eng,
     }
-    refs = sanitize_ref_image_eagle_ids(str(item.id), ref_image_eagle_ids)
+    refs = (
+        sanitize_ref_image_eagle_ids(str(item.id), ref_image_eagle_ids)
+        if eng == "qwen"
+        else []
+    )
     if refs:
         payload["ref_image_eagle_ids"] = refs
     if width is not None and height is not None:
@@ -444,7 +448,7 @@ def post_edit(
 
 
 def flat_lay_prompt_for(item: Any, prompt: str | None = None) -> str:
-    """Default QIE extract prompt; append character extras when using the stock text."""
+    """Default clothing-extraction prompt with character-specific details."""
     custom = (prompt or "").strip()
     if custom:
         return custom
@@ -462,11 +466,10 @@ def post_flat_lay(
     prompt: str | None = None,
     engine: str = DEFAULT_EDIT_ENGINE,
 ) -> IntegrationResult:
-    """POST /api/v1/edit as wardrobe flat-lay (#510). Qwen + QIE-2511, 9:16 wood pad."""
+    """POST /api/v1/edit as Qwen 2.1 wardrobe flat-lay (#510/#576)."""
     text = flat_lay_prompt_for(item, prompt)
-    # Flat-lay is the QIE-2511 recipe; always queue as qwen + job=flat-lay so
-    # PromptForge attaches QIE-2511-Extract-Outfit and pads 864×1536.
-    _ = engine  # UI may still show engines; QIE path is Qwen-only.
+    # PromptForge pads the source to 864×1536 before the Qwen edit.
+    _ = engine  # Flat-lay uses Qwen regardless of the UI engine selection.
     eng = "qwen"
     if _file_missing(item):
         return IntegrationResult(STATUS_FILE_MISSING, "File missing")
@@ -484,5 +487,5 @@ def post_flat_lay(
     }
     result = _post_json(EDIT_PATH, payload)
     if result.status == STATUS_OK:
-        return IntegrationResult(STATUS_OK, "Queued flat-lay (Qwen + QIE-2511) on Eric")
+        return IntegrationResult(STATUS_OK, "Queued flat-lay (Qwen 2.1) on Eric")
     return result

@@ -5354,13 +5354,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if ref_ids:
             n = len(ref_ids)
             refs_bit = (
-                f" {n} extra selected still will be sent as a ref."
+                f" {n} extra selected still will be used as a Qwen ref."
                 if n == 1
-                else f" {n} extra selected stills will be sent as refs."
+                else f" {n} extra selected stills will be used as Qwen refs."
             )
         else:
             refs_bit = (
-                " Other selected stills (if any) are sent as extra refs."
+                " Other selected stills (if any) are used as Qwen refs."
             )
         self._prompt_engine_dialog(
             heading="Edit",
@@ -5368,6 +5368,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 "Edit instruction and toggle engines (Qwen / Flux / Krea). "
                 "The focused still is the edit target."
                 f"{refs_bit} "
+                "Flux and Krea use only the focused still. "
                 "Engine checkboxes queue one PromptForge job per engine."
             ),
             initial_prompt="",
@@ -5384,20 +5385,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
 
         def on_submit(prompt: str, engines: list[str]) -> None:
-            # Flat-lay is QIE-2511 / Qwen-only; ignore other toggles.
+            # Flat-lay is Qwen 2.1 only; ignore other toggles.
             self._queue_flat_lay(item, prompt, engines[0] if engines else "qwen")
 
         self._prompt_engine_dialog(
             heading="Flat-lay",
             body=(
-                "Qwen + QIE-2511 Extract Outfit → 9:16 wood wardrobe sheet. "
+                "Qwen Image 2.1 extract outfit → 9:16 wood wardrobe sheet. "
                 "Engine is locked to Qwen for this recipe. Queues on PromptForge."
             ),
             initial_prompt=flat_lay_prompt_for(item, None),
             require_prompt=False,
             empty_toast="",
             on_submit=on_submit,
-            engine_choices=[("qwen", "Qwen (QIE-2511)")],
+            engine_choices=[("qwen", "Qwen 2.1")],
             default_engine="qwen",
             multi_engine=False,
         )
@@ -5430,7 +5431,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                             item,
                             prompt=prompt,
                             engine=eng,
-                            ref_image_eagle_ids=refs or None,
+                            ref_image_eagle_ids=refs if eng == "qwen" else None,
                         )
                     )
                 except Exception:  # noqa: BLE001
