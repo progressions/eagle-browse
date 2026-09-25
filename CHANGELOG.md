@@ -7,6 +7,12 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-09-25
+
+### Changed
+
+- Edit dialog no longer shows the paragraph about other selected stills and engine behavior. The prompt box and engine checkboxes are unchanged.
+
 ## [0.1.7] — 2026-09-25
 
 ### Changed
