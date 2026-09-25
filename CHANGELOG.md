@@ -7,6 +7,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+
+- Edit (`u` then `e`) keeps posting `engine=qwen` (PromptForge maps that to Qwen Image 2.1). Other selected stills are sent as `ref_image_eagle_ids` for Qwen only, becoming `<image2>`…. Flux and Krea remain single-image edits. One focused still with no extras keeps the previous payload. Flat-lay now names the Qwen 2.1 workflow that PromptForge runs; bust, wardrobe, spicy, and flat-lay do not send extra refs ([#577](https://app.fizzy.do/6109848/cards/577)).
+
 ## [0.1.6] — 2026-09-07
 
 ### Added

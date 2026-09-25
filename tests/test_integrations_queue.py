@@ -14,6 +14,7 @@ from integrations_queue import (
     DEFAULT_FLAT_LAY_PROMPT,
     DEFAULT_WARDROBE_ENGINE,
     EDIT_PATH,
+    EDIT_REF_LIMIT,
     FLAT_LAY_H,
     FLAT_LAY_W,
     STATUS_FILE_MISSING,
@@ -21,6 +22,7 @@ from integrations_queue import (
     STATUS_UNSUPPORTED,
     IntegrationResult,
     character_for,
+    extra_still_ref_ids,
     flat_lay_prompt_for,
     normalize_bust_engine,
     normalize_edit_engine,
@@ -30,6 +32,7 @@ from integrations_queue import (
     promptforge_base_url,
     promptforge_build_url,
     resolve_promptforge_history_id,
+    sanitize_ref_image_eagle_ids,
     summarize_integration_results,
 )
 
@@ -139,9 +142,122 @@ class PostEditTest(unittest.TestCase):
         result = post_edit(item, prompt="edit me", engine="qwen")
         self.assertEqual(result.status, STATUS_FILE_MISSING)
 
+    def test_one_still_omits_ref_key(self) -> None:
+        captured: dict = {}
+
+        def fake_post_json(path: str, payload: dict):
+            captured["payload"] = payload
+            return IntegrationResult(STATUS_OK, "Queued on Eric")
+
+        with mock.patch("integrations_queue._file_missing", return_value=False):
+            with mock.patch("integrations_queue._post_json", side_effect=fake_post_json):
+                item = SimpleNamespace(id="eagle-1", is_image=True, path=Path("/x.png"))
+                result = post_edit(item, prompt="warmer", engine="qwen")
+
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(result.toast, "Queued edit (Qwen) on Eric")
+        self.assertNotIn("ref_image_eagle_ids", captured["payload"])
+        self.assertEqual(captured["payload"]["engine"], "qwen")
+
+    def test_extra_stills_posted_as_refs(self) -> None:
+        captured: dict = {}
+
+        def fake_post_json(path: str, payload: dict):
+            captured["payload"] = payload
+            return IntegrationResult(STATUS_OK, "Queued on Eric")
+
+        with mock.patch("integrations_queue._file_missing", return_value=False):
+            with mock.patch("integrations_queue._post_json", side_effect=fake_post_json):
+                item = SimpleNamespace(id="eagle-1", is_image=True, path=Path("/x.png"))
+                result = post_edit(
+                    item,
+                    prompt="match pose of <image2>",
+                    engine="qwen",
+                    ref_image_eagle_ids=["eagle-2", "eagle-3", "eagle-1", ""],
+                )
+
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertIn("2 refs", result.toast)
+        self.assertEqual(
+            captured["payload"]["ref_image_eagle_ids"], ["eagle-2", "eagle-3"]
+        )
+        self.assertEqual(captured["payload"]["eagle_id"], "eagle-1")
+        self.assertEqual(captured["payload"]["engine"], "qwen")
+
+    def test_qwen_ref_ids_capped(self) -> None:
+        captured: dict = {}
+
+        def fake_post_json(path: str, payload: dict):
+            captured["payload"] = payload
+            return IntegrationResult(STATUS_OK, "Queued on Eric")
+
+        extras = [f"r{i}" for i in range(20)]
+        with mock.patch("integrations_queue._file_missing", return_value=False):
+            with mock.patch("integrations_queue._post_json", side_effect=fake_post_json):
+                item = SimpleNamespace(id="eagle-1", is_image=True, path=Path("/x.png"))
+                post_edit(
+                    item,
+                    prompt="use refs",
+                    engine="qwen",
+                    ref_image_eagle_ids=extras,
+                )
+
+        refs = captured["payload"]["ref_image_eagle_ids"]
+        self.assertEqual(len(refs), EDIT_REF_LIMIT)
+        self.assertEqual(refs, extras[:EDIT_REF_LIMIT])
+        self.assertEqual(captured["payload"]["engine"], "qwen")
+
+    def test_flux_and_krea_ignore_qwen_refs(self) -> None:
+        payloads: list[dict] = []
+
+        def fake_post_json(path: str, payload: dict):
+            payloads.append(payload)
+            return IntegrationResult(STATUS_OK, "Queued on Eric")
+
+        item = SimpleNamespace(id="eagle-1", is_image=True, path=Path("/x.png"))
+        with mock.patch("integrations_queue._file_missing", return_value=False):
+            with mock.patch("integrations_queue._post_json", side_effect=fake_post_json):
+                flux = post_edit(
+                    item, prompt="edit", engine="flux", ref_image_eagle_ids=["ref-1"]
+                )
+                krea = post_edit(
+                    item, prompt="edit", engine="krea", ref_image_eagle_ids=["ref-1"]
+                )
+
+        self.assertEqual([p["engine"] for p in payloads], ["flux", "krea"])
+        self.assertTrue(all("ref_image_eagle_ids" not in p for p in payloads))
+        self.assertEqual(flux.toast, "Queued edit (Flux) on Eric")
+        self.assertEqual(krea.toast, "Queued edit (Krea) on Eric")
+
+
+class ExtraStillRefIdsTest(unittest.TestCase):
+    def test_skips_primary_videos_and_missing(self) -> None:
+        tmp = Path("/tmp")
+        primary = SimpleNamespace(id="A", is_image=True, path=tmp / "a.png")
+        still_b = SimpleNamespace(id="B", is_image=True, path=tmp / "b.png")
+        video = SimpleNamespace(id="V", is_image=False, path=tmp / "v.mp4")
+        missing = SimpleNamespace(id="M", is_image=True, path=Path("/no-such.png"))
+        dup = SimpleNamespace(id="B", is_image=True, path=tmp / "b2.png")
+
+        def missing_check(it):
+            return getattr(it, "id", "") == "M"
+
+        with mock.patch("integrations_queue._file_missing", side_effect=missing_check):
+            refs = extra_still_ref_ids(
+                primary, [primary, still_b, video, missing, dup]
+            )
+        self.assertEqual(refs, ["B"])
+
+    def test_sanitize_drops_blank_and_primary(self) -> None:
+        self.assertEqual(
+            sanitize_ref_image_eagle_ids("A", ["A", " B ", "", "C", "B"]),
+            ["B", "C"],
+        )
+        self.assertEqual(sanitize_ref_image_eagle_ids("A", None), [])
+
 
 class PostFlatLayTest(unittest.TestCase):
-    def test_posts_qie_job_916_with_default_prompt(self) -> None:
+    def test_posts_qwen_21_job_916_with_default_prompt(self) -> None:
         captured: dict = {}
 
         def fake_post_json(path: str, payload: dict):
@@ -163,7 +279,7 @@ class PostFlatLayTest(unittest.TestCase):
                 result = post_flat_lay(item, prompt=None, engine="flux")
 
         self.assertEqual(result.status, STATUS_OK)
-        self.assertIn("qie-2511", result.toast.lower())
+        self.assertIn("qwen 2.1", result.toast.lower())
         self.assertEqual(captured["path"], EDIT_PATH)
         self.assertEqual(captured["payload"]["eagle_id"], "eagle-flat")
         self.assertEqual(captured["payload"]["engine"], "qwen")
