@@ -5351,26 +5351,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         def on_submit(prompt: str, engines: list[str]) -> None:
             self._queue_edit(item, prompt, engines, ref_ids)
 
-        if ref_ids:
-            n = len(ref_ids)
-            refs_bit = (
-                f" {n} extra selected still will be used as a Qwen ref."
-                if n == 1
-                else f" {n} extra selected stills will be used as Qwen refs."
-            )
-        else:
-            refs_bit = (
-                " Other selected stills (if any) are used as Qwen refs."
-            )
         self._prompt_engine_dialog(
             heading="Edit",
-            body=(
-                "Edit instruction and toggle engines (Qwen / Flux / Krea). "
-                "The focused still is the edit target."
-                f"{refs_bit} "
-                "Flux and Krea use only the focused still. "
-                "Engine checkboxes queue one PromptForge job per engine."
-            ),
+            body="",
             initial_prompt="",
             require_prompt=True,
             empty_toast="Edit prompt required",
