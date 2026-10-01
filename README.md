@@ -537,5 +537,8 @@ Mixed selections include standalone assets and count each asset once. The editor
 shows the affected item count: ✓ means all targets have a value, ± means only some
 do. Toggling a mixed value adds it to all targets; toggling it again removes it
 from all. Values you leave untouched are preserved. Inside a set or individual
-asset viewer, edits apply only to selected assets. Other actions still target the
-representative assets.
+asset viewer, edits apply only to selected assets. **Group** also expands collapsed
+thumbnails: selecting two groups combines all their members, and selecting a
+group plus an ungrouped asset adds that asset. With Collapse groups off, Group
+continues to operate on individual selected assets.
+Other actions still target the representative assets.
