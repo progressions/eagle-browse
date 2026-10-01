@@ -7,6 +7,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.17] — 2026-10-01
+
 ### Fixed
 
 - Rating or tagging an image that leaves the current smart folder selects the next image at the same position (or the previous image at the end), retaining scroll position. Images that still match remain selected, and background refreshes preserve navigation performed while the query runs.
