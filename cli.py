@@ -196,7 +196,7 @@ def _fmt_smart_create(data: dict[str, Any]) -> None:
         return
     sf = data["smart_folder"]
     print(f"created · {sf.get('path')}  [{sf.get('id')}]")
-    print("reload Eagle Browse (r) to see it in the sidebar")
+    print("a running Eagle Browse picks it up automatically (or press r)")
 
 
 def _fmt_smart_update(data: dict[str, Any]) -> None:

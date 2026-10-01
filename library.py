@@ -6,7 +6,7 @@ import json
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -104,6 +104,11 @@ class Item:
     folder_set: frozenset[str] = field(default_factory=frozenset)
     name_lower: str = ""
     ext_lower: str = ""
+    # Identity of metadata.json when this item was parsed (see _file_stamp).
+    # Lets refresh_changed_items() spot edits made by eagle-api, Dropbox sync
+    # or other tools. Not part of equality: two parses of the same content
+    # compare equal even if the file was rewritten.
+    meta_stamp: tuple[int, int, int, int] | None = field(default=None, compare=False)
 
     @property
     def display_name(self) -> str:
@@ -120,6 +125,32 @@ class Item:
     @property
     def is_audio(self) -> bool:
         return self.ext_lower in AUDIO_EXTS
+
+
+@dataclass(slots=True)
+class ExternalChanges:
+    """Result of one read-only pass over metadata.json files on disk."""
+
+    # Item ids whose in-memory fields were updated from disk
+    changed: list[str] = field(default_factory=list)
+    # Library metadata.json (folders / smart folders) differs from what we parsed
+    trees_changed: bool = False
+    # How many item metadata files were stat'ed
+    checked: int = 0
+
+
+def _file_stamp(path: Path | str) -> tuple[int, int, int, int] | None:
+    """Cheap change token for a file: (inode, mtime_ns, ctime_ns, size).
+
+    Atomic replace (write.atomic_write_json, Eagle, Dropbox) always yields a
+    new inode/ctime, so this catches rewrites even when mtime is preserved.
+    None when the file is missing or unreadable.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
 
 
 def _load_json(path: Path) -> dict | list | None:
@@ -228,6 +259,9 @@ def _item_from_dir(item_dir: Path) -> Item | None:
     """Parse one images/<id>.info folder. None if metadata or media is missing."""
     if not item_dir.name.endswith(".info"):
         return None
+    # Stamp before reading: if the file changes after this, the next
+    # refresh_changed_items() pass sees a different stamp and re-reads it.
+    stamp = _file_stamp(item_dir / "metadata.json")
     raw = _load_json(item_dir / "metadata.json")
     if not isinstance(raw, dict):
         return None
@@ -274,7 +308,13 @@ def _item_from_dir(item_dir: Path) -> Item | None:
         folder_set=frozenset(folders),
         name_lower=name.lower(),
         ext_lower=ext.lower(),
+        meta_stamp=stamp,
     )
+
+
+# Fields copied from a fresh parse onto the live Item (identity is kept so
+# grid rows, selection and the inspector keep pointing at the same object).
+_ITEM_SYNC_FIELDS = tuple(f.name for f in fields(Item) if f.name != "id")
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -458,6 +498,8 @@ class EagleLibrary:
         self._lock = threading.Lock()
         # id -> (failure_count, next_eligible_monotonic)
         self._duration_probe_failures: dict[str, tuple[int, float]] = {}
+        # Stamp of the library metadata.json last parsed into folder trees
+        self._tree_stamp: tuple[int, int, int, int] | None = None
 
     def _clear_derived_caches(self) -> None:
         """Drop derived caches and bump generation. Caller must hold ``_lock``."""
@@ -471,9 +513,11 @@ class EagleLibrary:
             raise FileNotFoundError(f"Eagle library not found: {self.root}")
 
         meta_path = self.root / "metadata.json"
+        tree_stamp = _file_stamp(meta_path)
         meta = _load_json(meta_path)
         if not isinstance(meta, dict):
             raise RuntimeError(f"Invalid library metadata: {meta_path}")
+        self._tree_stamp = tree_stamp
 
         self.folders, self.folders_by_id = _parse_folders(meta.get("folders") or [])
         self.folder_paths = {}
@@ -518,9 +562,11 @@ class EagleLibrary:
     def reload_metadata_trees(self) -> None:
         """Re-read folders + smart folders from metadata.json. Does not rescan items."""
         meta_path = self.root / "metadata.json"
+        tree_stamp = _file_stamp(meta_path)
         meta = _load_json(meta_path)
         if not isinstance(meta, dict):
             raise RuntimeError(f"Invalid library metadata: {meta_path}")
+        self._tree_stamp = tree_stamp
         self.folders, self.folders_by_id = _parse_folders(meta.get("folders") or [])
         self.folder_paths = {}
         self._build_folder_paths(self.folders, [])
@@ -614,6 +660,78 @@ class EagleLibrary:
             known.add(item.id)
             new.append(item)
         return new
+
+    def refresh_changed_items(
+        self, *, cancelled: Callable[[], bool] | None = None
+    ) -> ExternalChanges:
+        """Pick up metadata.json edits made outside this process. Read-only.
+
+        Stats every known item's ``images/<id>.info/metadata.json`` (about
+        130 ms for ~37k items on btrfs), re-parses only files whose stamp moved
+        since we last read them, and copies the new values onto the existing
+        ``Item`` objects in place. Derived caches (query, tags) are dropped
+        when anything changed so smart folders re-evaluate on the next query.
+
+        Never writes to disk. Safe against in-process edits racing with it:
+        an item is only updated if neither the in-memory item (an in-window
+        edit) nor the file (a newer external write) moved while we parsed it;
+        otherwise it is left for the next pass. Unparseable / half-synced
+        files are skipped and retried next pass. Missing folders are ignored
+        (new folders are handled by ``scan_new_items``).
+        """
+        result = ExternalChanges()
+        tree_stamp = _file_stamp(self.root / "metadata.json")
+        if tree_stamp is not None and tree_stamp != self._tree_stamp:
+            result.trees_changed = True
+
+        with self._lock:
+            snapshot = [
+                (it, it.item_dir, it.meta_stamp)
+                for it in self.items
+                if it.item_dir is not None
+            ]
+
+        stale: list[tuple[Item, Path, tuple[int, int, int, int] | None]] = []
+        stat = os.stat
+        sep = os.sep
+        for n, (it, item_dir, old_stamp) in enumerate(snapshot):
+            if cancelled is not None and n % 512 == 0 and cancelled():
+                return result
+            # Hot loop (one stat per item): plain strings, no Path objects.
+            try:
+                st = stat(f"{item_dir}{sep}metadata.json")
+            except OSError:
+                continue  # folder gone / mid-sync; not our business here
+            result.checked += 1
+            if old_stamp is not None and old_stamp == (
+                st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size
+            ):
+                continue
+            stale.append((it, item_dir, old_stamp))
+
+        for it, item_dir, old_stamp in stale:
+            if cancelled is not None and cancelled():
+                break
+            fresh = _item_from_dir(item_dir)
+            if fresh is None or fresh.meta_stamp is None or fresh.id != it.id:
+                continue  # mid-write or partial sync; retry next pass
+            with self._lock:
+                if self.items_by_id.get(it.id) is not it:
+                    continue  # replaced (reload / in-place edit) meanwhile
+                if it.meta_stamp != old_stamp:
+                    continue  # another pass or edit already handled it
+                if _file_stamp(item_dir / "metadata.json") != fresh.meta_stamp:
+                    continue  # rewritten while we parsed; next pass
+                if fresh == it:
+                    it.meta_stamp = fresh.meta_stamp
+                    continue
+                for name in _ITEM_SYNC_FIELDS:
+                    setattr(it, name, getattr(fresh, name))
+                # Bump the generation under the same lock so no in-flight
+                # query can cache a result computed from the old values.
+                self._clear_derived_caches()
+                result.changed.append(it.id)
+        return result
 
     def _build_folder_paths(self, folders: list[Folder], prefix: list[str]) -> None:
         for folder in folders:
