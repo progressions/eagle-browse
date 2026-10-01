@@ -9379,14 +9379,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if self.is_viewer_open():
                 self.close_inline_viewer()
                 return True
+            if self._special_view == "set":
+                self.nav_back()
+                return True
             if self._focus_is_search(self.get_focus()):
                 self.search.set_text("")
                 self.focus_grid()
                 return True
             if self.clear_marks():
-                return True
-            if self._special_view == "set":
-                self._leave_set_view()
                 return True
             if self._view_filters.active():
                 self.clear_view_filters()
