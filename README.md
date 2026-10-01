@@ -507,5 +507,11 @@ set. Double-click the thumbnail, press Enter, or click its badge to open the set
 and see its members individually. Press **Esc** in the set grid to return to the
 previous view, just like the Back button. Returning to the library keeps the toggle on.
 Turn it off to show every asset again. The toggle starts off in a new window.
-Selection and bulk actions apply to the visible representative asset; open the
-set to select and edit its other members.
+Tag and folder edits on collapsed thumbnails apply to every non-deleted member
+of the selected sets, including members outside the current search or filters.
+Mixed selections include standalone assets and count each asset once. The editor
+shows the affected item count: ✓ means all targets have a value, ± means only some
+do. Toggling a mixed value adds it to all targets; toggling it again removes it
+from all. Values you leave untouched are preserved. Inside a set or individual
+asset viewer, edits apply only to selected assets. Other actions still target the
+representative assets.
