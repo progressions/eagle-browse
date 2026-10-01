@@ -49,6 +49,7 @@ from library import (  # noqa: E402
 from latest_job import LatestJobWorker  # noqa: E402
 from sets import (  # noqa: E402
     SET_PREFIX,
+    collapse_sets,
     is_set_tag,
     mint_set_tag,
     set_tag_of,
@@ -371,6 +372,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._insp_preview_inflight = False
         # Sort key id from SORT_OPTIONS (default: newest added first)
         self._sort_key = "added_desc"
+        self._collapse_groups = False
         # Smart-folder id → last known item count for sidebar "(N)" labels
         self._smart_counts: dict[str, int] = {}
         # "untagged" / "uncategorized" → last known item count for sidebar
@@ -547,6 +549,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.sort_dropdown.set_tooltip_text("Sort items in the current view")
         self.sort_dropdown.connect("notify::selected", self._on_sort_changed)
         filter_btns.append(self.sort_dropdown)
+        self.collapse_groups_btn = Gtk.ToggleButton(label="Collapse groups")
+        self.collapse_groups_btn.set_tooltip_text(
+            "Show one thumbnail per set; open it to see all members"
+        )
+        self.collapse_groups_btn.connect("toggled", self._on_collapse_groups_toggled)
+        filter_btns.append(self.collapse_groups_btn)
         filter_bar.append(filter_btns)
 
         self.filter_chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -3290,7 +3298,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         page_ids = {it.id for it in self._items}
         in_view = len(self._marked & page_ids) if self._marked else 0
         out_view = (len(self._marked) - in_view) if self._marked else 0
-        self._scope_text = f"{total} items · {scope}{note}"
+        unit = "thumbnails" if self._collapse_groups and self._special_view != "set" else "items"
+        self._scope_text = f"{total} {unit} · {scope}{note}"
         if out_view > 0:
             self._scope_text += (
                 f" · ✓ {len(self._marked)} selected ({out_view} off-view)"
@@ -3350,6 +3359,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         smart_id = self.current_smart_folder_id
         special = self._special_view
         set_tag = self._set_view_tag if special == "set" else None
+        collapse_groups = self._collapse_groups and special != "set"
         descendants = self.include_descendants
         search = self._filter_text
         # Snapshot filters for the worker thread
@@ -3442,13 +3452,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 and not vf.active()
             ):
                 self._special_counts[special] = total
+            if collapse_groups:
+                items = collapse_sets(items)
+            if cancel.is_set():
+                return
             load_n = PAGE_CHUNK if reset_selection else max(PAGE_CHUNK, keep_loaded)
             if keep_focus_id:
                 for i, it in enumerate(items):
                     if it.id == keep_focus_id:
                         load_n = max(load_n, i + 1)
                         break
-            load_n = min(load_n, total)
+            load_n = min(load_n, len(items))
             page = items[:load_n]
 
             def apply() -> bool:
@@ -3516,7 +3530,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     # Keep marks even for items that left this view (e.g. just
                     # tagged while on Untagged). Inspector / stage / delete
                     # still see them via _marked_items().
-                    self._marked = set(keep_marks)
+                    self._marked = (keep_marks & {it.id for it in items}) if collapse_groups else set(keep_marks)
                     focus_idx = 0
                     if page:
                         if keep_focus_id and keep_focus_id in id_to_idx:
@@ -3569,6 +3583,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._ui_idle(apply)
 
         self._query_worker.submit(work)
+
+    def _on_collapse_groups_toggled(self, button: Gtk.ToggleButton) -> None:
+        self._collapse_groups = button.get_active()
+        if self.is_viewer_open():
+            self.close_inline_viewer(restore_scroll=False)
+        # Clear marks so hidden members cannot remain selected for bulk edits.
+        self.refresh_items(reset_selection=True)
 
     def _on_sort_changed(self, dropdown: Gtk.DropDown, *_args: object) -> None:
         idx = int(dropdown.get_selected())
@@ -3872,7 +3893,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if stag and scount:
             set_badge.set_text(str(scount))
             set_badge.set_visible(True)
-            set_badge.set_tooltip_text(f"{stag} · {scount}")
+            set_badge.set_tooltip_text(f"{scount} set members · Click to open set")
         else:
             set_badge.set_text("")
             set_badge.set_visible(False)
@@ -9084,6 +9105,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         self._last_open_mono = now
 
+        tag = set_tag_of(item)
+        if self._collapse_groups and self._special_view != "set" and tag:
+            self.open_set_view(tag, keep_id=item.id)
+            return
         if item.is_image or item.is_video:
             self.open_inline_viewer(item)
             return
