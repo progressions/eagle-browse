@@ -1112,6 +1112,7 @@ class EagleLibrary:
         from write import (
             WriteError,
             apply_deleted,
+            batch_item_writes,
             load_item_metadata,
             save_item_metadata,
             write_session,
@@ -1122,7 +1123,7 @@ class EagleLibrary:
         if not item_ids:
             return ok_ids, errors
         try:
-            with write_session(self.root):
+            with write_session(self.root), batch_item_writes(self.root) as updates:
                 for iid in item_ids:
                     item = self.items_by_id.get(iid)
                     if item is None:
@@ -1138,7 +1139,9 @@ class EagleLibrary:
                     try:
                         data = load_item_metadata(item.item_dir)
                         apply_deleted(data, deleted)
-                        save_item_metadata(self.root, item.item_dir, data)
+                        save_item_metadata(
+                            self.root, item.item_dir, data, mtime_updates=updates
+                        )
                         item.is_deleted = deleted
                         item.modification_time = int(
                             data.get("modificationTime") or item.modification_time
@@ -1173,80 +1176,15 @@ class EagleLibrary:
         star: 1–5 to set, 0 or None to clear, omit (Ellipsis) to leave unchanged.
         annotation: text to set, empty string to clear, omit (Ellipsis) to leave unchanged.
         """
-        from write import (  # local import avoids cycles
-            WriteError,
-            apply_annotation,
-            apply_folders,
-            apply_star,
-            apply_tags,
-            load_item_metadata,
-            save_item_metadata,
-            write_session,
-        )
-
-        item = self.items_by_id.get(item_id)
-        if item is None:
-            raise WriteError(f"Unknown item id: {item_id}")
-        if item.item_dir is None or not item.item_dir.is_dir():
-            raise WriteError(f"No item directory for {item_id}")
+        from write import write_session
 
         with write_session(self.root):
-            data = load_item_metadata(item.item_dir)
-            if star is not ...:
-                apply_star(data, None if star in (0, None) else int(star))  # type: ignore[arg-type]
-            if annotation is not ...:
-                apply_annotation(data, "" if annotation is None else str(annotation))
-            if set_tags is not None or add_tags is not None or remove_tags is not None:
-                apply_tags(
-                    data,
-                    set_tags=set_tags,
-                    add_tags=add_tags,
-                    remove_tags=remove_tags,
-                )
-            if (
-                set_folders is not None
-                or add_folders is not None
-                or remove_folders is not None
-            ):
-                before = set(data.get("folders") or [])
-                apply_folders(
-                    data,
-                    set_folders=set_folders,
-                    add_folders=add_folders,
-                    remove_folders=remove_folders,
-                )
-                after = set(data.get("folders") or [])
-                added = after - before
-                if added:
-                    auto = self.auto_tags_for_folders(added)
-                    if auto:
-                        apply_tags(data, add_tags=auto)
-            save_item_metadata(self.root, item.item_dir, data)
-
-        # Update in-memory model
-        if star is not ...:
-            item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
-        if annotation is not ...:
-            item.annotation = str(data.get("annotation") or "")
-        # Tags may change from explicit edit and/or folder auto-tags
-        if (
-            set_tags is not None
-            or add_tags is not None
-            or remove_tags is not None
-            or set_folders is not None
-            or add_folders is not None
-        ):
-            item.tags = list(data.get("tags") or [])
-        if (
-            set_folders is not None
-            or add_folders is not None
-            or remove_folders is not None
-        ):
-            item.folders = list(data.get("folders") or [])
-        item.modification_time = int(data.get("modificationTime") or item.modification_time)
-        self._refresh_item_derived(item)
-        self._invalidate_caches()
-        return item
+            return self._update_item_unlocked(
+                item_id, star=star, annotation=annotation,
+                set_tags=set_tags, add_tags=add_tags, remove_tags=remove_tags,
+                set_folders=set_folders, add_folders=add_folders,
+                remove_folders=remove_folders,
+            )
 
     def rename_item(self, item_id: str, new_name: str) -> Item:
         """Rename the item stem. Media file and matching thumbnails move with it."""
@@ -1282,16 +1220,21 @@ class EagleLibrary:
         remove_tags: list[str] | None = None,
         add_folders: list[str] | None = None,
         remove_folders: list[str] | None = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> tuple[int, list[str]]:
-        """Apply the same star/annotation/tag/folder delta to many items. Returns (ok_count, errors)."""
-        from write import WriteError, write_session
+        """Apply a metadata delta; return (successful count, per-item errors).
+
+        Unchanged items count as successful without being rewritten. ``progress``
+        receives (attempted, total) on the calling thread and must not raise.
+        """
+        from write import WriteError, batch_item_writes, write_session
 
         ok = 0
         errors: list[str] = []
         # One lock for the whole batch
         try:
-            with write_session(self.root):
-                for iid in item_ids:
+            with write_session(self.root), batch_item_writes(self.root) as updates:
+                for done, iid in enumerate(item_ids, 1):
                     try:
                         # Nested session would re-lock; do inner write without new lock
                         self._update_item_unlocked(
@@ -1302,15 +1245,17 @@ class EagleLibrary:
                             remove_tags=remove_tags,
                             add_folders=add_folders,
                             remove_folders=remove_folders,
+                            mtime_updates=updates,
                         )
                         ok += 1
                     except WriteError as exc:
                         errors.append(f"{iid}: {exc}")
                     except Exception as exc:  # noqa: BLE001
                         errors.append(f"{iid}: {exc}")
+                    if progress is not None:
+                        progress(done, len(item_ids))
         except WriteError as exc:
             return 0, [str(exc)]
-        self._invalidate_caches()
         return ok, errors
 
     def import_inbox(
@@ -1370,6 +1315,7 @@ class EagleLibrary:
         set_folders: list[str] | None = None,
         add_folders: list[str] | None = None,
         remove_folders: list[str] | None = None,
+        mtime_updates: dict[str, int] | None = None,
     ) -> Item:
         from write import (
             WriteError,
@@ -1388,6 +1334,7 @@ class EagleLibrary:
             raise WriteError(f"No item directory for {item_id}")
 
         data = load_item_metadata(item.item_dir)
+        original = data.copy()
         if star is not ...:
             apply_star(data, None if star in (0, None) else int(star))  # type: ignore[arg-type]
         if annotation is not ...:
@@ -1417,26 +1364,31 @@ class EagleLibrary:
                 auto = self.auto_tags_for_folders(added)
                 if auto:
                     apply_tags(data, add_tags=auto)
-        save_item_metadata(self.root, item.item_dir, data)
+        if data != original:
+            save_item_metadata(
+                self.root, item.item_dir, data, mtime_updates=mtime_updates
+            )
 
-        if star is not ...:
-            item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
-        if annotation is not ...:
-            item.annotation = str(data.get("annotation") or "")
-        if (
-            set_tags is not None
-            or add_tags is not None
-            or remove_tags is not None
-            or set_folders is not None
-            or add_folders is not None
-        ):
-            item.tags = list(data.get("tags") or [])
-        if (
-            set_folders is not None
-            or add_folders is not None
-            or remove_folders is not None
-        ):
-            item.folders = list(data.get("folders") or [])
-        item.modification_time = int(data.get("modificationTime") or item.modification_time)
-        self._refresh_item_derived(item)
+        with self._lock:
+            if star is not ...:
+                item.star = None if star in (0, None) else int(star)  # type: ignore[arg-type]
+            if annotation is not ...:
+                item.annotation = str(data.get("annotation") or "")
+            if (
+                set_tags is not None
+                or add_tags is not None
+                or remove_tags is not None
+                or set_folders is not None
+                or add_folders is not None
+            ):
+                item.tags = list(data.get("tags") or [])
+            if (
+                set_folders is not None
+                or add_folders is not None
+                or remove_folders is not None
+            ):
+                item.folders = list(data.get("folders") or [])
+            item.modification_time = int(data.get("modificationTime") or item.modification_time)
+            self._refresh_item_derived(item)
+            self._clear_derived_caches()
         return item

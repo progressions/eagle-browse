@@ -27,13 +27,19 @@ class GroupMetadataEditsTest(unittest.TestCase):
         library.update_items_batch = Mock(return_value=(5, []))
         library.auto_tags_for_folders = Mock(return_value=[])
         self.win = SimpleNamespace(
-            _collapse_groups=True, _special_view=None,
+            _collapse_groups=True, _special_view=None, _metadata_batch_busy=False,
             is_viewer_open=Mock(return_value=False), library=library,
             _effective_hand_off_items=Mock(return_value=[self.a, self.c, self.single]),
             _toast=Mock(), refresh_items=Mock(), _refresh_special_counts=Mock(),
             _grid_scroll_value=Mock(return_value=0),
         )
         self.win._metadata_edit_items = lambda: EagleBrowseWindow._metadata_edit_items(self.win)
+
+        def run_batch(ids, *, description, picker, on_done, **changes):
+            result = self.win.library.update_items_batch(ids, **changes)
+            on_done(*result)
+            return True
+        self.win._run_metadata_batch = run_batch
 
     def test_expands_groups_beyond_visible_selection_and_deduplicates(self):
         self.win._effective_hand_off_items.return_value.append(self.b)
@@ -68,10 +74,10 @@ class GroupMetadataEditsTest(unittest.TestCase):
                 self.assertTrue(options['subtitle'].startswith('5 item(s)'))
                 self.win.library.update_items_batch.assert_not_called()
                 label = 'Partial' if method == 'edit_folders_dialog' else value
-                self.assertTrue(options['on_toggle'](label, True))
+                self.assertFalse(options['on_toggle'](label, True))
                 self.win.library.update_items_batch.assert_called_once_with(
                     ['1', '2', '3', '4', '5'], **{add: [value]})
                 self.win.library.update_items_batch.reset_mock()
-                self.assertTrue(options['on_toggle'](label, False))
+                self.assertFalse(options['on_toggle'](label, False))
                 self.win.library.update_items_batch.assert_called_once_with(
                     ['1', '2', '3', '4', '5'], **{remove: [value]})

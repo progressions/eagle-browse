@@ -361,6 +361,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._query_worker = LatestJobWorker(name="eagle-query")
         # Window-owned shutdown: workers check this and skip UI idle (#525)
         self._shutdown = threading.Event()
+        self._metadata_batch_busy = False
         self._search_timeout_id = 0
         self._cols_sync_timeout_id = 0
         self._inbox_importing = False
@@ -4531,35 +4532,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def set_rating(self, star: int) -> None:
         """star 1–5, or 0 to clear. Applies to marked items, else focused."""
-        from write import WriteError
-
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing selected")
             return
-        ids = [it.id for it in items]
-        try:
-            if len(ids) == 1:
-                self.library.update_item(ids[0], star=star if star else None)
-                ok, errors = 1, []
-            else:
-                ok, errors = self.library.update_items_batch(
-                    ids, star=star if star else None
-                )
-        except WriteError as exc:
-            self._toast(str(exc))
-            return
-        self._sync_star_overlays()
-        self.refresh_items(reset_selection=False, scroll_to_top=False)
-        self._update_path_label()
-        self.update_inspector()
-        if star:
-            msg = f"Rated {'★' * star} · {ok} item(s)"
-        else:
-            msg = f"Cleared rating · {ok} item(s)"
-        if errors:
-            msg += f" · {len(errors)} failed"
-        self._toast(msg)
+        self._run_metadata_batch(
+            [it.id for it in items], star=star if star else None,
+            description=f"Rated {'★' * star}" if star else "Cleared rating",
+        )
 
     def open_rename_dialog(self) -> None:
         """Rename the focused item's file stem. Thumbnail is renamed with it."""
@@ -4644,8 +4624,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         """View or edit Eagle annotation (notes) for the selection."""
         if self._picker_blocking:
             return
-        from write import WriteError
-
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing selected")
@@ -4736,26 +4714,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ids = [it.id for it in items]
 
             def apply() -> None:
-                try:
-                    if len(ids) == 1:
-                        self.library.update_item(ids[0], annotation=value)
-                        ok, errors = 1, []
-                    else:
-                        ok, errors = self.library.update_items_batch(
-                            ids, annotation=value
-                        )
-                except WriteError as exc:
-                    self._toast(str(exc))
-                    return
-                self.update_inspector()
-                if value.strip():
-                    msg = f"Note saved · {ok} item(s)"
-                else:
-                    msg = f"Note cleared · {ok} item(s)"
-                if errors:
-                    msg += f" · {len(errors)} failed"
-                self._toast(msg)
-                close_win()
+                if self._run_metadata_batch(
+                    ids, annotation=value,
+                    description="Note saved" if value.strip() else "Note cleared",
+                ):
+                    close_win()
 
             if n > BULK_EDIT_CONFIRM:
                 self._confirm_bulk_edit(
@@ -5545,6 +5508,82 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         else:
             self.update_inspector()
 
+    def _run_metadata_batch(
+        self, ids: list[str], *, description: str, picker=None, on_done=None,
+        **changes,
+    ) -> bool:
+        """Write off the GTK thread; only publish progress/results through idle.
+
+        One interactive metadata batch at a time. A non-daemon worker finishes
+        durable writes and releases the library lock even if the window closes.
+        """
+        if self._shutdown.is_set():
+            return False
+        if self._metadata_batch_busy:
+            self._toast("A metadata update is still running")
+            return False
+        self._metadata_batch_busy = True
+        ids = list(ids)
+        progress_toast = Adw.Toast.new(f"{description} · 0/{len(ids)}")
+        progress_toast.set_timeout(0)
+        self._toast_overlay.add_toast(progress_toast)
+        if picker is not None:
+            picker.set_busy(True, f"Updating · 0/{len(ids)}")
+
+        def show_progress(done: int, total: int) -> None:
+            progress_toast.set_title(f"{description} · {done}/{total}")
+            if picker is not None:
+                picker.set_busy(True, f"Updating · {done}/{total}")
+
+        def complete(ok: int, errors: list[str]) -> None:
+            self._metadata_batch_busy = False
+            progress_toast.dismiss()
+            if picker is not None:
+                picker.set_busy(False)
+            if on_done is not None:
+                on_done(ok, errors)
+            self.refresh_items(reset_selection=False, scroll_to_top=False)
+            self._refresh_special_counts()
+            self._sync_star_overlays()
+            self._update_path_label()
+            self.update_inspector()
+            if errors:
+                self._toast(
+                    f"{description} · {ok}/{len(ids)} completed · "
+                    f"{len(errors)} error(s): {errors[0]}"
+                )
+            else:
+                self._toast(f"{description} · {ok} item(s)")
+
+        def work() -> None:
+            last_progress = 0.0
+
+            def progress(done: int, total: int) -> None:
+                nonlocal last_progress
+                now = time.monotonic()
+                if done == total or now - last_progress >= 0.1:
+                    last_progress = now
+                    self._ui_idle(show_progress, done, total)
+
+            try:
+                ok, errors = self.library.update_items_batch(
+                    ids, progress=progress, **changes
+                )
+            except Exception as exc:  # noqa: BLE001
+                ok, errors = 0, [f"Update interrupted: {exc}"]
+            self._ui_idle(complete, ok, errors)
+
+        thread = threading.Thread(target=work, name="eagle-metadata", daemon=False)
+        try:
+            thread.start()
+        except Exception:  # noqa: BLE001
+            self._metadata_batch_busy = False
+            progress_toast.dismiss()
+            if picker is not None:
+                picker.set_busy(False)
+            raise
+        return True
+
     def _confirm_bulk_edit(
         self,
         n: int,
@@ -5581,7 +5620,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def edit_tags_dialog(self) -> None:
         """Keyboard tag picker: recent + autocomplete, Enter toggles, Esc closes."""
         from picker import TogglePicker, load_recent
-        from write import WriteError
+
+        if self._metadata_batch_busy:
+            self._toast("A metadata update is still running")
+            return
 
         items = self._metadata_edit_items()
         if not items:
@@ -5606,29 +5648,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         n = len(items)
         picker_ref: dict[str, object] = {"p": None}
 
-        def apply_tag(tag: str, turn_on: bool, *, update_picker: bool) -> None:
-            try:
-                if n == 1:
-                    if turn_on:
-                        self.library.update_item(ids[0], add_tags=[tag])
-                    else:
-                        self.library.update_item(ids[0], remove_tags=[tag])
-                else:
-                    if turn_on:
-                        self.library.update_items_batch(ids, add_tags=[tag])
-                    else:
-                        self.library.update_items_batch(ids, remove_tags=[tag])
-            except WriteError as exc:
-                self._toast(str(exc))
-                raise
-            # Re-query so the current smart folder / Untagged drops mismatches
-            self.refresh_items(reset_selection=False, scroll_to_top=False)
-            # Sidebar badge: keep Untagged (N) fresh even when not on that view
-            self._refresh_special_counts()
-            self._toast(("+ " if turn_on else "− ") + tag)
+        def apply_tag(tag: str, turn_on: bool) -> None:
             picker = picker_ref["p"]
-            if update_picker and picker is not None:
-                picker.note_toggled(tag, turn_on)  # type: ignore[union-attr]
+
+            def done(_ok: int, _errors: list[str]) -> None:
+                if picker is not None:
+                    picker.note_membership(tag, sum(tag in it.tags for it in items), n)
+
+            self._run_metadata_batch(
+                ids, description=("+ " if turn_on else "− ") + tag,
+                picker=picker, on_done=done,
+                **{"add_tags" if turn_on else "remove_tags": [tag]},
+            )
 
         def on_toggle(tag: str, turn_on: bool) -> bool:
             if n > BULK_EDIT_CONFIRM:
@@ -5637,12 +5668,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     n,
                     heading=f"{verb} tag on {n} items?",
                     body=f"{verb} “{tag}” on {n} selected items.",
-                    apply_fn=lambda: apply_tag(tag, turn_on, update_picker=True),
+                    apply_fn=lambda: apply_tag(tag, turn_on),
                     parent=picker_ref["p"],  # type: ignore[arg-type]
                 )
                 return False
-            apply_tag(tag, turn_on, update_picker=False)
-            return True
+            apply_tag(tag, turn_on)
+            return False
 
         def on_close() -> None:
             self.grid.grab_focus()
@@ -5940,7 +5971,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def edit_folders_dialog(self) -> None:
         """Keyboard folder/category picker (same UX as tags)."""
         from picker import TogglePicker, load_recent
-        from write import WriteError
+
+        if self._metadata_batch_busy:
+            self._toast("A metadata update is still running")
+            return
 
         items = self._metadata_edit_items()
         if not items:
@@ -5978,38 +6012,28 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     return k
             return None
 
-        def apply_folder(path_label: str, turn_on: bool, *, update_picker: bool) -> None:
+        def apply_folder(path_label: str, turn_on: bool) -> None:
             fid = resolve_fid(path_label)
             if not fid:
                 self._toast(f"Unknown folder: {path_label}")
-                raise WriteError(f"Unknown folder: {path_label}")
-            try:
-                if n == 1:
-                    if turn_on:
-                        self.library.update_item(ids[0], add_folders=[fid])
-                    else:
-                        self.library.update_item(ids[0], remove_folders=[fid])
-                else:
-                    if turn_on:
-                        self.library.update_items_batch(ids, add_folders=[fid])
-                    else:
-                        self.library.update_items_batch(ids, remove_folders=[fid])
-            except WriteError as exc:
-                self._toast(str(exc))
-                raise
-            # Re-query so the current smart folder / Uncategorized drops mismatches
-            self.refresh_items(reset_selection=False, scroll_to_top=False)
-            # Sidebar badge: keep Uncategorized (N) fresh even when not on that view
-            self._refresh_special_counts()
+                return
+            picker = picker_ref["p"]
             msg = ("+ " if turn_on else "− ") + path_label
             if turn_on:
                 auto = self.library.auto_tags_for_folders([fid])
                 if auto:
                     msg += " · auto-tags " + ", ".join(auto)
-            self._toast(msg)
-            picker = picker_ref["p"]
-            if update_picker and picker is not None:
-                picker.note_toggled(path_label, turn_on)  # type: ignore[union-attr]
+
+            def done(_ok: int, _errors: list[str]) -> None:
+                if picker is not None:
+                    picker.note_membership(
+                        path_label, sum(fid in it.folders for it in items), n
+                    )
+
+            self._run_metadata_batch(
+                ids, description=msg, picker=picker, on_done=done,
+                **{"add_folders" if turn_on else "remove_folders": [fid]},
+            )
 
         def on_toggle(path_label: str, turn_on: bool) -> bool:
             if n > BULK_EDIT_CONFIRM:
@@ -6025,13 +6049,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     heading=f"{verb} category on {n} items?",
                     body=f"{verb} “{path_label}” on {n} selected items.{extra}",
                     apply_fn=lambda: apply_folder(
-                        path_label, turn_on, update_picker=True
+                        path_label, turn_on
                     ),
                     parent=picker_ref["p"],  # type: ignore[arg-type]
                 )
                 return False
-            apply_folder(path_label, turn_on, update_picker=False)
-            return True
+            apply_folder(path_label, turn_on)
+            return False
 
         def on_close() -> None:
             self.grid.grab_focus()
@@ -8067,8 +8091,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._apply_view_loc(loc)
 
     def group_selection_into_set(self) -> None:
-        from write import WriteError
-
         items = self._effective_hand_off_items()
         if len(items) < 2:
             self._toast("Select at least two items")
@@ -8089,45 +8111,28 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if not ids:
             self._toast("Already grouped")
             return
-        try:
-            _ok, errors = self.library.update_items_batch(ids, add_tags=[tag])
-        except WriteError as exc:
-            self._toast(str(exc))
-            return
-        self._rebuild_set_counts(force=True)
-        self.refresh_items(reset_selection=False)
-        n = self._set_counts.get(tag, 0)
-        msg = f"Set · {n}"
-        if errors:
-            msg += f" · {len(errors)} failed"
-        self._toast(msg)
+        self._run_metadata_batch(
+            ids, add_tags=[tag], description="Grouped",
+            on_done=lambda _ok, _errors: self._rebuild_set_counts(force=True),
+        )
 
     def remove_selection_from_set(self) -> None:
-        from write import WriteError
-
         items = self._effective_hand_off_items()
         drop = list(dict.fromkeys(t for it in items for t in set_tags_of(it)))
         if not drop:
             self._toast("Not in a set")
             return
         ids = [it.id for it in items if set_tags_of(it)]
-        try:
-            _ok, errors = self.library.update_items_batch(ids, remove_tags=drop)
-        except WriteError as exc:
-            self._toast(str(exc))
-            return
-        self._rebuild_set_counts(force=True)
-        if self._special_view == "set":
-            still = self._set_counts.get(self._set_view_tag or "", 0)
-            if still < 1:
-                self._leave_set_view()
-                self._toast("Set empty")
-                return
-        self.refresh_items(reset_selection=False)
-        msg = "Removed from set"
-        if errors:
-            msg += f" · {len(errors)} failed"
-        self._toast(msg)
+        def done(_ok: int, _errors: list[str]) -> None:
+            self._rebuild_set_counts(force=True)
+            if self._special_view == "set":
+                still = self._set_counts.get(self._set_view_tag or "", 0)
+                if still < 1:
+                    self._leave_set_view()
+
+        self._run_metadata_batch(
+            ids, remove_tags=drop, description="Removed from set", on_done=done,
+        )
 
     def _auto_join_set(self, source: Item, new_item: Item) -> Item:
         """Put a browse-created derivative in the source's set (mint if needed)."""

@@ -325,6 +325,7 @@ class TogglePicker(Gtk.Window):
         self._rows: list[tuple[str, str]] = []  # (value, kind)
         self._rebuilding = False
         self._closing = False
+        self._busy = False
         self._outside_click: Gtk.GestureClick | None = None
 
         # Tell parent to ignore global hotkeys while open.
@@ -348,6 +349,8 @@ class TogglePicker(Gtk.Window):
         root.append(head)
         sub = Gtk.Label(label=subtitle, xalign=0, wrap=True)
         sub.add_css_class("dim-label")
+        self._subtitle_label = sub
+        self._subtitle = subtitle
         root.append(sub)
 
         self.entry = Gtk.Entry()
@@ -610,6 +613,8 @@ class TogglePicker(Gtk.Window):
         return raw
 
     def _toggle_value(self, value: str, *, exclude: bool = False) -> None:
+        if self._busy or self._closing:
+            return
         value = self._canonical_value(value)
         if not value:
             return
@@ -645,6 +650,30 @@ class TogglePicker(Gtk.Window):
         # Clear filter after assign so the next tag/folder can be typed immediately
         # (type Eunbi → Enter → type inspo → Enter).
         self._finish_toggle_ui(value)
+
+    def set_busy(self, busy: bool, message: str | None = None) -> None:
+        """Prevent another toggle during a write; Escape may still close us."""
+        if self._closing:
+            return
+        self._busy = busy
+        self.entry.set_sensitive(not busy)
+        self.list.set_sensitive(not busy)
+        self._subtitle_label.set_text(message if busy and message else self._subtitle)
+        if not busy:
+            self.entry.grab_focus()
+
+    def note_membership(self, value: str, present: int, total: int) -> None:
+        """Reconcile a completed write, including mixed results after failures."""
+        if self._closing:
+            return
+        if 0 < present < total:
+            self._active.discard(value)
+            self._partial.add(value)
+            if value not in self._all:
+                self._all.append(value)
+            self._finish_toggle_ui(value)
+        else:
+            self.note_toggled(value, present == total and total > 0)
 
     def note_toggled(self, value: str, turn_on: bool) -> None:
         """Apply chip state after a successful toggle (including delayed confirm)."""
