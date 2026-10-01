@@ -243,6 +243,7 @@ def save_item_metadata(
     data: dict[str, Any],
     *,
     do_backup: bool = True,
+    mtime_updates: dict[str, int] | None = None,
 ) -> None:
     meta_path = item_dir / "metadata.json"
     if do_backup:
@@ -251,7 +252,12 @@ def save_item_metadata(
     data["modificationTime"] = now
     data["lastModified"] = now
     atomic_write_json(meta_path, data)
-    _touch_mtime_index(library_root, str(data.get("id") or item_dir.name.removesuffix(".info")), now)
+    item_id = str(data.get("id") or item_dir.name.removesuffix(".info"))
+    if mtime_updates is None:
+        _touch_mtime_index(library_root, item_id, now)
+    else:
+        # Only collect after the item's atomic save has succeeded.
+        mtime_updates[item_id] = now
 
 
 def sanitize_item_name(name: str, *, ext: str = "") -> str:
@@ -370,6 +376,26 @@ def rename_item_media(
 
 def _touch_mtime_index(library_root: Path, item_id: str, when_ms: int) -> None:
     """Update mtime.json entry for this item if the file exists and is a dict."""
+    _touch_mtime_index_batch(library_root, {item_id: when_ms})
+
+
+@contextmanager
+def batch_item_writes(library_root: Path) -> Iterator[dict[str, int]]:
+    """Collect successful item saves; flush their index entries before unlocking.
+
+    Caller must hold write_session for the entire context. Flush on exceptions
+    too: a batch can fail after some item files have already been committed.
+    """
+    updates: dict[str, int] = {}
+    try:
+        yield updates
+    finally:
+        if updates:
+            _touch_mtime_index_batch(library_root, updates)
+
+
+def _touch_mtime_index_batch(library_root: Path, updates: dict[str, int]) -> None:
+    """Merge entries with one read, backup and atomic write (best effort)."""
     mtime_path = library_root / "mtime.json"
     if not mtime_path.is_file():
         return
@@ -380,7 +406,7 @@ def _touch_mtime_index(library_root: Path, item_id: str, when_ms: int) -> None:
         return
     if not isinstance(mtime, dict):
         return
-    mtime[item_id] = when_ms
+    mtime.update(updates)
     try:
         backup_file(library_root, mtime_path)
         atomic_write_json(mtime_path, mtime)

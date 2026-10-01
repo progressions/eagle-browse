@@ -144,6 +144,18 @@ PYTHONPATH=. python3 scripts/synth_catalog.py --count 5000 --bench
 PYTHONPATH=. python3 scripts/synth_catalog.py --count 20000 --out /tmp/synth.library --bench --keep
 ```
 
+Optional batch-write timing (disposable metadata, real backups and fsync):
+
+```bash
+python scripts/benchmark_batch_metadata.py --directory ~/.cache --items 100
+# Compare another checkout with the same fixture:
+python scripts/benchmark_batch_metadata.py --directory ~/.cache --source /path/to/checkout
+```
+
+The default index contains 14,516 entries. Choose a disk directory rather than
+`/tmp` (often tmpfs) to measure storage costs. The script tests a new folder
+assignment and a repeated, unchanged assignment; it never opens a real library.
+
 Optional runtime profiling while navigating a real library:
 
 ```bash
@@ -229,6 +241,16 @@ Shows the focused asset (or **common** values when multi-selected):
 | `m` | **Filter by type** (or use the **Type** button on the filter bar) |
 | `Esc` | Clear marks → clear view filters → clear search |
 | `b` | Focus **sidebar** |
+
+Category, tag, rating, note, and group membership edits run in the background
+with progress and a completion/error summary. Only one of these edits runs at a
+time. The category and tag pickers pause toggles while saving and show mixed
+membership if only some assets were updated. Closing a picker or the window does
+not cancel an accepted write; it finishes safely in the background.
+
+Unchanged metadata is not rewritten or backed up, and its modification time
+stays unchanged. Changed assets retain individual backups and atomic saves;
+the shared modification index is updated once per batch, including delete/restore.
 
 Left nav includes **Untagged** and **Intake** virtual views. Intake contains assets with no category.
 
