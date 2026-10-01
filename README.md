@@ -508,7 +508,7 @@ and see its members individually. Press **Esc** in the set grid to return to the
 folder or library view you opened it from. If an asset viewer is open, the first
 Esc closes the asset and the next Esc closes the group. This is independent of
 the Back button's history. Returning to the library keeps the toggle on.
-Turn it off to show every asset again. The toggle starts off in a new window.
+Turn it off to show every asset again. The toggle is remembered across restarts (off until first enabled).
 Tag and folder edits on collapsed thumbnails apply to every non-deleted member
 of the selected sets, including members outside the current search or filters.
 Mixed selections include standalone assets and count each asset once. The editor
