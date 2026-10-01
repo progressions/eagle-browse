@@ -3412,19 +3412,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         vf = self._view_filters
         scope = self._scope_label()
         self.status_left.set_text(f"Loading… · {scope}")
-        # Capture selection for restore after re-query
-        keep_marks = set(self._marked) if not reset_selection else set()
-        keep_focus_id = (
-            self.selected_item.id
-            if (not reset_selection and self.selected_item is not None)
-            else None
-        )
         if scroll_to_top is None:
             scroll_to_top = reset_selection
         if revalidate is None:
             revalidate = reset_selection
-        keep_scroll = 0.0 if scroll_to_top else self._grid_scroll_value()
-        keep_loaded = 0 if reset_selection else len(self._items)
         if scroll_to_top:
             self._cancel_scroll_restore()
 
@@ -3519,14 +3510,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 items = collapse_sets(items)
             if cancel.is_set():
                 return
-            load_n = PAGE_CHUNK if reset_selection else max(PAGE_CHUNK, keep_loaded)
-            if keep_focus_id:
-                for i, it in enumerate(items):
-                    if it.id == keep_focus_id:
-                        load_n = max(load_n, i + 1)
-                        break
-            load_n = min(load_n, len(items))
-            page = items[:load_n]
+            query_items = items
 
             def apply() -> bool:
                 if (
@@ -3535,6 +3519,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     or self._shutdown.is_set()
                 ):
                     return False  # stale or shutting down
+                # Use the current cursor, not the cursor from before the query:
+                # keyboard navigation can continue while the worker is running.
+                keep_marks = set(self._marked) if not reset_selection else set()
+                focused = self.selected_item if not reset_selection else None
+                keep_focus_id = focused.id if focused is not None else None
+                keep_scroll = 0.0 if scroll_to_top else self._grid_scroll_value()
+                items = list(query_items)
+                keep_focus_idx = next(
+                    (i for i, it in enumerate(self._items) if it.id == keep_focus_id),
+                    self._last_focus_idx,
+                )
+                load_n = PAGE_CHUNK if reset_selection else max(PAGE_CHUNK, len(self._items))
+                if keep_focus_id:
+                    for i, it in enumerate(items):
+                        if it.id == keep_focus_id:
+                            load_n = max(load_n, i + 1)
+                            break
+                page = items[:load_n]
                 self._rebuild_set_counts()
                 if smart_id and not search and not vf.active() and special is None:
                     self._update_smart_count_label(smart_id, total)
@@ -3564,7 +3566,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                         self.selection.set_selected(Gtk.INVALID_LIST_POSITION)
                     except Exception:  # noqa: BLE001
                         pass
-                elif reset_selection or not keep_marks:
+                elif reset_selection or (not keep_marks and not keep_focus_id):
                     if page:
                         self._sel_anchor = 0
                         self._last_focus_idx = 0
@@ -3594,7 +3596,9 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     # tagged while on Untagged). Inspector / stage / delete
                     # still see them via _marked_items().
                     self._marked = (keep_marks & {it.id for it in items}) if collapse_groups else set(keep_marks)
-                    focus_idx = 0
+                    # If an edit removes the focused item from a smart folder,
+                    # stay at its former position (or the final remaining row).
+                    focus_idx = min(max(0, keep_focus_idx), max(0, len(page) - 1))
                     if page:
                         if keep_focus_id and keep_focus_id in id_to_idx:
                             focus_idx = id_to_idx[keep_focus_id]
@@ -3605,6 +3609,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                                     focus_idx = id_to_idx[mid]
                                     break
                         self.selected_item = page[focus_idx]
+                        if len(keep_marks) <= 1:
+                            # Subsequent ratings/tags must target the successor,
+                            # not the single item that just left this view.
+                            self._marked = {self.selected_item.id}
                         self._last_focus_idx = focus_idx
                         self._sel_anchor = focus_idx
                         if self._grid_has_focus:
@@ -3629,11 +3637,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                             )
                         except Exception:
                             pass
-                        # keep_marks retained so handoff/delete still works
+                        # Retain an explicit multi-selection for batch actions,
+                        # but a single edit target is gone when the view empties.
+                        if len(keep_marks) <= 1:
+                            self._marked.clear()
 
                 self._rebuild_scope_text()
                 self._refresh_status()
                 self._update_path_label()
+                self.update_inspector()
                 self._rebuild_filter_chips()
                 if scroll_to_top:
                     self._scroll_grid_to_top()
@@ -4052,7 +4064,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _on_grid_selection(self, selection: Gtk.SingleSelection, _pspec) -> None:
         obj = selection.get_selected_item()
-        self.selected_item = obj.item if obj else None
+        # Hiding the GTK highlight on focus loss (or replacing store rows)
+        # is not an instruction to abandon the logical edit target.
+        if obj is not None:
+            self.selected_item = obj.item
+        elif self._keep_grid_unselected:
+            self.selected_item = None
         self._update_path_label()
         self.update_inspector()
 
