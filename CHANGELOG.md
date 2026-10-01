@@ -7,6 +7,12 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.11] — 2026-10-01
+
+### Fixed
+
+- Esc in a group grid now returns to the previous view using the same action as the Back button, before clearing selection or search. Open dialogs and individual asset viewers still close first.
+
 ## [0.1.10] — 2026-10-01
 
 ### Added
