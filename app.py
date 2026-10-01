@@ -8091,7 +8091,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._apply_view_loc(loc)
 
     def group_selection_into_set(self) -> None:
-        items = self._effective_hand_off_items()
+        items = self._metadata_edit_items()
         if len(items) < 2:
             self._toast("Select at least two items")
             return
