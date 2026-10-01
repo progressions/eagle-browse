@@ -7,6 +7,24 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-10-01
+
+### Added
+
+- Collapse groups toggle beside Sort displays one thumbnail per set after filtering and sorting. Opening the representative thumbnail shows all set members; turning the toggle off restores individual assets.
+
+## [0.1.9] — 2026-09-25
+
+### Changed
+
+- Enhance bust opens with Qwen checked. Flux Klein and Krea 2 remain available.
+
+## [0.1.8] — 2026-09-25
+
+### Changed
+
+- Edit dialog no longer shows the paragraph about other selected stills and engine behavior. The prompt box and engine checkboxes are unchanged.
+
 ## [0.1.7] — 2026-09-25
 
 ### Changed

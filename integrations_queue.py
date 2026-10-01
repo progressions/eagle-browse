@@ -32,11 +32,11 @@ EDIT_PATH = "/api/v1/edit"
 OFFLINE_TOAST = "PromptForge not answering"
 NO_PROMPT_LINKED_TOAST = "No PromptForge prompt linked"
 
-BUST_ENGINES = ("klein", "qwen", "krea2")
+BUST_ENGINES = ("qwen", "krea2", "klein")
 WARDROBE_ENGINES = ("qwen", "krea2", "klein")
 # Edit API expects UI labels (PF may map flux→klein server-side).
 EDIT_ENGINES = ("qwen", "flux", "krea")
-DEFAULT_BUST_ENGINE = "klein"
+DEFAULT_BUST_ENGINE = "qwen"
 DEFAULT_WARDROBE_ENGINE = "qwen"
 DEFAULT_EDIT_ENGINE = "qwen"
 # PromptForge Qwen Image 2.1 edit: image1 = focused still, image2–10 = extras (#577).

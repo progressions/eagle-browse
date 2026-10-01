@@ -44,7 +44,7 @@ class IntegrationsQueueTest(unittest.TestCase):
         self.assertEqual(normalize_bust_engine("krea"), "krea2")
         self.assertEqual(normalize_bust_engine("qwen"), "qwen")
         self.assertIsNone(normalize_bust_engine("nope"))
-        self.assertEqual(DEFAULT_BUST_ENGINE, "klein")
+        self.assertEqual(DEFAULT_BUST_ENGINE, "qwen")
 
     def test_normalize_wardrobe_engines(self) -> None:
         self.assertEqual(normalize_wardrobe_engine("qwen"), "qwen")
