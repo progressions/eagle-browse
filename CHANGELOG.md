@@ -7,6 +7,16 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-10-01
+
+### Changed
+
+- Tag and folder edits on collapsed group thumbnails apply to every non-deleted member. Mixed selections deduplicate assets; inspector and editor values reflect shared and mixed metadata across all targets.
+
+### Fixed
+
+- Esc closes asset and group layers in order: video → group → originating folder or library view. The group parent is independent of Back history, preventing Esc from reopening a video.
+
 ## [0.1.11] — 2026-10-01
 
 ### Fixed
