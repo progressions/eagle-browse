@@ -41,6 +41,7 @@ from config import DEFAULT_LIBRARY, inbox_path  # noqa: E402
 from pixbuf_io import pixbuf_from_path as _pixbuf_from_path  # noqa: E402
 from library import (  # noqa: E402
     EagleLibrary,
+    ExternalChanges,
     Item,
     QueryCancelled,
     SmartFolder,
@@ -101,6 +102,11 @@ BULK_EDIT_CONFIRM = 100  # confirm tag/folder writes above this many items
 SEARCH_DEBOUNCE_MS = 150
 THUMB_ZOOM_RECLAIM_MS = 400
 G_PREFIX_TIMEOUT_MS = 800
+# External metadata edits (eagle-api, Dropbox sync, other tools): re-stat
+# images/*.info/metadata.json and re-read only what changed.
+EXTERNAL_REFRESH_DEBOUNCE_MS = 400  # coalesce bursts of mtime.json writes
+EXTERNAL_REFRESH_FOCUS_DELAY_MS = 100  # window regained focus
+EXTERNAL_REFRESH_INTERVAL_S = 30.0  # safety net for writers that skip mtime.json
 # Staging handoff (copy out of library — never writes into .library)
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
 # Sidebar expand/selection — survives close / crash
@@ -411,12 +417,22 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._inbox_images_mtime = 0.0
         self._images_scan_running = False
         self._images_scan_again = False
+        # External metadata changes (see _start_external_refresh)
+        self._ext_refresh_source = 0
+        self._ext_refresh_running = False
+        self._ext_refresh_again = False
+        self._ext_refresh_last = 0.0  # monotonic start of the last pass
+        self._ext_pending_ids: set[str] = set()
+        self._ext_pending_trees = False
+        self._mtime_index_monitor: Gio.FileMonitor | None = None
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
         self._library_ready = False
         # Super+W (killactive) / window close must quit the process, not leave
         # a headless instance with a ThreadPoolExecutor alive.
         self.connect("close-request", self._on_window_close_request)
+        # Coming back from a terminal (eagle-api) or another app: re-check disk
+        self.connect("notify::is-active", self._on_window_active_changed)
 
         self._build_ui()
         self._install_keybinds()
@@ -941,6 +957,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._populate_sidebar(select_current=True)
                 self.refresh_items()
                 self._start_inbox_watch()
+                self._start_external_change_watch()
                 self._start_duration_backfill()
                 return False
 
@@ -2002,6 +2019,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except Exception:  # noqa: BLE001
                 pass
             self._inbox_monitor = None
+        if getattr(self, "_ext_refresh_source", 0):
+            try:
+                GLib.source_remove(self._ext_refresh_source)
+            except Exception:  # noqa: BLE001
+                pass
+            self._ext_refresh_source = 0
+        if getattr(self, "_mtime_index_monitor", None) is not None:
+            try:
+                self._mtime_index_monitor.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+            self._mtime_index_monitor = None
         if self._scroll_restore_source:
             try:
                 GLib.source_remove(self._scroll_restore_source)
@@ -2969,6 +2998,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.refresh_items(
             reset_selection=not same_place or was_viewing,
             scroll_to_top=True,
+            revalidate=True,
         )
         self._save_sidebar_state()
         self._record_view_change(before)
@@ -3348,10 +3378,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._set_grid_focus(self.grid.has_focus())
 
     def refresh_items(
-        self, *, reset_selection: bool = False, scroll_to_top: bool | None = None
+        self,
+        *,
+        reset_selection: bool = False,
+        scroll_to_top: bool | None = None,
+        revalidate: bool | None = None,
     ) -> None:
         """
         Kick off a background query so the UI never freezes on smart folders.
+
+        ``revalidate`` (default: same as reset_selection; sidebar navigation
+        always passes True) first re-reads items whose metadata.json changed
+        on disk outside this window, so the folder shows current contents.
 
         By default, multi-selection (_marked) is preserved across refresh so
         tagging/categorizing on Untagged/Uncategorized can remove items from
@@ -3383,6 +3421,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         if scroll_to_top is None:
             scroll_to_top = reset_selection
+        if revalidate is None:
+            revalidate = reset_selection
         keep_scroll = 0.0 if scroll_to_top else self._grid_scroll_value()
         keep_loaded = 0 if reset_selection else len(self._items)
         if scroll_to_top:
@@ -3405,6 +3445,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self.library.scan_new_items()
                 except Exception:  # noqa: BLE001
                     pass
+            # Pick up external metadata edits (eagle-api, Dropbox) before the
+            # query so a smart folder is current the moment it is opened.
+            changes: ExternalChanges | None = None
+            if revalidate:
+                try:
+                    changes = self.library.refresh_changed_items(
+                        cancelled=cancel.is_set
+                    )
+                except Exception:  # noqa: BLE001
+                    changes = None
+                if changes is not None:
+                    # Model updates survive query cancellation. Deliver their
+                    # notifications separately; the poll applies them even if
+                    # this query is superseded before its UI callback runs.
+                    self._ui_idle(lambda: self._queue_external_changes(changes))
             try:
                 self.library._invalidate_caches()  # noqa: SLF001
                 if special == "set":
@@ -6809,6 +6864,225 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=work, name="eagle-stage", daemon=True).start()
 
+    # ── External metadata changes ─────────────────────────────────────
+    # eagle-api, Dropbox sync and other tools rewrite images/<id>.info/
+    # metadata.json without telling us. A pass stats every item's metadata
+    # file off the UI thread (~130 ms for 37k items), re-reads only the ones
+    # that changed, and never writes. Passes run:
+    #   * when mtime.json changes (eagle-api / Eagle / Dropbox bump it),
+    #   * when the window regains focus,
+    #   * when a folder / smart folder is opened (inside refresh_items),
+    #   * every EXTERNAL_REFRESH_INTERVAL_S as a safety net.
+    # One inotify watch total; no per-item watches on a 37k-item library.
+
+    def _start_external_change_watch(self) -> None:
+        self._ext_refresh_last = time.monotonic()  # load just read everything
+        try:
+            gfile = Gio.File.new_for_path(str(self.library.root / "mtime.json"))
+            monitor = gfile.monitor_file(Gio.FileMonitorFlags.NONE, None)
+            monitor.connect("changed", self._on_mtime_index_changed)
+            self._mtime_index_monitor = monitor
+        except Exception:  # noqa: BLE001
+            self._mtime_index_monitor = None
+
+    def _on_mtime_index_changed(self, *_args: object) -> None:
+        self._request_external_refresh(EXTERNAL_REFRESH_DEBOUNCE_MS)
+
+    def _on_window_active_changed(self, *_args: object) -> None:
+        if self.is_active():
+            self._request_external_refresh(EXTERNAL_REFRESH_FOCUS_DELAY_MS)
+
+    def _external_refresh_tick(self) -> None:
+        """1 s poll: flush deferred UI updates; periodic safety-net pass."""
+        if self._ext_pending_ids or self._ext_pending_trees:
+            self._apply_external_changes()
+        if (
+            not self._ext_refresh_running
+            and not self._ext_refresh_source
+            and time.monotonic() - self._ext_refresh_last
+            >= EXTERNAL_REFRESH_INTERVAL_S
+        ):
+            self._request_external_refresh(0)
+
+    def _request_external_refresh(
+        self, delay_ms: int = EXTERNAL_REFRESH_DEBOUNCE_MS
+    ) -> None:
+        """Schedule one pass. Requests while one is pending coalesce into it."""
+        if self._shutdown.is_set() or not self._library_ready:
+            return
+        if self._ext_refresh_source:
+            return
+
+        def fire() -> bool:
+            self._ext_refresh_source = 0
+            self._start_external_refresh()
+            return False
+
+        self._ext_refresh_source = GLib.timeout_add(max(0, int(delay_ms)), fire)
+
+    def _start_external_refresh(self) -> None:
+        """One pass at a time; a request during a pass queues one follow-up."""
+        if self._shutdown.is_set():
+            return
+        if self._ext_refresh_running:
+            self._ext_refresh_again = True
+            return
+        self._ext_refresh_running = True
+        self._ext_refresh_last = time.monotonic()
+        library = self.library
+
+        def work() -> None:
+            try:
+                changes: ExternalChanges | None = library.refresh_changed_items(
+                    cancelled=self._shutdown.is_set
+                )
+            except Exception:  # noqa: BLE001
+                changes = None
+
+            def done() -> bool:
+                self._ext_refresh_running = False
+                if changes is not None:
+                    self._queue_external_changes(changes)
+                    self._apply_external_changes()
+                if self._ext_refresh_again:
+                    self._ext_refresh_again = False
+                    self._start_external_refresh()
+                return False
+
+            self._ui_idle(done)
+
+        threading.Thread(target=work, name="eagle-ext-refresh", daemon=True).start()
+
+    def _queue_external_changes(self, changes: ExternalChanges) -> bool:
+        """Retain model notifications independently of any navigation query."""
+        self._ext_pending_ids.update(changes.changed)
+        self._ext_pending_trees |= changes.trees_changed
+        return False
+
+    def _external_refresh_blocked(self) -> bool:
+        """An in-window edit is in progress; defer grid/sidebar updates.
+
+        The library model is already current (refresh_changed_items never
+        overwrites an item an in-window edit touched); this only keeps the
+        grid, selection and sidebar still under an open picker / dialog /
+        smart-folder editor or a running metadata batch. Retried every 1 s.
+        """
+        return bool(
+            self._metadata_batch_busy
+            or self._picker_blocking
+            or self._open_dialog is not None
+            or self._sf_editor is not None
+        )
+
+    def _apply_external_changes(self) -> None:
+        """Re-evaluate the current view, badges and inspector after a pass."""
+        if not (self._ext_pending_ids or self._ext_pending_trees):
+            return
+        if self._shutdown.is_set() or self._external_refresh_blocked():
+            return
+        ids = self._ext_pending_ids
+        trees = self._ext_pending_trees
+        self._ext_pending_ids = set()
+        self._ext_pending_trees = False
+
+        if trees:
+            self._reload_trees_after_external_change()
+        changed_sets: set[str] = set()
+        if ids:
+            old_counts = self._set_counts
+            self._after_external_item_changes()
+            self._rebuild_set_counts()
+            changed_sets = {
+                tag for tag in old_counts.keys() | self._set_counts.keys()
+                if old_counts.get(tag, 0) != self._set_counts.get(tag, 0)
+            }
+
+        shown = {it.id for it in self._all_items}
+        relevant = trees or any(
+            set_tag_of(it) in changed_sets for it in self._all_items
+        )
+        if not relevant:
+            for iid in ids:
+                it = self.library.items_by_id.get(iid)
+                # Left the view (was shown) or entered it (matches now)
+                if iid in shown or (
+                    it is not None and self._item_matches_current_view(it)
+                ):
+                    relevant = True
+                    break
+        if relevant:
+            # Keeps selection, marks and scroll (same as after an import)
+            self.refresh_items(reset_selection=False, scroll_to_top=False)
+        elif ids:
+            self._sync_star_overlays()
+
+        selected = set(self._marked)
+        if self.selected_item is not None:
+            selected.add(self.selected_item.id)
+        selected_set_changed = any(
+            set_tag_of(self.library.items_by_id[iid]) in changed_sets
+            for iid in selected if iid in self.library.items_by_id
+        )
+        if (ids & selected or selected_set_changed) and not self.is_viewer_open():
+            self.update_inspector()
+            self._update_path_label()
+
+    def _after_external_item_changes(self) -> None:
+        """Badges computed over many items: smart counts, Untagged/Intake, sets."""
+        self._set_counts_ready = False
+        self._refresh_special_counts()
+        self._recount_smart_folders_async()
+
+    def _recount_smart_folders_async(self) -> None:
+        """Recount smart folders whose "(N)" badge we already show."""
+        if self._shutdown.is_set():
+            return
+        ids = [
+            sid for sid in self._smart_counts
+            if sid in self.library.smart_folders_by_id
+        ]
+        if not ids:
+            return
+        library = self.library
+
+        def work() -> None:
+            counts: dict[str, int] = {}
+            for sid in ids:
+                if self._shutdown.is_set():
+                    return
+                try:
+                    counts[sid] = library.count_smart_folder(sid)
+                except Exception:  # noqa: BLE001
+                    continue
+
+            def apply() -> bool:
+                for sid, n in counts.items():
+                    self._update_smart_count_label(sid, n)
+                return False
+
+            self._ui_idle(apply)
+
+        threading.Thread(
+            target=work, name="eagle-smart-recount", daemon=True
+        ).start()
+
+    def _reload_trees_after_external_change(self) -> None:
+        """Library metadata.json changed on disk: folders / smart-folder rules."""
+        before = (
+            dict(self.library.folder_paths),
+            dict(self.library.smart_folder_paths),
+        )
+        try:
+            self.library.reload_metadata_trees()
+        except Exception:  # noqa: BLE001
+            return  # half-synced file; next pass retries
+        after = (self.library.folder_paths, self.library.smart_folder_paths)
+        if before != after:
+            self._smart_counts.clear()
+            self._populate_sidebar(select_current=True)
+        else:
+            self._recount_smart_folders_async()
+
     # ── Live ingest of watcher imports ────────────────────────────────
     # The GUI never consumes PICS/Eunbi. It only watches a signal file
     # the watcher writes after each successful library item, then loads
@@ -6848,6 +7122,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._ingest_from_signal()
         self._retry_pending_imports()
         self._scan_images_if_changed()
+        self._external_refresh_tick()
         return True
 
     def _scan_images_if_changed(self) -> None:

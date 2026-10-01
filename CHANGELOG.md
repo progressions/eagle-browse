@@ -7,6 +7,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+
+- The running window picks up metadata changes written outside it (`eagle-api` tag/rating/folder edits, Dropbox sync, Eagle or other tools) without a manual reload. Opening a folder or smart folder, returning focus to the window, or an `mtime.json` update re-checks item `metadata.json` files (read-only stat pass, about 130 ms for 37k items, plus a 30-second safety net), re-reads only changed items, and re-evaluates smart folders and counts. Grid/sidebar updates wait while a picker, dialog, smart-folder editor, or metadata batch is open, and an in-window edit is never overwritten by an older disk read.
+
 ## [0.1.15] — 2026-10-01
 
 ### Fixed
