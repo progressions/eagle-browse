@@ -496,3 +496,15 @@ LAN phone browse is **no longer part of this package**. Use the separate phone
 app. Older installs may still have `/usr/bin/phone-browse` and
 `eagle-phone-browse.service` until you upgrade past the release that removed
 them; disable that unit if it is still running.
+
+### Collapsed groups
+
+Toggle **Collapse groups** beside Sort to show one thumbnail per set, plus each
+ungrouped asset. Five assets with three in one set become three thumbnails.
+The first matching member in the current sort order represents the set; search
+and filters apply before collapsing. The count badge shows all members of the
+set. Double-click the thumbnail, press Enter, or click its badge to open the set
+and see its members individually. Returning to the library keeps the toggle on.
+Turn it off to show every asset again. The toggle starts off in a new window.
+Selection and bulk actions apply to the visible representative asset; open the
+set to select and edit its other members.
