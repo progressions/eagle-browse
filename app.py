@@ -2039,6 +2039,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             "current_smart_folder_id": self.current_smart_folder_id,
             "current_folder_id": self.current_folder_id,
             "special_view": self._special_view,
+            "collapse_groups": self._collapse_groups,
         }
         try:
             _UI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2056,6 +2057,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         if not isinstance(data, dict):
             return
+        self._collapse_groups = data.get("collapse_groups") is True
+        # Set the model first: the toggle callback must not save or query midway
+        # through restoring the rest of the view.
+        self.collapse_groups_btn.set_active(self._collapse_groups)
         valid_smart = set(self.library.smart_folders_by_id)
         valid_folder = set(self.library.folders_by_id)
         raw_exp = data.get("smart_expanded") or []
@@ -3587,7 +3592,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._query_worker.submit(work)
 
     def _on_collapse_groups_toggled(self, button: Gtk.ToggleButton) -> None:
-        self._collapse_groups = button.get_active()
+        active = button.get_active()
+        if active == self._collapse_groups:
+            return
+        self._collapse_groups = active
+        self._save_sidebar_state()
         if self.is_viewer_open():
             self.close_inline_viewer(restore_scroll=False)
         # Clear marks so hidden members cannot remain selected for bulk edits.
