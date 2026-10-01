@@ -314,6 +314,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Virtual views: None | "untagged" | "uncategorized" | "set"
         self._special_view: str | None = None
         self._set_view_tag: str | None = None
+        self._set_parent_view: _ViewLoc | None = None
         self._set_counts: dict[str, int] = {}
         self._set_counts_ready = False
         self._nav_back: list[_ViewLoc] = []
@@ -1815,7 +1816,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._paint_insp_stars(0)
 
         # Tags: intersection (common) and partial — pill chips
-        tag_sets = [{t for t in it.tags if not is_set_tag(t)} for it in items]
+        metadata_items = self._metadata_edit_items()
+        tag_sets = [{t for t in it.tags if not is_set_tag(t)} for it in metadata_items]
         common_tags = set.intersection(*tag_sets) if tag_sets else set()
         union_tags = set.union(*tag_sets) if tag_sets else set()
         partial_tags = union_tags - common_tags
@@ -1823,14 +1825,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if common_tags:
             for t in sorted(common_tags, key=str.lower):
                 self._add_chip_label(self.insp_tags, t)
-        if partial_tags and n > 1:
+        if partial_tags and len(metadata_items) > 1:
             for t in sorted(partial_tags, key=str.lower):
                 self._add_chip_label(self.insp_tags, f"± {t}", dim=True)
         if not common_tags and not partial_tags:
             self._add_chip_label(self.insp_tags, "None — click to add", empty=True)
 
         # Folders commonality
-        folder_sets = [set(it.folders) for it in items]
+        folder_sets = [set(it.folders) for it in metadata_items]
         common_f = set.intersection(*folder_sets) if folder_sets else set()
         union_f = set.union(*folder_sets) if folder_sets else set()
         partial_f = union_f - common_f
@@ -1845,7 +1847,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     leaf,
                     tooltip=name if name != leaf else None,
                 )
-        if partial_f and n > 1:
+        if partial_f and len(metadata_items) > 1:
             for fid in sorted(partial_f):
                 name = self.library.folder_paths.get(fid, fid)
                 leaf = name.rsplit("/", 1)[-1] if name else fid
@@ -4099,6 +4101,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return [self.selected_item]
         return []
 
+    def _metadata_edit_items(self) -> list[Item]:
+        """Tag/folder targets: collapsed representatives stand for their whole set."""
+        selected = self._effective_hand_off_items()
+        if not self._collapse_groups or self._special_view == "set" or self.is_viewer_open():
+            return selected
+        targets: dict[str, Item] = {}
+        expanded: set[str] = set()
+        for item in selected:
+            if item.is_deleted:
+                continue
+            targets.setdefault(item.id, item)
+            tag = set_tag_of(item)
+            if tag and tag not in expanded:
+                expanded.add(tag)
+                for member in self.library.items_in_set(tag):
+                    targets.setdefault(member.id, member)
+        return list(targets.values())
+
     def _id_at_index(self, idx: int) -> str | None:
         if idx < 0 or idx >= len(self._items):
             return None
@@ -5554,7 +5574,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         from picker import TogglePicker, load_recent
         from write import WriteError
 
-        items = self._effective_hand_off_items()
+        items = self._metadata_edit_items()
         if not items:
             self._toast("Nothing selected")
             return
@@ -5623,7 +5643,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         picker = TogglePicker(
             self,
             title="Tags",
-            subtitle=f"{n} item(s) · Enter toggles · Esc closes",
+            subtitle=f"{n} item(s) · ± mixed · Enter toggles · Esc closes",
             all_values=all_tags,
             active=active,
             partial=partial,
@@ -5913,7 +5933,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         from picker import TogglePicker, load_recent
         from write import WriteError
 
-        items = self._effective_hand_off_items()
+        items = self._metadata_edit_items()
         if not items:
             self._toast("Nothing selected")
             return
@@ -6012,7 +6032,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         picker = TogglePicker(
             self,
             title="Folders / categories",
-            subtitle=f"{n} item(s) · Enter toggles · Esc closes · no new folders here",
+            subtitle=f"{n} item(s) · ± mixed · Enter toggles · Esc closes",
             all_values=all_paths,
             active=active_paths,
             partial=partial_paths,
@@ -7900,6 +7920,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def open_set_view(self, tag: str, *, keep_id: str | None = None) -> None:
         """Temporary grid of every item with this set: tag."""
         before = self._view_loc()
+        if before.special != "set":
+            self._set_parent_view = before._replace(viewer_id=None)
         if self.is_viewer_open():
             self.close_inline_viewer(restore_scroll=False)
         self._rebuild_set_counts()
@@ -7922,6 +7944,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._record_view_change(before)
         n = self._set_counts.get(tag, 0)
         self._toast(f"Set · {n}")
+
+    def _escape_set_view(self) -> None:
+        """Close the group layer, independent of asset-viewer navigation history."""
+        parent = self._set_parent_view
+        if parent is None:
+            self._leave_set_view()
+            return
+        before = self._view_loc()
+        self._apply_view_loc(parent)
+        self._record_view_change(before)
 
     def _leave_set_view(self) -> None:
         before = self._view_loc()
@@ -7976,6 +8008,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _apply_view_loc(self, loc: _ViewLoc) -> None:
         scope_changed = self._scope_changed(loc)
+        if loc.special == "set" and self._special_view != "set":
+            self._set_parent_view = self._view_loc()._replace(viewer_id=None)
         self._nav_restoring = True
         self._sidebar_nav_lock = True
         try:
@@ -9380,7 +9414,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.close_inline_viewer()
                 return True
             if self._special_view == "set":
-                self.nav_back()
+                self._escape_set_view()
                 return True
             if self._focus_is_search(self.get_focus()):
                 self.search.set_text("")
