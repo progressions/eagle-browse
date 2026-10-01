@@ -7,6 +7,12 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-10-01
+
+### Fixed
+
+- Remember the Collapse groups toggle across restarts, saving both On and Off immediately. Existing installations default to Off until enabled (PR #43).
+
 ## [0.1.12] — 2026-10-01
 
 ### Changed
@@ -121,7 +127,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 - Initial packaged release of the keyboard-first GTK Eagle.cool browser and inbox watcher.
 
-[Unreleased]: https://github.com/progressions/eagle-browse/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/progressions/eagle-browse/compare/v0.1.13...HEAD
+[0.1.13]: https://github.com/progressions/eagle-browse/compare/v0.1.12...v0.1.13
 [0.1.5]: https://github.com/progressions/eagle-browse/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/progressions/eagle-browse/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/progressions/eagle-browse/compare/v0.1.2...v0.1.3
