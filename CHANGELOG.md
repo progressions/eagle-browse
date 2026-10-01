@@ -7,6 +7,12 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-10-01
+
+### Added
+
+- Collapse groups toggle beside Sort displays one thumbnail per set after filtering and sorting. Opening the representative thumbnail shows all set members; turning the toggle off restores individual assets.
+
 ## [0.1.9] — 2026-09-25
 
 ### Changed
