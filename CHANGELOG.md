@@ -7,6 +7,17 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.14] — 2026-10-01
+
+### Changed
+
+- Batch metadata edits update the shared modification index once per batch and skip unchanged assets while preserving backups and atomic saves. In a disk-backed synthetic benchmark, assigning a category to 100 assets improved from a median of 4.77 seconds to 1.71 seconds (PR #45).
+- Category, tag, rating, note, and group membership edits run in the background with progress. Accepted writes finish safely if the picker or window closes.
+
+### Fixed
+
+- Category and tag pickers report batch errors and reconcile mixed membership after partial failures instead of indicating full success.
+
 ## [0.1.13] — 2026-10-01
 
 ### Fixed
@@ -127,7 +138,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 - Initial packaged release of the keyboard-first GTK Eagle.cool browser and inbox watcher.
 
-[Unreleased]: https://github.com/progressions/eagle-browse/compare/v0.1.13...HEAD
+[Unreleased]: https://github.com/progressions/eagle-browse/compare/v0.1.14...HEAD
+[0.1.14]: https://github.com/progressions/eagle-browse/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/progressions/eagle-browse/compare/v0.1.12...v0.1.13
 [0.1.5]: https://github.com/progressions/eagle-browse/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/progressions/eagle-browse/compare/v0.1.3...v0.1.4
