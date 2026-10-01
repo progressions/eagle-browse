@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import library as library_mod
-from library import EagleLibrary
+from library import EagleLibrary, QueryCancelled
 from write import atomic_write_json, save_item_metadata
 
 READY = {
@@ -225,6 +225,8 @@ class ExternalChangesUITest(unittest.TestCase):
             _ext_refresh_running=False,
             _ext_refresh_again=False,
             _ext_refresh_last=0.0,
+            _set_counts={},
+            _rebuild_set_counts=Mock(),
             _all_items=[self.item],
             _marked=set(),
             selected_item=None,
@@ -297,6 +299,79 @@ class ExternalChangesUITest(unittest.TestCase):
         self.apply()
         self.win._reload_trees_after_external_change.assert_called_once()
         self.win.refresh_items.assert_called_once()
+
+    def test_canceled_navigation_retains_consumed_changes(self) -> None:
+        tmp = TempLibrary()
+        self.addCleanup(tmp.cleanup)
+        lib = EagleLibrary(tmp.root)
+        lib.load()
+        tmp.external_edit("ITEM1", tags=["ready"])
+        win = self.win
+        win.library = lib
+        win._query_gen = 0
+        win.current_folder_id = None
+        win.current_smart_folder_id = None
+        win._special_view = None
+        win._collapse_groups = False
+        win.include_descendants = True
+        win._filter_text = ""
+        win._view_filters = Mock()
+        win._scope_label = Mock(return_value="All")
+        win.status_left = Mock()
+        win._grid_scroll_value = Mock(return_value=0)
+        win._items = []
+        callbacks = []
+        win._ui_idle = callbacks.append
+        win._queue_external_changes = lambda changes: self.W._queue_external_changes(win, changes)
+        cancel = threading.Event()
+        win._query_worker = SimpleNamespace(submit=lambda work: work(cancel))
+
+        def supersede_query(**kwargs):
+            cancel.set()
+            raise QueryCancelled
+
+        with patch.object(lib, "query", side_effect=supersede_query):
+            self.W.refresh_items(win, revalidate=True)
+        self.assertTrue(cancel.is_set())
+        self.assertEqual(lib.items_by_id["ITEM1"].tags, ["ready"])
+        self.assertEqual(lib.refresh_changed_items().changed, [])
+        for callback in callbacks:
+            callback()
+        self.assertEqual(win._ext_pending_ids, {"ITEM1"})
+        win._apply_external_changes = lambda: self.apply()
+        win._request_external_refresh = Mock()
+        self.W._external_refresh_tick(win)
+        win._after_external_item_changes.assert_called_once()
+        win.refresh_items.assert_called_once()
+
+    def test_hidden_set_member_changes_refresh_badge_and_inspector(self) -> None:
+        for edit in ({"isDeleted": True}, {"tags": []}):
+            with self.subTest(edit=edit):
+                tmp = TempLibrary()
+                try:
+                    lib = EagleLibrary(tmp.root)
+                    for iid in ("ITEM0", "ITEM1"):
+                        tmp.external_edit(iid, tags=["set:example"])
+                    lib.load()
+                    self.setUp()
+                    win = self.win
+                    win.library = lib
+                    win._all_items = [lib.items_by_id["ITEM0"]]
+                    win.selected_item = lib.items_by_id["ITEM0"]
+                    win._set_counts = {"set:example": 2}
+                    win._set_counts_ready = True
+                    win._refresh_special_counts = Mock()
+                    win._recount_smart_folders_async = Mock()
+                    win._after_external_item_changes = lambda: self.W._after_external_item_changes(win)
+                    win._rebuild_set_counts = lambda: self.W._rebuild_set_counts(win)
+                    tmp.external_edit("ITEM1", **edit)
+                    win._ext_pending_ids = set(lib.refresh_changed_items().changed)
+                    self.apply()
+                    self.assertEqual(win._set_counts, {"set:example": 1})
+                    win.refresh_items.assert_called_once()
+                    win.update_inspector.assert_called_once()
+                finally:
+                    tmp.cleanup()
 
     def test_requests_coalesce_into_one_timer(self) -> None:
         with patch("app.GLib.timeout_add", return_value=7) as add:

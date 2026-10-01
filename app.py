@@ -3455,6 +3455,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     )
                 except Exception:  # noqa: BLE001
                     changes = None
+                if changes is not None:
+                    # Model updates survive query cancellation. Deliver their
+                    # notifications separately; the poll applies them even if
+                    # this query is superseded before its UI callback runs.
+                    self._ui_idle(lambda: self._queue_external_changes(changes))
             try:
                 self.library._invalidate_caches()  # noqa: SLF001
                 if special == "set":
@@ -3530,8 +3535,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     or self._shutdown.is_set()
                 ):
                     return False  # stale or shutting down
-                if changes is not None and changes.changed:
-                    self._after_external_item_changes()
                 self._rebuild_set_counts()
                 if smart_id and not search and not vf.active() and special is None:
                     self._update_smart_count_label(smart_id, total)
@@ -3638,10 +3641,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     self._restore_grid_scroll(keep_scroll)
                 else:
                     self._set_grid_scroll_value(0.0)
-                if changes is not None and changes.trees_changed:
-                    # Folders / smart-folder rules changed on disk too
-                    self._ext_pending_trees = True
-                    self._apply_external_changes()
                 return False
 
             self._ui_idle(apply)
@@ -6943,9 +6942,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             def done() -> bool:
                 self._ext_refresh_running = False
                 if changes is not None:
-                    self._ext_pending_ids.update(changes.changed)
-                    if changes.trees_changed:
-                        self._ext_pending_trees = True
+                    self._queue_external_changes(changes)
                     self._apply_external_changes()
                 if self._ext_refresh_again:
                     self._ext_refresh_again = False
@@ -6955,6 +6952,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._ui_idle(done)
 
         threading.Thread(target=work, name="eagle-ext-refresh", daemon=True).start()
+
+    def _queue_external_changes(self, changes: ExternalChanges) -> bool:
+        """Retain model notifications independently of any navigation query."""
+        self._ext_pending_ids.update(changes.changed)
+        self._ext_pending_trees |= changes.trees_changed
+        return False
 
     def _external_refresh_blocked(self) -> bool:
         """An in-window edit is in progress; defer grid/sidebar updates.
@@ -6984,11 +6987,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         if trees:
             self._reload_trees_after_external_change()
+        changed_sets: set[str] = set()
         if ids:
+            old_counts = self._set_counts
             self._after_external_item_changes()
+            self._rebuild_set_counts()
+            changed_sets = {
+                tag for tag in old_counts.keys() | self._set_counts.keys()
+                if old_counts.get(tag, 0) != self._set_counts.get(tag, 0)
+            }
 
         shown = {it.id for it in self._all_items}
-        relevant = trees
+        relevant = trees or any(
+            set_tag_of(it) in changed_sets for it in self._all_items
+        )
         if not relevant:
             for iid in ids:
                 it = self.library.items_by_id.get(iid)
@@ -7007,7 +7019,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         selected = set(self._marked)
         if self.selected_item is not None:
             selected.add(self.selected_item.id)
-        if ids & selected and not self.is_viewer_open():
+        selected_set_changed = any(
+            set_tag_of(self.library.items_by_id[iid]) in changed_sets
+            for iid in selected if iid in self.library.items_by_id
+        )
+        if (ids & selected or selected_set_changed) and not self.is_viewer_open():
             self.update_inspector()
             self._update_path_label()
 
