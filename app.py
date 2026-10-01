@@ -314,6 +314,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Virtual views: None | "untagged" | "uncategorized" | "set"
         self._special_view: str | None = None
         self._set_view_tag: str | None = None
+        self._set_parent_view: _ViewLoc | None = None
         self._set_counts: dict[str, int] = {}
         self._set_counts_ready = False
         self._nav_back: list[_ViewLoc] = []
@@ -7919,6 +7920,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def open_set_view(self, tag: str, *, keep_id: str | None = None) -> None:
         """Temporary grid of every item with this set: tag."""
         before = self._view_loc()
+        if before.special != "set":
+            self._set_parent_view = before._replace(viewer_id=None)
         if self.is_viewer_open():
             self.close_inline_viewer(restore_scroll=False)
         self._rebuild_set_counts()
@@ -7941,6 +7944,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._record_view_change(before)
         n = self._set_counts.get(tag, 0)
         self._toast(f"Set · {n}")
+
+    def _escape_set_view(self) -> None:
+        """Close the group layer, independent of asset-viewer navigation history."""
+        parent = self._set_parent_view
+        if parent is None:
+            self._leave_set_view()
+            return
+        before = self._view_loc()
+        self._apply_view_loc(parent)
+        self._record_view_change(before)
 
     def _leave_set_view(self) -> None:
         before = self._view_loc()
@@ -7995,6 +8008,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _apply_view_loc(self, loc: _ViewLoc) -> None:
         scope_changed = self._scope_changed(loc)
+        if loc.special == "set" and self._special_view != "set":
+            self._set_parent_view = self._view_loc()._replace(viewer_id=None)
         self._nav_restoring = True
         self._sidebar_nav_lock = True
         try:
@@ -9399,7 +9414,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.close_inline_viewer()
                 return True
             if self._special_view == "set":
-                self.nav_back()
+                self._escape_set_view()
                 return True
             if self._focus_is_search(self.get_focus()):
                 self.search.set_text("")
