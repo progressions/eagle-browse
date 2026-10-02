@@ -153,3 +153,22 @@ class EditSelectionTest(unittest.TestCase):
         self.win.library.items_by_id['ITEM1'].is_deleted = True
         self.refresh()
         self.assertNotIn('ITEM1', [it.id for it in self.win._items])
+
+    def test_ordinary_refresh_reuses_smart_folder_cache(self):
+        w = self.win
+        first = w.library.query(smart_folder_id='sf-ready')
+        generation = w.library._cache_generation
+        self.refresh()
+        self.refresh()
+        self.assertIs(w.library.query(smart_folder_id='sf-ready'), first)
+        self.assertEqual(w.library._cache_generation, generation)
+        self.assert_current('ITEM1')
+
+    def test_rating_edit_invalidates_cached_view_before_refresh(self):
+        w = self.win
+        first = w.library.query(smart_folder_id='sf-ready')
+        w.library.update_item('ITEM1', star=1)
+        self.refresh()
+        self.assertNotIn('ITEM1', [it.id for it in w._items])
+        self.assertIsNot(w.library.query(smart_folder_id='sf-ready'), first)
+        self.assert_current('ITEM2')

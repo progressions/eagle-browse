@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -145,3 +146,28 @@ class LibraryCachingTest(unittest.TestCase):
                 self.library.set_folder_auto_tags(folder.id, ["future-tag"])
 
         self.assertEqual(self.library.all_tags(), ["future-tag"])
+
+    def test_import_and_replacement_invalidate_cached_queries(self):
+        first = self.library.query()
+        imported = replace(self.item, id="new-item", name="new")
+        self.library.upsert_item(imported)
+        second = self.library.query()
+        self.assertIsNot(second, first)
+        self.assertEqual({it.id for it in second}, {self.item.id, "new-item"})
+        replacement = replace(imported, is_deleted=True)
+        self.library.upsert_item(replacement)
+        self.assertEqual([it.id for it in self.library.query()], [self.item.id])
+
+    def test_tree_reload_invalidates_cached_smart_folder_rules(self):
+        self.assertEqual(self.library.query(smart_folder_id="tagged"), [])
+        conditions = [{"match": "AND", "boolean": "TRUE", "rules": [
+            {"property": "rating", "method": "equal", "value": 0}
+        ]}]
+        (self.root / "metadata.json").write_text(json.dumps({
+            "folders": [], "smartFolders": [
+                {"id": "tagged", "name": "Now unrated", "conditions": conditions}
+            ]
+        }))
+        self.library.reload_metadata_trees()
+        self.assertEqual([it.id for it in self.library.query(smart_folder_id="tagged")],
+                         [self.item.id])

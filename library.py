@@ -7,6 +7,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field, fields
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -492,6 +493,7 @@ class EagleLibrary:
         self.folder_paths: dict[str, str] = {}  # id -> "Parent / Child"
         self.smart_folder_paths: dict[str, str] = {}
         self._query_cache: dict[tuple, list[Item]] = {}
+        self._query_cache_day = date.today()
         self._all_tags_cache: list[str] | None = None
         self._user_tags_cache: list[str] | None = None
         self._cache_generation = 0
@@ -792,6 +794,14 @@ class EagleLibrary:
             limit,
         )
         with self._lock:
+            # Relative date rules ("today", "last N days") change without a
+            # metadata write. Expire parent and child results together at the
+            # next query on a new local calendar day.
+            today = date.today()
+            if today != self._query_cache_day:
+                self._query_cache.clear()
+                self._cache_generation += 1
+                self._query_cache_day = today
             cached = self._query_cache.get(cache_key)
             if cached is not None:
                 return cached
@@ -1215,9 +1225,10 @@ class EagleLibrary:
         cleaned = canonicalize_tags(tags)
         with write_session(self.root):
             set_folder_auto_tags(self.root, folder_id, cleaned)
-        folder = self.folders_by_id[folder_id]
-        folder.tags = cleaned
-        self._invalidate_caches()
+        with self._lock:
+            folder = self.folders_by_id[folder_id]
+            folder.tags = cleaned
+            self._clear_derived_caches()
         return folder
 
     def set_items_deleted(

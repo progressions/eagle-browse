@@ -7,6 +7,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+
+- Reuse library query caches across ordinary grid refreshes. Metadata edits, imports, folder-rule reloads, and external changes invalidate cached results; relative-date views expire on the next query after the local calendar day changes. Folder auto-tag changes also invalidate tag choices.
+
 ## [0.1.17] — 2026-10-01
 
 ### Fixed
