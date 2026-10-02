@@ -3646,6 +3646,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._update_path_label()
                 self.update_inspector()
                 self._rebuild_filter_chips()
+                # SingleSelection does not restore GridView's keyboard focus.
+                # The old focused tile was destroyed by the rebuild; without
+                # this GTK later focuses row zero and scrolls back to the top.
+                if self._grid_has_focus and self.selected_item is not None:
+                    idx = id_to_idx.get(self.selected_item.id)
+                    if idx is not None:
+                        self.grid.scroll_to(idx, Gtk.ListScrollFlags.FOCUS, None)
                 if scroll_to_top:
                     self._scroll_grid_to_top()
                 elif not reset_selection:

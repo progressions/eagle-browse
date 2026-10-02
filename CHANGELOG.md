@@ -7,6 +7,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore GTK grid keyboard focus after rating/tag refreshes, preventing a delayed jump to the first image even when logical selection and scroll were initially restored correctly.
+
 ## [0.1.18] — 2026-10-02
 
 ### Changed

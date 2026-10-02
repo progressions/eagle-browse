@@ -37,7 +37,7 @@ class EditSelectionTest(unittest.TestCase):
             _scope_label=lambda: 'Eunbi/images', status_left=Mock(),
             _marked={'ITEM1'}, selected_item=items[1], _items=items,
             _all_items=items, _last_focus_idx=1, _keep_grid_unselected=False,
-            _grid_has_focus=True, _smart_counts={}, _special_counts={},
+            _grid_has_focus=True, grid=Mock(), _smart_counts={}, _special_counts={},
             _grid_scroll_value=lambda: 120, _cancel_scroll_restore=Mock(),
             _sort_items=lambda found: sorted(found, key=lambda it: it.id),
             _rebuild_set_counts=Mock(), _update_smart_count_label=Mock(),
@@ -68,6 +68,7 @@ class EditSelectionTest(unittest.TestCase):
         self.assert_current('ITEM2')
         self.assertEqual(w._marked, {'ITEM2'})
         self.assertEqual(w.selection.get_selected(), 1)
+        w.grid.scroll_to.assert_called_with(1, Gtk.ListScrollFlags.FOCUS, None)
         self.assertNotIn('ITEM1', [it.id for it in w._items])
         w._update_smart_count_label.assert_called_with('sf-ready', 2)
         w._restore_grid_scroll.assert_called_with(120)
