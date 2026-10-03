@@ -3594,7 +3594,15 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     # Keep marks even for items that left this view (e.g. just
                     # tagged while on Untagged). Inspector / stage / delete
                     # still see them via _marked_items().
-                    self._marked = (keep_marks & {it.id for it in items}) if collapse_groups else set(keep_marks)
+                    # Intake is a staged workflow: category assignment removes
+                    # assets from the grid, but follow-up tagging must still
+                    # operate on those assets, including collapsed groups.
+                    retain_intake_marks = special == "uncategorized"
+                    self._marked = (
+                        keep_marks & {it.id for it in items}
+                        if collapse_groups and not retain_intake_marks
+                        else set(keep_marks)
+                    )
                     # If an edit removes the focused item from a smart folder,
                     # stay at its former position (or the final remaining row).
                     focus_idx = min(max(0, keep_focus_idx), max(0, len(page) - 1))
@@ -3608,7 +3616,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                                     focus_idx = id_to_idx[mid]
                                     break
                         self.selected_item = page[focus_idx]
-                        if len(keep_marks) <= 1:
+                        if len(keep_marks) <= 1 and not retain_intake_marks:
                             # Subsequent ratings/tags must target the successor,
                             # not the single item that just left this view.
                             self._marked = {self.selected_item.id}
@@ -3637,8 +3645,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                         except Exception:
                             pass
                         # Retain an explicit multi-selection for batch actions,
-                        # but a single edit target is gone when the view empties.
-                        if len(keep_marks) <= 1:
+                        # or any Intake selection for follow-up metadata edits.
+                        if len(keep_marks) <= 1 and not retain_intake_marks:
                             self._marked.clear()
 
                 self._rebuild_scope_text()

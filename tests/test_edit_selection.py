@@ -1,4 +1,4 @@
-"""Metadata refreshes preserve the cursor position in uncollapsed smart folders."""
+"""Metadata refreshes preserve smart-folder position and Intake edit targets."""
 import threading
 import unittest
 from types import SimpleNamespace
@@ -41,6 +41,7 @@ class EditSelectionTest(unittest.TestCase):
             _grid_scroll_value=lambda: 120, _cancel_scroll_restore=Mock(),
             _sort_items=lambda found: sorted(found, key=lambda it: it.id),
             _rebuild_set_counts=Mock(), _update_smart_count_label=Mock(),
+            _update_special_count_label=Mock(),
             _rebuild_scope_text=Mock(), _refresh_status=Mock(),
             _update_path_label=Mock(), _rebuild_filter_chips=Mock(),
             _restore_grid_scroll=Mock(), _scroll_grid_to_top=Mock(),
@@ -60,6 +61,44 @@ class EditSelectionTest(unittest.TestCase):
         self.assertEqual(self.win.selected_item.id, iid)
         self.assertEqual(self.win.selection.get_selected_item().item.id, iid)
         self.assertIn(iid, self.win._marked)
+
+    def test_intake_category_then_tag_retains_original_targets(self):
+        for collapsed in (False, True):
+            for marks in ({'ITEM1'}, {'ITEM0', 'ITEM1'},
+                          {'ITEM0', 'ITEM1', 'ITEM2'}):
+                with self.subTest(collapsed=collapsed, marks=marks):
+                    w = self.win
+                    for item in w.library.items:
+                        w.library.update_item(item.id, set_folders=[], set_tags=[])
+                    w.current_smart_folder_id = None
+                    w._special_view = 'uncategorized'
+                    w._collapse_groups = collapsed
+                    self.refresh(reset_selection=True)
+                    w._marked = set(marks)
+                    w.selection.set_selected(1)
+                    Window._set_grid_focus(w, False)
+                    for iid in marks:
+                        w.library.update_item(iid, add_folders=['sofie'])
+                    self.refresh()
+                    Window._set_grid_focus(w, True)
+                    self.refresh()  # a watcher refresh must also retain targets
+                    self.assertEqual(w._marked, marks)
+                    self.assertTrue(marks.isdisjoint(it.id for it in w._items))
+                    w._marked_items = lambda: Window._marked_items(w)
+                    w._effective_hand_off_items = lambda: Window._effective_hand_off_items(w)
+                    w.is_viewer_open = lambda: False
+                    targets = Window._metadata_edit_items(w)
+                    self.assertEqual({it.id for it in targets}, marks)
+                    for item in targets:
+                        w.library.update_item(item.id, add_tags=['published-x'])
+                    self.refresh()
+                    self.assertEqual(w._marked, marks)
+                    self.assertEqual(
+                        {it.id for it in w.library.items if 'published-x' in it.tags},
+                        marks,
+                    )
+                    self.refresh(reset_selection=True)
+                    self.assertTrue(w._marked.isdisjoint(marks))
 
     def test_one_star_edit_selects_next_at_same_position(self):
         w = self.win
