@@ -7,6 +7,12 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.20] — 2026-10-03
+
+### Fixed
+
+- Keep Intake assets selected after assigning a category removes them from the view, allowing follow-up metadata edits on the same assets. This includes single selections, multiple selections, collapsed groups, and an empty Intake view.
+
 ## [0.1.19] — 2026-10-02
 
 ### Fixed

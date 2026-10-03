@@ -1,6 +1,6 @@
 # Maintainer: Isaac Priestley <progressions@gmail.com>
 pkgname=eagle-browse
-pkgver=0.1.19
+pkgver=0.1.20
 pkgrel=1
 pkgdesc="Keyboard-first GTK browser and tools for an Eagle.cool library"
 arch=('any')
