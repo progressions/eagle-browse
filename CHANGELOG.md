@@ -7,6 +7,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+
+- Shift+E opens selected images in local PhotoSuite while retaining the Clip Editor handoff for video/audio.
+
 ## [0.1.20] — 2026-10-03
 
 ### Fixed

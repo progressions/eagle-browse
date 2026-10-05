@@ -185,7 +185,7 @@ Do not add phone-browse tests — that stack was removed (#519).
 | `n` | Open **Notes** for the focused or selected asset(s) |
 | `F2` / `Shift+N` | **Rename** focused file (media + matching thumbnail; Eagle id unchanged) |
 | `e` | Open the focused file in Files |
-| `Shift+E` | Add the focused video/audio to the current clip-editor project |
+| `Shift+E` | Open selected images in PhotoSuite; add selected video/audio to the current clip-editor project |
 | `Ctrl+Shift+E` | New clip-editor project with the focused video/audio |
 | `Ctrl+G` | **Open the set** containing the focused grouped asset |
 | `gs` | **Group** selected items into a set |
@@ -542,3 +542,11 @@ thumbnails: selecting two groups combines all their members, and selecting a
 group plus an ungrouped asset adds that asset. With Collapse groups off, Group
 continues to operate on individual selected assets.
 Other actions still target the representative assets.
+
+### PhotoSuite handoff
+
+Select one or more images and press **Shift+E** to open them in the local
+PhotoSuite app. Eagle Browse looks for `photosuite` on PATH, then
+`~/bin/photosuite`. Mixed selections send images to PhotoSuite and video/audio
+to Clip Editor. Missing files are skipped with a notice. The handoff opens the
+original library files; it does not create copies or import new assets.
