@@ -916,7 +916,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints = Gtk.Label(
             label=(
                 "Enter open (image inline · video/audio mpv) · Esc close viewer · "
-                "i/o video marks · x cut · p save frame · Shift+E add selected to editor · Ctrl+Shift+E new editor project · "
+                "i/o video marks · x cut · p save frame · Shift+E PhotoSuite / clip editor · Ctrl+Shift+E new editor project · "
                 "t tags · f folders · u integrations · gg / Shift+G jump · gs / gr set · Ctrl+A all · Del · Ctrl+Z · Super+W · ?"
             ),
             xalign=0,
@@ -2612,7 +2612,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             )),
             ("Use assets", (
                 ("e", "Reveal in Files"),
-                ("Shift+E", "Add selected video/audio to the current clip-editor project"),
+                ("Shift+E", "Open images in PhotoSuite; add video/audio to clip-editor"),
                 ("Ctrl+Shift+E", "New clip-editor project from the selected video/audio"),
                 ("y", "Copy Eagle ID"),
                 ("Shift+Y  or  c", "Copy file path"),
@@ -4525,12 +4525,48 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         self._toast(f"Copied Eagle id · {iid}")
 
-    def open_selected_in_clip_editor(self, *, new_project: bool = False) -> None:
+    def open_selected_in_editor(self) -> None:
+        """Shift+E routes selected images and clips to their local editors."""
+        items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        images = [it for it in items if it.is_image]
+        clips = [it for it in items if it.is_video or it.is_audio]
+        if images:
+            self.open_images_in_photosuite(images)
+        if clips:
+            self.open_selected_in_clip_editor(items=clips)
+        if not images and not clips:
+            self._toast("Select an image, video, or audio file")
+
+    def open_images_in_photosuite(self, items: list[Item]) -> None:
+        paths = [str(it.path.resolve()) for it in items if it.path.is_file()]
+        if not paths:
+            self._toast("File missing")
+            return
+        exe = shutil.which("photosuite")
+        if not exe:
+            local = Path.home() / "bin/photosuite"
+            if local.is_file() and os.access(local, os.X_OK):
+                exe = str(local)
+        if not exe:
+            self._toast("PhotoSuite not found (install photosuite or ~/bin/photosuite)")
+            return
+        if not _spawn_detached([exe, *paths]):
+            self._toast("Could not open PhotoSuite")
+            return
+        missing = len(items) - len(paths)
+        suffix = f" ({missing} missing)" if missing else ""
+        self._toast(f"PhotoSuite · {len(paths)} image{'s' if len(paths) != 1 else ''}{suffix}")
+
+    def open_selected_in_clip_editor(self, *, new_project: bool = False, items: list[Item] | None = None) -> None:
         """Shift+E adds all selected video/audio to the current clip-editor project.
 
         Ctrl+Shift+E starts a new project, then adds every selected video/audio.
         """
-        items = self._effective_hand_off_items()
+        if items is None:
+            items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing selected")
             return
@@ -10029,7 +10065,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_s, Gdk.KEY_S) and not ctrl and not alt and not super_mod:
             self.stage_marked()
             return True
-        # e = Files; Shift+E = add to clip editor; Ctrl+Shift+E = new project.
+        # e = Files; Shift+E = media editor; Ctrl+Shift+E = new clip project.
         # Match g/G: use keyval, not SHIFT_MASK — GTK often reports KEY_E with
         # shift already applied and the modifier bit cleared.
         if (
@@ -10043,7 +10079,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.open_selected_in_clip_editor(new_project=True)
                 return True
             if shift and not ctrl:
-                self.open_selected_in_clip_editor(new_project=False)
+                self.open_selected_in_editor()
                 return True
             if not shift and not ctrl:
                 self.reveal_selected_in_files()
