@@ -612,6 +612,26 @@ def save_library_metadata(library_root: Path, meta: dict[str, Any]) -> None:
     atomic_write_json(meta_path, meta)
 
 
+def create_folder_node(library_root: Path, *, name: str) -> dict[str, Any]:
+    """Create a root category. Caller must hold write_session."""
+    name = name.strip()
+    if not name:
+        raise WriteError("Folder name is required")
+    meta = load_library_metadata(library_root)
+    roots = meta.setdefault("folders", [])
+    if not isinstance(roots, list):
+        raise WriteError("folders must be a list")
+    if any(isinstance(node, dict) and
+           str(node.get("name", "")).strip().casefold() == name.casefold()
+           for node in roots):
+        raise WriteError(f"A folder named ‘{name}’ already exists")
+    node = {"id": new_library_id(), "name": name, "children": [], "tags": [],
+            "modificationTime": _now_ms()}
+    roots.append(node)
+    save_library_metadata(library_root, meta)
+    return node
+
+
 def create_smart_folder_node(
     library_root: Path,
     *,

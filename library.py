@@ -1216,6 +1216,15 @@ class EagleLibrary:
                         out.append(t)
         return out
 
+    def create_folder(self, name: str) -> Folder:
+        """Persist a category and refresh paths used by navigation and filing."""
+        from write import create_folder_node, write_session
+
+        with write_session(self.root):
+            node = create_folder_node(self.root, name=name)
+            self.reload_metadata_trees()
+        return self.folders_by_id[node["id"]]
+
     def set_folder_auto_tags(self, folder_id: str, tags: list[str]) -> Folder:
         """Persist Eagle folder auto-tags into library metadata.json."""
         from write import WriteError, set_folder_auto_tags, write_session

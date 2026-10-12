@@ -2175,7 +2175,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             add_btn.add_css_class("flat")
             add_btn.add_css_class("circular")
             add_btn.set_icon_name("list-add-symbolic")
-            add_btn.set_tooltip_text("New smart folder")
+            add_btn.set_tooltip_text("New folder" if section_id == "folders" else "New smart folder")
             add_btn.set_valign(Gtk.Align.CENTER)
             add_btn.set_focus_on_click(False)
             add_btn.connect("clicked", lambda *_: on_add())
@@ -2835,25 +2835,25 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if self.library.smart_folders:
             self._append_smart_tree(self.library.smart_folders, 0)
 
-        if self.library.folders:
-            self.folder_list.append(
-                self._make_header_row(
-                    "Folders",
-                    collapsible=True,
-                    section_id="folders",
-                    expanded=self._folders_section_expanded,
-                )
+        self.folder_list.append(
+            self._make_header_row(
+                "Folders",
+                collapsible=True,
+                section_id="folders",
+                expanded=self._folders_section_expanded,
+                on_add=self.create_folder_dialog,
             )
-            if self._folders_section_expanded:
-                for folder, depth in self.library.flatten_folders():
-                    self.folder_list.append(
-                        self._make_nav_row(
-                            label=folder.name,
-                            depth=depth,
-                            kind="folder",
-                            folder_id=folder.id,
-                        )
+        )
+        if self._folders_section_expanded:
+            for folder, depth in self.library.flatten_folders():
+                self.folder_list.append(
+                    self._make_nav_row(
+                        label=folder.name,
+                        depth=depth,
+                        kind="folder",
+                        folder_id=folder.id,
                     )
+                )
 
         if select_current:
             self._restore_sidebar_selection()
@@ -5816,6 +5816,58 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         picker_ref["p"] = picker
         picker.present()
+
+    def create_folder_dialog(self) -> None:
+        """Create a category without changing the assets selected for filing."""
+        win = Gtk.Window(title="New folder", transient_for=self, modal=True,
+                         default_width=380, resizable=False)
+        self._remember_dialog(win)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for edge in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{edge}")(16)
+        win.set_child(box)
+        box.append(Gtk.Label(label="Create a folder (category) in this library.", xalign=0))
+        entry = Gtk.Entry(placeholder_text="Folder name", activates_default=True)
+        box.append(entry)
+        error = Gtk.Label(xalign=0, wrap=True)
+        error.add_css_class("error")
+        box.append(error)
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                          halign=Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        create = Gtk.Button(label="Create")
+        create.add_css_class("suggested-action")
+        create.set_sensitive(False)
+        entry.connect("changed", lambda *_: create.set_sensitive(bool(entry.get_text().strip())))
+        buttons.append(cancel)
+        buttons.append(create)
+        box.append(buttons)
+        cancel.connect("clicked", lambda *_: win.close())
+
+        def save(*_args) -> None:
+            from write import WriteError
+            try:
+                folder = self.library.create_folder(entry.get_text())
+            except (WriteError, OSError, RuntimeError) as exc:
+                error.set_text(str(exc))
+                return
+            self._folders_section_expanded = True
+            self._repopulate_sidebar_keep_selection()
+            self._toast(f"Created folder · {folder.name}")
+            win.close()
+
+        create.connect("clicked", save)
+        win.set_default_widget(create)
+        keys = Gtk.EventControllerKey()
+        def on_key(_controller, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                win.close()
+                return True
+            return False
+        keys.connect("key-pressed", on_key)
+        win.add_controller(keys)
+        win.present()
+        entry.grab_focus()
 
     def edit_folder_auto_tags(self, folder_id: str | None = None) -> None:
         """

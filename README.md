@@ -4,6 +4,8 @@ Keyboard-first browser for an [Eagle.cool](https://eagle.cool) library on Omarch
 
 Browse **smart folders** and regular folders, search tags/names, and **copy the absolute path** of an image so you can paste it into upload dialogs or other tools.
 
+Create regular folders (categories) with the **+** beside **Folders** in the sidebar, even in an empty library. Enter a name and choose **Create**; the new category is immediately available in the **F** filing picker. Names must be nonempty and unique among top-level folders (ignoring case). **Cancel** or **Esc** leaves the library unchanged.
+
 Smart folders are evaluated from Eagle’s `metadata.json` rules (nested filters inherit parents — e.g. `Eunbi` → `images`). Create and edit them in the sidebar.
 
 ## Install

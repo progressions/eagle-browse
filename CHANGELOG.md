@@ -7,6 +7,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+
+- Create folders (categories) from the sidebar, with name validation and immediate availability in filing controls (Fizzy #583).
+
 ## [0.1.21] — 2026-10-05
 
 ### Added
