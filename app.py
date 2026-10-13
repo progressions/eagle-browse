@@ -41,6 +41,7 @@ from config import DEFAULT_LIBRARY, inbox_path  # noqa: E402
 from pixbuf_io import pixbuf_from_path as _pixbuf_from_path  # noqa: E402
 from library import (  # noqa: E402
     EagleLibrary,
+    ExternalChanges,
     Item,
     QueryCancelled,
     SmartFolder,
@@ -49,6 +50,7 @@ from library import (  # noqa: E402
 from latest_job import LatestJobWorker  # noqa: E402
 from sets import (  # noqa: E402
     SET_PREFIX,
+    collapse_sets,
     is_set_tag,
     mint_set_tag,
     set_tag_of,
@@ -61,6 +63,7 @@ from integrations_queue import (  # noqa: E402
     DEFAULT_WARDROBE_ENGINE,
     IntegrationResult,
     NO_PROMPT_LINKED_TOAST,
+    extra_still_ref_ids,
     flat_lay_prompt_for,
     post_bust_enhance,
     post_edit,
@@ -75,6 +78,7 @@ from upscale_queue import (  # noqa: E402
     already_reason,
     post_upscale,
 )
+from clip_editor_hand import clip_editor_argv, media_flag  # noqa: E402
 from shutdown_gate import wrap_idle_callback  # noqa: E402
 from thumb_cache import (  # noqa: E402
     DEFAULT_BYTE_BUDGET,
@@ -98,6 +102,11 @@ BULK_EDIT_CONFIRM = 100  # confirm tag/folder writes above this many items
 SEARCH_DEBOUNCE_MS = 150
 THUMB_ZOOM_RECLAIM_MS = 400
 G_PREFIX_TIMEOUT_MS = 800
+# External metadata edits (eagle-api, Dropbox sync, other tools): re-stat
+# images/*.info/metadata.json and re-read only what changed.
+EXTERNAL_REFRESH_DEBOUNCE_MS = 400  # coalesce bursts of mtime.json writes
+EXTERNAL_REFRESH_FOCUS_DELAY_MS = 100  # window regained focus
+EXTERNAL_REFRESH_INTERVAL_S = 30.0  # safety net for writers that skip mtime.json
 # Staging handoff (copy out of library — never writes into .library)
 DEFAULT_STAGE_DIR = Path.home() / "Dropbox/ISAAC/GENNIE/Eunbi/outbox"
 # Sidebar expand/selection — survives close / crash
@@ -311,6 +320,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         # Virtual views: None | "untagged" | "uncategorized" | "set"
         self._special_view: str | None = None
         self._set_view_tag: str | None = None
+        self._set_parent_view: _ViewLoc | None = None
         self._set_counts: dict[str, int] = {}
         self._set_counts_ready = False
         self._nav_back: list[_ViewLoc] = []
@@ -357,6 +367,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._query_worker = LatestJobWorker(name="eagle-query")
         # Window-owned shutdown: workers check this and skip UI idle (#525)
         self._shutdown = threading.Event()
+        self._metadata_batch_busy = False
         self._search_timeout_id = 0
         self._cols_sync_timeout_id = 0
         self._inbox_importing = False
@@ -369,6 +380,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._insp_preview_inflight = False
         # Sort key id from SORT_OPTIONS (default: newest added first)
         self._sort_key = "added_desc"
+        self._collapse_groups = False
         # Smart-folder id → last known item count for sidebar "(N)" labels
         self._smart_counts: dict[str, int] = {}
         # "untagged" / "uncategorized" → last known item count for sidebar
@@ -405,12 +417,22 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._inbox_images_mtime = 0.0
         self._images_scan_running = False
         self._images_scan_again = False
+        # External metadata changes (see _start_external_refresh)
+        self._ext_refresh_source = 0
+        self._ext_refresh_running = False
+        self._ext_refresh_again = False
+        self._ext_refresh_last = 0.0  # monotonic start of the last pass
+        self._ext_pending_ids: set[str] = set()
+        self._ext_pending_trees = False
+        self._mtime_index_monitor: Gio.FileMonitor | None = None
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
         self._library_ready = False
         # Super+W (killactive) / window close must quit the process, not leave
         # a headless instance with a ThreadPoolExecutor alive.
         self.connect("close-request", self._on_window_close_request)
+        # Coming back from a terminal (eagle-api) or another app: re-check disk
+        self.connect("notify::is-active", self._on_window_active_changed)
 
         self._build_ui()
         self._install_keybinds()
@@ -545,6 +567,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.sort_dropdown.set_tooltip_text("Sort items in the current view")
         self.sort_dropdown.connect("notify::selected", self._on_sort_changed)
         filter_btns.append(self.sort_dropdown)
+        self.collapse_groups_btn = Gtk.ToggleButton(label="Collapse groups")
+        self.collapse_groups_btn.set_tooltip_text(
+            "Show one thumbnail per set; open it to see all members"
+        )
+        self.collapse_groups_btn.connect("toggled", self._on_collapse_groups_toggled)
+        filter_btns.append(self.collapse_groups_btn)
         filter_bar.append(filter_btns)
 
         self.filter_chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -888,7 +916,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         hints = Gtk.Label(
             label=(
                 "Enter open (image inline · video/audio mpv) · Esc close viewer · "
-                "i/o video marks · x cut · p save frame · Shift+E add to editor · Ctrl+Shift+E new editor project · "
+                "i/o video marks · x cut · p save frame · Shift+E PhotoSuite / clip editor · Ctrl+Shift+E new editor project · "
                 "t tags · f folders · u integrations · gg / Shift+G jump · gs / gr set · Ctrl+A all · Del · Ctrl+Z · Super+W · ?"
             ),
             xalign=0,
@@ -929,6 +957,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._populate_sidebar(select_current=True)
                 self.refresh_items()
                 self._start_inbox_watch()
+                self._start_external_change_watch()
                 self._start_duration_backfill()
                 return False
 
@@ -1805,7 +1834,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._paint_insp_stars(0)
 
         # Tags: intersection (common) and partial — pill chips
-        tag_sets = [{t for t in it.tags if not is_set_tag(t)} for it in items]
+        metadata_items = self._metadata_edit_items()
+        tag_sets = [{t for t in it.tags if not is_set_tag(t)} for it in metadata_items]
         common_tags = set.intersection(*tag_sets) if tag_sets else set()
         union_tags = set.union(*tag_sets) if tag_sets else set()
         partial_tags = union_tags - common_tags
@@ -1813,14 +1843,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if common_tags:
             for t in sorted(common_tags, key=str.lower):
                 self._add_chip_label(self.insp_tags, t)
-        if partial_tags and n > 1:
+        if partial_tags and len(metadata_items) > 1:
             for t in sorted(partial_tags, key=str.lower):
                 self._add_chip_label(self.insp_tags, f"± {t}", dim=True)
         if not common_tags and not partial_tags:
             self._add_chip_label(self.insp_tags, "None — click to add", empty=True)
 
         # Folders commonality
-        folder_sets = [set(it.folders) for it in items]
+        folder_sets = [set(it.folders) for it in metadata_items]
         common_f = set.intersection(*folder_sets) if folder_sets else set()
         union_f = set.union(*folder_sets) if folder_sets else set()
         partial_f = union_f - common_f
@@ -1835,7 +1865,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     leaf,
                     tooltip=name if name != leaf else None,
                 )
-        if partial_f and n > 1:
+        if partial_f and len(metadata_items) > 1:
             for fid in sorted(partial_f):
                 name = self.library.folder_paths.get(fid, fid)
                 leaf = name.rsplit("/", 1)[-1] if name else fid
@@ -1989,6 +2019,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             except Exception:  # noqa: BLE001
                 pass
             self._inbox_monitor = None
+        if getattr(self, "_ext_refresh_source", 0):
+            try:
+                GLib.source_remove(self._ext_refresh_source)
+            except Exception:  # noqa: BLE001
+                pass
+            self._ext_refresh_source = 0
+        if getattr(self, "_mtime_index_monitor", None) is not None:
+            try:
+                self._mtime_index_monitor.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+            self._mtime_index_monitor = None
         if self._scroll_restore_source:
             try:
                 GLib.source_remove(self._scroll_restore_source)
@@ -2027,6 +2069,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             "current_smart_folder_id": self.current_smart_folder_id,
             "current_folder_id": self.current_folder_id,
             "special_view": self._special_view,
+            "collapse_groups": self._collapse_groups,
         }
         try:
             _UI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2044,6 +2087,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         if not isinstance(data, dict):
             return
+        self._collapse_groups = data.get("collapse_groups") is True
+        # Set the model first: the toggle callback must not save or query midway
+        # through restoring the rest of the view.
+        self.collapse_groups_btn.set_active(self._collapse_groups)
         valid_smart = set(self.library.smart_folders_by_id)
         valid_folder = set(self.library.folders_by_id)
         raw_exp = data.get("smart_expanded") or []
@@ -2128,7 +2175,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             add_btn.add_css_class("flat")
             add_btn.add_css_class("circular")
             add_btn.set_icon_name("list-add-symbolic")
-            add_btn.set_tooltip_text("New smart folder")
+            add_btn.set_tooltip_text("New folder" if section_id == "folders" else "New smart folder")
             add_btn.set_valign(Gtk.Align.CENTER)
             add_btn.set_focus_on_click(False)
             add_btn.connect("clicked", lambda *_: on_add())
@@ -2565,8 +2612,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             )),
             ("Use assets", (
                 ("e", "Reveal in Files"),
-                ("Shift+E", "Add to the current clip-editor project"),
-                ("Ctrl+Shift+E", "Create a clip-editor project"),
+                ("Shift+E", "Open images in PhotoSuite; add video/audio to clip-editor"),
+                ("Ctrl+Shift+E", "New clip-editor project from the selected video/audio"),
                 ("y", "Copy Eagle ID"),
                 ("Shift+Y  or  c", "Copy file path"),
                 ("s", "Stage marked assets"),
@@ -2788,25 +2835,25 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if self.library.smart_folders:
             self._append_smart_tree(self.library.smart_folders, 0)
 
-        if self.library.folders:
-            self.folder_list.append(
-                self._make_header_row(
-                    "Folders",
-                    collapsible=True,
-                    section_id="folders",
-                    expanded=self._folders_section_expanded,
-                )
+        self.folder_list.append(
+            self._make_header_row(
+                "Folders",
+                collapsible=True,
+                section_id="folders",
+                expanded=self._folders_section_expanded,
+                on_add=self.create_folder_dialog,
             )
-            if self._folders_section_expanded:
-                for folder, depth in self.library.flatten_folders():
-                    self.folder_list.append(
-                        self._make_nav_row(
-                            label=folder.name,
-                            depth=depth,
-                            kind="folder",
-                            folder_id=folder.id,
-                        )
+        )
+        if self._folders_section_expanded:
+            for folder, depth in self.library.flatten_folders():
+                self.folder_list.append(
+                    self._make_nav_row(
+                        label=folder.name,
+                        depth=depth,
+                        kind="folder",
+                        folder_id=folder.id,
                     )
+                )
 
         if select_current:
             self._restore_sidebar_selection()
@@ -2951,6 +2998,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self.refresh_items(
             reset_selection=not same_place or was_viewing,
             scroll_to_top=True,
+            revalidate=True,
         )
         self._save_sidebar_state()
         self._record_view_change(before)
@@ -3288,7 +3336,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         page_ids = {it.id for it in self._items}
         in_view = len(self._marked & page_ids) if self._marked else 0
         out_view = (len(self._marked) - in_view) if self._marked else 0
-        self._scope_text = f"{total} items · {scope}{note}"
+        unit = "thumbnails" if self._collapse_groups and self._special_view != "set" else "items"
+        self._scope_text = f"{total} {unit} · {scope}{note}"
         if out_view > 0:
             self._scope_text += (
                 f" · ✓ {len(self._marked)} selected ({out_view} off-view)"
@@ -3329,10 +3378,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._set_grid_focus(self.grid.has_focus())
 
     def refresh_items(
-        self, *, reset_selection: bool = False, scroll_to_top: bool | None = None
+        self,
+        *,
+        reset_selection: bool = False,
+        scroll_to_top: bool | None = None,
+        revalidate: bool | None = None,
     ) -> None:
         """
         Kick off a background query so the UI never freezes on smart folders.
+
+        ``revalidate`` (default: same as reset_selection; sidebar navigation
+        always passes True) first re-reads items whose metadata.json changed
+        on disk outside this window, so the folder shows current contents.
 
         By default, multi-selection (_marked) is preserved across refresh so
         tagging/categorizing on Untagged/Uncategorized can remove items from
@@ -3348,23 +3405,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         smart_id = self.current_smart_folder_id
         special = self._special_view
         set_tag = self._set_view_tag if special == "set" else None
+        collapse_groups = self._collapse_groups and special != "set"
         descendants = self.include_descendants
         search = self._filter_text
         # Snapshot filters for the worker thread
         vf = self._view_filters
         scope = self._scope_label()
         self.status_left.set_text(f"Loading… · {scope}")
-        # Capture selection for restore after re-query
-        keep_marks = set(self._marked) if not reset_selection else set()
-        keep_focus_id = (
-            self.selected_item.id
-            if (not reset_selection and self.selected_item is not None)
-            else None
-        )
         if scroll_to_top is None:
             scroll_to_top = reset_selection
-        keep_scroll = 0.0 if scroll_to_top else self._grid_scroll_value()
-        keep_loaded = 0 if reset_selection else len(self._items)
+        if revalidate is None:
+            revalidate = reset_selection
         if scroll_to_top:
             self._cancel_scroll_restore()
 
@@ -3378,15 +3429,29 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                         kept.append(candidate)
                 return kept
 
-            # Always drop query cache so tag/star/folder edits re-evaluate
-            # smart folders. Scan disk only when changing sidebar scope.
+            # Scan disk only when changing sidebar scope. Library mutation
+            # methods invalidate derived caches at the point of change.
             if reset_selection:
                 try:
                     self.library.scan_new_items()
                 except Exception:  # noqa: BLE001
                     pass
+            # Pick up external metadata edits (eagle-api, Dropbox) before the
+            # query so a smart folder is current the moment it is opened.
+            changes: ExternalChanges | None = None
+            if revalidate:
+                try:
+                    changes = self.library.refresh_changed_items(
+                        cancelled=cancel.is_set
+                    )
+                except Exception:  # noqa: BLE001
+                    changes = None
+                if changes is not None:
+                    # Model updates survive query cancellation. Deliver their
+                    # notifications separately; the poll applies them even if
+                    # this query is superseded before its UI callback runs.
+                    self._ui_idle(lambda: self._queue_external_changes(changes))
             try:
-                self.library._invalidate_caches()  # noqa: SLF001
                 if special == "set":
                     items = self.library.query(
                         search=search,
@@ -3440,14 +3505,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 and not vf.active()
             ):
                 self._special_counts[special] = total
-            load_n = PAGE_CHUNK if reset_selection else max(PAGE_CHUNK, keep_loaded)
-            if keep_focus_id:
-                for i, it in enumerate(items):
-                    if it.id == keep_focus_id:
-                        load_n = max(load_n, i + 1)
-                        break
-            load_n = min(load_n, total)
-            page = items[:load_n]
+            if collapse_groups:
+                items = collapse_sets(items)
+            if cancel.is_set():
+                return
+            query_items = items
 
             def apply() -> bool:
                 if (
@@ -3456,6 +3518,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     or self._shutdown.is_set()
                 ):
                     return False  # stale or shutting down
+                # Use the current cursor, not the cursor from before the query:
+                # keyboard navigation can continue while the worker is running.
+                keep_marks = set(self._marked) if not reset_selection else set()
+                focused = self.selected_item if not reset_selection else None
+                keep_focus_id = focused.id if focused is not None else None
+                keep_scroll = 0.0 if scroll_to_top else self._grid_scroll_value()
+                items = list(query_items)
+                keep_focus_idx = next(
+                    (i for i, it in enumerate(self._items) if it.id == keep_focus_id),
+                    self._last_focus_idx,
+                )
+                load_n = PAGE_CHUNK if reset_selection else max(PAGE_CHUNK, len(self._items))
+                if keep_focus_id:
+                    for i, it in enumerate(items):
+                        if it.id == keep_focus_id:
+                            load_n = max(load_n, i + 1)
+                            break
+                page = items[:load_n]
                 self._rebuild_set_counts()
                 if smart_id and not search and not vf.active() and special is None:
                     self._update_smart_count_label(smart_id, total)
@@ -3485,7 +3565,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                         self.selection.set_selected(Gtk.INVALID_LIST_POSITION)
                     except Exception:  # noqa: BLE001
                         pass
-                elif reset_selection or not keep_marks:
+                elif reset_selection or (not keep_marks and not keep_focus_id):
                     if page:
                         self._sel_anchor = 0
                         self._last_focus_idx = 0
@@ -3514,8 +3594,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     # Keep marks even for items that left this view (e.g. just
                     # tagged while on Untagged). Inspector / stage / delete
                     # still see them via _marked_items().
-                    self._marked = set(keep_marks)
-                    focus_idx = 0
+                    # Intake is a staged workflow: category assignment removes
+                    # assets from the grid, but follow-up tagging must still
+                    # operate on those assets, including collapsed groups.
+                    retain_intake_marks = special == "uncategorized"
+                    self._marked = (
+                        keep_marks & {it.id for it in items}
+                        if collapse_groups and not retain_intake_marks
+                        else set(keep_marks)
+                    )
+                    # If an edit removes the focused item from a smart folder,
+                    # stay at its former position (or the final remaining row).
+                    focus_idx = min(max(0, keep_focus_idx), max(0, len(page) - 1))
                     if page:
                         if keep_focus_id and keep_focus_id in id_to_idx:
                             focus_idx = id_to_idx[keep_focus_id]
@@ -3526,6 +3616,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                                     focus_idx = id_to_idx[mid]
                                     break
                         self.selected_item = page[focus_idx]
+                        if len(keep_marks) <= 1 and not retain_intake_marks:
+                            # Subsequent ratings/tags must target the successor,
+                            # not the single item that just left this view.
+                            self._marked = {self.selected_item.id}
                         self._last_focus_idx = focus_idx
                         self._sel_anchor = focus_idx
                         if self._grid_has_focus:
@@ -3550,12 +3644,23 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                             )
                         except Exception:
                             pass
-                        # keep_marks retained so handoff/delete still works
+                        # Retain an explicit multi-selection for batch actions,
+                        # or any Intake selection for follow-up metadata edits.
+                        if len(keep_marks) <= 1 and not retain_intake_marks:
+                            self._marked.clear()
 
                 self._rebuild_scope_text()
                 self._refresh_status()
                 self._update_path_label()
+                self.update_inspector()
                 self._rebuild_filter_chips()
+                # SingleSelection does not restore GridView's keyboard focus.
+                # The old focused tile was destroyed by the rebuild; without
+                # this GTK later focuses row zero and scrolls back to the top.
+                if self._grid_has_focus and self.selected_item is not None:
+                    idx = id_to_idx.get(self.selected_item.id)
+                    if idx is not None:
+                        self.grid.scroll_to(idx, Gtk.ListScrollFlags.FOCUS, None)
                 if scroll_to_top:
                     self._scroll_grid_to_top()
                 elif not reset_selection:
@@ -3567,6 +3672,17 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._ui_idle(apply)
 
         self._query_worker.submit(work)
+
+    def _on_collapse_groups_toggled(self, button: Gtk.ToggleButton) -> None:
+        active = button.get_active()
+        if active == self._collapse_groups:
+            return
+        self._collapse_groups = active
+        self._save_sidebar_state()
+        if self.is_viewer_open():
+            self.close_inline_viewer(restore_scroll=False)
+        # Clear marks so hidden members cannot remain selected for bulk edits.
+        self.refresh_items(reset_selection=True)
 
     def _on_sort_changed(self, dropdown: Gtk.DropDown, *_args: object) -> None:
         idx = int(dropdown.get_selected())
@@ -3870,7 +3986,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if stag and scount:
             set_badge.set_text(str(scount))
             set_badge.set_visible(True)
-            set_badge.set_tooltip_text(f"{stag} · {scount}")
+            set_badge.set_tooltip_text(f"{scount} set members · Click to open set")
         else:
             set_badge.set_text("")
             set_badge.set_visible(False)
@@ -3962,7 +4078,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _on_grid_selection(self, selection: Gtk.SingleSelection, _pspec) -> None:
         obj = selection.get_selected_item()
-        self.selected_item = obj.item if obj else None
+        # Hiding the GTK highlight on focus loss (or replacing store rows)
+        # is not an instruction to abandon the logical edit target.
+        if obj is not None:
+            self.selected_item = obj.item
+        elif self._keep_grid_unselected:
+            self.selected_item = None
         self._update_path_label()
         self.update_inspector()
 
@@ -4075,6 +4196,24 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if self.selected_item is not None:
             return [self.selected_item]
         return []
+
+    def _metadata_edit_items(self) -> list[Item]:
+        """Tag/folder targets: collapsed representatives stand for their whole set."""
+        selected = self._effective_hand_off_items()
+        if not self._collapse_groups or self._special_view == "set" or self.is_viewer_open():
+            return selected
+        targets: dict[str, Item] = {}
+        expanded: set[str] = set()
+        for item in selected:
+            if item.is_deleted:
+                continue
+            targets.setdefault(item.id, item)
+            tag = set_tag_of(item)
+            if tag and tag not in expanded:
+                expanded.add(tag)
+                for member in self.library.items_in_set(tag):
+                    targets.setdefault(member.id, member)
+        return list(targets.values())
 
     def _id_at_index(self, idx: int) -> str | None:
         if idx < 0 or idx >= len(self._items):
@@ -4386,28 +4525,68 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         self._toast(f"Copied Eagle id · {iid}")
 
-    def open_selected_in_clip_editor(self, *, new_project: bool = False) -> None:
-        """Shift+E adds to the current clip-editor project. Ctrl+Shift+E starts a new one."""
+    def open_selected_in_editor(self) -> None:
+        """Shift+E routes selected images and clips to their local editors."""
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing selected")
             return
-        item = items[0]
-        sid = self.selected_item.id if self.selected_item is not None else None
-        if sid:
-            for it in items:
-                if it.id == sid:
-                    item = it
-                    break
-        if not item.path.is_file():
+        images = [it for it in items if it.is_image]
+        clips = [it for it in items if it.is_video or it.is_audio]
+        if images:
+            self.open_images_in_photosuite(images)
+        if clips:
+            self.open_selected_in_clip_editor(items=clips)
+        if not images and not clips:
+            self._toast("Select an image, video, or audio file")
+
+    def open_images_in_photosuite(self, items: list[Item]) -> None:
+        paths = [str(it.path.resolve()) for it in items if it.path.is_file()]
+        if not paths:
             self._toast("File missing")
             return
-        if item.is_video:
-            flag = "--video"
-        elif item.is_audio:
-            flag = "--audio"
-        else:
-            self._toast("Clip editor is for video or audio")
+        exe = shutil.which("photosuite")
+        if not exe:
+            local = Path.home() / "bin/photosuite"
+            if local.is_file() and os.access(local, os.X_OK):
+                exe = str(local)
+        if not exe:
+            self._toast("PhotoSuite not found (install photosuite or ~/bin/photosuite)")
+            return
+        if not _spawn_detached([exe, *paths]):
+            self._toast("Could not open PhotoSuite")
+            return
+        missing = len(items) - len(paths)
+        suffix = f" ({missing} missing)" if missing else ""
+        self._toast(f"PhotoSuite · {len(paths)} image{'s' if len(paths) != 1 else ''}{suffix}")
+
+    def open_selected_in_clip_editor(self, *, new_project: bool = False, items: list[Item] | None = None) -> None:
+        """Shift+E adds all selected video/audio to the current clip-editor project.
+
+        Ctrl+Shift+E starts a new project, then adds every selected video/audio.
+        """
+        if items is None:
+            items = self._effective_hand_off_items()
+        if not items:
+            self._toast("Nothing selected")
+            return
+        pairs: list[tuple[str, str]] = []
+        skipped_stills = 0
+        missing = 0
+        for it in items:
+            flag = media_flag(is_video=it.is_video, is_audio=it.is_audio)
+            if flag is None:
+                skipped_stills += 1
+                continue
+            if not it.path.is_file():
+                missing += 1
+                continue
+            pairs.append((flag, str(it.path.resolve())))
+        if not pairs:
+            if missing and not skipped_stills:
+                self._toast("File missing")
+            else:
+                self._toast("Clip editor is for video or audio")
             return
         exe = shutil.which("clip-editor")
         if not exe:
@@ -4416,20 +4595,21 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if not exe:
             self._toast("clip-editor not found")
             return
-        path = str(item.path.resolve())
-        cmd = [exe, "gui"]
-        if new_project:
-            cmd.append("--new")
-        cmd.extend([flag, path])
+        cmd = clip_editor_argv(exe, pairs, new_project=new_project)
         if not _spawn_detached(cmd):
             self._toast("Could not open clip editor")
             return
+        n = len(pairs)
+        extra = []
+        if skipped_stills:
+            extra.append(f"{skipped_stills} stills skipped")
+        if missing:
+            extra.append(f"{missing} missing")
+        suffix = f" ({', '.join(extra)})" if extra else ""
         if new_project:
-            self._toast(f"Editor new · {item.display_name}")
-        elif item.is_audio:
-            self._toast(f"Editor audio · {item.display_name}")
+            self._toast(f"Editor new · {n} clip{'s' if n != 1 else ''}{suffix}")
         else:
-            self._toast(f"Editor add · {item.display_name}")
+            self._toast(f"Editor add · {n} clip{'s' if n != 1 else ''}{suffix}")
 
     def reveal_selected_in_files(self) -> None:
         """Open Nautilus with the focused (or first marked) file selected."""
@@ -4474,35 +4654,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def set_rating(self, star: int) -> None:
         """star 1–5, or 0 to clear. Applies to marked items, else focused."""
-        from write import WriteError
-
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing selected")
             return
-        ids = [it.id for it in items]
-        try:
-            if len(ids) == 1:
-                self.library.update_item(ids[0], star=star if star else None)
-                ok, errors = 1, []
-            else:
-                ok, errors = self.library.update_items_batch(
-                    ids, star=star if star else None
-                )
-        except WriteError as exc:
-            self._toast(str(exc))
-            return
-        self._sync_star_overlays()
-        self.refresh_items(reset_selection=False, scroll_to_top=False)
-        self._update_path_label()
-        self.update_inspector()
-        if star:
-            msg = f"Rated {'★' * star} · {ok} item(s)"
-        else:
-            msg = f"Cleared rating · {ok} item(s)"
-        if errors:
-            msg += f" · {len(errors)} failed"
-        self._toast(msg)
+        self._run_metadata_batch(
+            [it.id for it in items], star=star if star else None,
+            description=f"Rated {'★' * star}" if star else "Cleared rating",
+        )
 
     def open_rename_dialog(self) -> None:
         """Rename the focused item's file stem. Thumbnail is renamed with it."""
@@ -4587,8 +4746,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         """View or edit Eagle annotation (notes) for the selection."""
         if self._picker_blocking:
             return
-        from write import WriteError
-
         items = self._effective_hand_off_items()
         if not items:
             self._toast("Nothing selected")
@@ -4679,26 +4836,11 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             ids = [it.id for it in items]
 
             def apply() -> None:
-                try:
-                    if len(ids) == 1:
-                        self.library.update_item(ids[0], annotation=value)
-                        ok, errors = 1, []
-                    else:
-                        ok, errors = self.library.update_items_batch(
-                            ids, annotation=value
-                        )
-                except WriteError as exc:
-                    self._toast(str(exc))
-                    return
-                self.update_inspector()
-                if value.strip():
-                    msg = f"Note saved · {ok} item(s)"
-                else:
-                    msg = f"Note cleared · {ok} item(s)"
-                if errors:
-                    msg += f" · {len(errors)} failed"
-                self._toast(msg)
-                close_win()
+                if self._run_metadata_batch(
+                    ids, annotation=value,
+                    description="Note saved" if value.strip() else "Note cleared",
+                ):
+                    close_win()
 
             if n > BULK_EDIT_CONFIRM:
                 self._confirm_bulk_edit(
@@ -5037,22 +5179,19 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         return [key for key, btn in buttons.items() if btn.get_active()]
 
     def queue_enhance_bust_dialog(self) -> None:
-        """Pick one or more bust engines (Krea / Qwen / Flux), then enqueue."""
+        """Pick one or more bust engines. Qwen is checked; Flux and Krea stay optional."""
         item = self._integrations_focus_item(still_only=True)
         if item is None:
             return
 
         dialog = Adw.AlertDialog(
             heading="Enhance bust",
-            body=(
-                "Toggle engines (multi-select). Default is Flux Klein. "
-                "Submit queues one PromptForge job per selected engine."
-            ),
+            body="",
         )
         engines, buttons = self._engine_toggle_row(
             [
-                ("klein", "Flux Klein (default)"),
-                ("qwen", "Qwen"),
+                ("qwen", "Qwen (default)"),
+                ("klein", "Flux Klein"),
                 ("krea2", "Krea 2"),
             ],
             default_key=DEFAULT_BUST_ENGINE,
@@ -5316,21 +5455,37 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         GLib.idle_add(focus_text)
 
+    def _edit_primary_and_refs(self) -> tuple[Item, list[str]] | None:
+        """Focused still as ``eagle_id``; other selected stills as refs (#577)."""
+        focus = self.selected_item
+        if focus is None:
+            items = self._effective_hand_off_items()
+            if not items:
+                self._toast("Nothing selected")
+                return None
+            focus = items[0]
+        if not focus.is_image:
+            self._toast("This action is for stills")
+            return None
+        if not focus.path.is_file():
+            self._toast("File missing")
+            return None
+        refs = extra_still_ref_ids(focus, self._effective_hand_off_items())
+        return focus, refs
+
     def queue_edit_dialog(self) -> None:
-        """Edit prompt + multi-engine toggles, then enqueue on PromptForge (#503/#512)."""
-        item = self._integrations_focus_item(still_only=True)
-        if item is None:
+        """Edit prompt + multi-engine toggles, then enqueue on PromptForge (#503/#512/#577)."""
+        pair = self._edit_primary_and_refs()
+        if pair is None:
             return
+        item, ref_ids = pair
 
         def on_submit(prompt: str, engines: list[str]) -> None:
-            self._queue_edit(item, prompt, engines)
+            self._queue_edit(item, prompt, engines, ref_ids)
 
         self._prompt_engine_dialog(
             heading="Edit",
-            body=(
-                "Edit instruction and toggle engines (Qwen / Flux / Krea). "
-                "Multi-select queues one PromptForge job per engine."
-            ),
+            body="",
             initial_prompt="",
             require_prompt=True,
             empty_toast="Edit prompt required",
@@ -5345,25 +5500,31 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
 
         def on_submit(prompt: str, engines: list[str]) -> None:
-            # Flat-lay is QIE-2511 / Qwen-only; ignore other toggles.
+            # Flat-lay is Qwen 2.1 only; ignore other toggles.
             self._queue_flat_lay(item, prompt, engines[0] if engines else "qwen")
 
         self._prompt_engine_dialog(
             heading="Flat-lay",
             body=(
-                "Qwen + QIE-2511 Extract Outfit → 9:16 wood wardrobe sheet. "
+                "Qwen Image 2.1 extract outfit → 9:16 wood wardrobe sheet. "
                 "Engine is locked to Qwen for this recipe. Queues on PromptForge."
             ),
             initial_prompt=flat_lay_prompt_for(item, None),
             require_prompt=False,
             empty_toast="",
             on_submit=on_submit,
-            engine_choices=[("qwen", "Qwen (QIE-2511)")],
+            engine_choices=[("qwen", "Qwen 2.1")],
             default_engine="qwen",
             multi_engine=False,
         )
 
-    def _queue_edit(self, item: Item, prompt: str, engines: list[str]) -> None:
+    def _queue_edit(
+        self,
+        item: Item,
+        prompt: str,
+        engines: list[str],
+        ref_ids: list[str] | None = None,
+    ) -> None:
         inflight = getattr(self, "_edit_inflight", None)
         if inflight is None:
             inflight = set()
@@ -5374,12 +5535,20 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         for k in keys:
             inflight.add(k)
+        refs = list(ref_ids or [])
 
         def work() -> None:
             results: list[IntegrationResult] = []
             for eng in engines:
                 try:
-                    results.append(post_edit(item, prompt=prompt, engine=eng))
+                    results.append(
+                        post_edit(
+                            item,
+                            prompt=prompt,
+                            engine=eng,
+                            ref_image_eagle_ids=refs if eng == "qwen" else None,
+                        )
+                    )
                 except Exception:  # noqa: BLE001
                     results.append(
                         IntegrationResult("offline", "PromptForge not answering")
@@ -5447,7 +5616,6 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 if old.id == it.id:
                     lst[i] = it
         self.selected_item = it
-        self.library._invalidate_caches()  # noqa: SLF001
         self._rebind_grid_keep_selection()
         self._update_path_label()
         viewing = (
@@ -5460,6 +5628,82 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self.open_inline_viewer(it)
         else:
             self.update_inspector()
+
+    def _run_metadata_batch(
+        self, ids: list[str], *, description: str, picker=None, on_done=None,
+        **changes,
+    ) -> bool:
+        """Write off the GTK thread; only publish progress/results through idle.
+
+        One interactive metadata batch at a time. A non-daemon worker finishes
+        durable writes and releases the library lock even if the window closes.
+        """
+        if self._shutdown.is_set():
+            return False
+        if self._metadata_batch_busy:
+            self._toast("A metadata update is still running")
+            return False
+        self._metadata_batch_busy = True
+        ids = list(ids)
+        progress_toast = Adw.Toast.new(f"{description} · 0/{len(ids)}")
+        progress_toast.set_timeout(0)
+        self._toast_overlay.add_toast(progress_toast)
+        if picker is not None:
+            picker.set_busy(True, f"Updating · 0/{len(ids)}")
+
+        def show_progress(done: int, total: int) -> None:
+            progress_toast.set_title(f"{description} · {done}/{total}")
+            if picker is not None:
+                picker.set_busy(True, f"Updating · {done}/{total}")
+
+        def complete(ok: int, errors: list[str]) -> None:
+            self._metadata_batch_busy = False
+            progress_toast.dismiss()
+            if picker is not None:
+                picker.set_busy(False)
+            if on_done is not None:
+                on_done(ok, errors)
+            self.refresh_items(reset_selection=False, scroll_to_top=False)
+            self._refresh_special_counts()
+            self._sync_star_overlays()
+            self._update_path_label()
+            self.update_inspector()
+            if errors:
+                self._toast(
+                    f"{description} · {ok}/{len(ids)} completed · "
+                    f"{len(errors)} error(s): {errors[0]}"
+                )
+            else:
+                self._toast(f"{description} · {ok} item(s)")
+
+        def work() -> None:
+            last_progress = 0.0
+
+            def progress(done: int, total: int) -> None:
+                nonlocal last_progress
+                now = time.monotonic()
+                if done == total or now - last_progress >= 0.1:
+                    last_progress = now
+                    self._ui_idle(show_progress, done, total)
+
+            try:
+                ok, errors = self.library.update_items_batch(
+                    ids, progress=progress, **changes
+                )
+            except Exception as exc:  # noqa: BLE001
+                ok, errors = 0, [f"Update interrupted: {exc}"]
+            self._ui_idle(complete, ok, errors)
+
+        thread = threading.Thread(target=work, name="eagle-metadata", daemon=False)
+        try:
+            thread.start()
+        except Exception:  # noqa: BLE001
+            self._metadata_batch_busy = False
+            progress_toast.dismiss()
+            if picker is not None:
+                picker.set_busy(False)
+            raise
+        return True
 
     def _confirm_bulk_edit(
         self,
@@ -5497,9 +5741,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def edit_tags_dialog(self) -> None:
         """Keyboard tag picker: recent + autocomplete, Enter toggles, Esc closes."""
         from picker import TogglePicker, load_recent
-        from write import WriteError
 
-        items = self._effective_hand_off_items()
+        if self._metadata_batch_busy:
+            self._toast("A metadata update is still running")
+            return
+
+        items = self._metadata_edit_items()
         if not items:
             self._toast("Nothing selected")
             return
@@ -5522,29 +5769,18 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         n = len(items)
         picker_ref: dict[str, object] = {"p": None}
 
-        def apply_tag(tag: str, turn_on: bool, *, update_picker: bool) -> None:
-            try:
-                if n == 1:
-                    if turn_on:
-                        self.library.update_item(ids[0], add_tags=[tag])
-                    else:
-                        self.library.update_item(ids[0], remove_tags=[tag])
-                else:
-                    if turn_on:
-                        self.library.update_items_batch(ids, add_tags=[tag])
-                    else:
-                        self.library.update_items_batch(ids, remove_tags=[tag])
-            except WriteError as exc:
-                self._toast(str(exc))
-                raise
-            # Re-query so the current smart folder / Untagged drops mismatches
-            self.refresh_items(reset_selection=False, scroll_to_top=False)
-            # Sidebar badge: keep Untagged (N) fresh even when not on that view
-            self._refresh_special_counts()
-            self._toast(("+ " if turn_on else "− ") + tag)
+        def apply_tag(tag: str, turn_on: bool) -> None:
             picker = picker_ref["p"]
-            if update_picker and picker is not None:
-                picker.note_toggled(tag, turn_on)  # type: ignore[union-attr]
+
+            def done(_ok: int, _errors: list[str]) -> None:
+                if picker is not None:
+                    picker.note_membership(tag, sum(tag in it.tags for it in items), n)
+
+            self._run_metadata_batch(
+                ids, description=("+ " if turn_on else "− ") + tag,
+                picker=picker, on_done=done,
+                **{"add_tags" if turn_on else "remove_tags": [tag]},
+            )
 
         def on_toggle(tag: str, turn_on: bool) -> bool:
             if n > BULK_EDIT_CONFIRM:
@@ -5553,12 +5789,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     n,
                     heading=f"{verb} tag on {n} items?",
                     body=f"{verb} “{tag}” on {n} selected items.",
-                    apply_fn=lambda: apply_tag(tag, turn_on, update_picker=True),
+                    apply_fn=lambda: apply_tag(tag, turn_on),
                     parent=picker_ref["p"],  # type: ignore[arg-type]
                 )
                 return False
-            apply_tag(tag, turn_on, update_picker=False)
-            return True
+            apply_tag(tag, turn_on)
+            return False
 
         def on_close() -> None:
             self.grid.grab_focus()
@@ -5568,7 +5804,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         picker = TogglePicker(
             self,
             title="Tags",
-            subtitle=f"{n} item(s) · Enter toggles · Esc closes",
+            subtitle=f"{n} item(s) · ± mixed · Enter toggles · Esc closes",
             all_values=all_tags,
             active=active,
             partial=partial,
@@ -5580,6 +5816,58 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         )
         picker_ref["p"] = picker
         picker.present()
+
+    def create_folder_dialog(self) -> None:
+        """Create a category without changing the assets selected for filing."""
+        win = Gtk.Window(title="New folder", transient_for=self, modal=True,
+                         default_width=380, resizable=False)
+        self._remember_dialog(win)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for edge in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{edge}")(16)
+        win.set_child(box)
+        box.append(Gtk.Label(label="Create a folder (category) in this library.", xalign=0))
+        entry = Gtk.Entry(placeholder_text="Folder name", activates_default=True)
+        box.append(entry)
+        error = Gtk.Label(xalign=0, wrap=True)
+        error.add_css_class("error")
+        box.append(error)
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                          halign=Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        create = Gtk.Button(label="Create")
+        create.add_css_class("suggested-action")
+        create.set_sensitive(False)
+        entry.connect("changed", lambda *_: create.set_sensitive(bool(entry.get_text().strip())))
+        buttons.append(cancel)
+        buttons.append(create)
+        box.append(buttons)
+        cancel.connect("clicked", lambda *_: win.close())
+
+        def save(*_args) -> None:
+            from write import WriteError
+            try:
+                folder = self.library.create_folder(entry.get_text())
+            except (WriteError, OSError, RuntimeError) as exc:
+                error.set_text(str(exc))
+                return
+            self._folders_section_expanded = True
+            self._repopulate_sidebar_keep_selection()
+            self._toast(f"Created folder · {folder.name}")
+            win.close()
+
+        create.connect("clicked", save)
+        win.set_default_widget(create)
+        keys = Gtk.EventControllerKey()
+        def on_key(_controller, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                win.close()
+                return True
+            return False
+        keys.connect("key-pressed", on_key)
+        win.add_controller(keys)
+        win.present()
+        entry.grab_focus()
 
     def edit_folder_auto_tags(self, folder_id: str | None = None) -> None:
         """
@@ -5856,9 +6144,12 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def edit_folders_dialog(self) -> None:
         """Keyboard folder/category picker (same UX as tags)."""
         from picker import TogglePicker, load_recent
-        from write import WriteError
 
-        items = self._effective_hand_off_items()
+        if self._metadata_batch_busy:
+            self._toast("A metadata update is still running")
+            return
+
+        items = self._metadata_edit_items()
         if not items:
             self._toast("Nothing selected")
             return
@@ -5894,38 +6185,28 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     return k
             return None
 
-        def apply_folder(path_label: str, turn_on: bool, *, update_picker: bool) -> None:
+        def apply_folder(path_label: str, turn_on: bool) -> None:
             fid = resolve_fid(path_label)
             if not fid:
                 self._toast(f"Unknown folder: {path_label}")
-                raise WriteError(f"Unknown folder: {path_label}")
-            try:
-                if n == 1:
-                    if turn_on:
-                        self.library.update_item(ids[0], add_folders=[fid])
-                    else:
-                        self.library.update_item(ids[0], remove_folders=[fid])
-                else:
-                    if turn_on:
-                        self.library.update_items_batch(ids, add_folders=[fid])
-                    else:
-                        self.library.update_items_batch(ids, remove_folders=[fid])
-            except WriteError as exc:
-                self._toast(str(exc))
-                raise
-            # Re-query so the current smart folder / Uncategorized drops mismatches
-            self.refresh_items(reset_selection=False, scroll_to_top=False)
-            # Sidebar badge: keep Uncategorized (N) fresh even when not on that view
-            self._refresh_special_counts()
+                return
+            picker = picker_ref["p"]
             msg = ("+ " if turn_on else "− ") + path_label
             if turn_on:
                 auto = self.library.auto_tags_for_folders([fid])
                 if auto:
                     msg += " · auto-tags " + ", ".join(auto)
-            self._toast(msg)
-            picker = picker_ref["p"]
-            if update_picker and picker is not None:
-                picker.note_toggled(path_label, turn_on)  # type: ignore[union-attr]
+
+            def done(_ok: int, _errors: list[str]) -> None:
+                if picker is not None:
+                    picker.note_membership(
+                        path_label, sum(fid in it.folders for it in items), n
+                    )
+
+            self._run_metadata_batch(
+                ids, description=msg, picker=picker, on_done=done,
+                **{"add_folders" if turn_on else "remove_folders": [fid]},
+            )
 
         def on_toggle(path_label: str, turn_on: bool) -> bool:
             if n > BULK_EDIT_CONFIRM:
@@ -5941,13 +6222,13 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     heading=f"{verb} category on {n} items?",
                     body=f"{verb} “{path_label}” on {n} selected items.{extra}",
                     apply_fn=lambda: apply_folder(
-                        path_label, turn_on, update_picker=True
+                        path_label, turn_on
                     ),
                     parent=picker_ref["p"],  # type: ignore[arg-type]
                 )
                 return False
-            apply_folder(path_label, turn_on, update_picker=False)
-            return True
+            apply_folder(path_label, turn_on)
+            return False
 
         def on_close() -> None:
             self.grid.grab_focus()
@@ -5957,7 +6238,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         picker = TogglePicker(
             self,
             title="Folders / categories",
-            subtitle=f"{n} item(s) · Enter toggles · Esc closes · no new folders here",
+            subtitle=f"{n} item(s) · ± mixed · Enter toggles · Esc closes",
             all_values=all_paths,
             active=active_paths,
             partial=partial_paths,
@@ -6701,6 +6982,225 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=work, name="eagle-stage", daemon=True).start()
 
+    # ── External metadata changes ─────────────────────────────────────
+    # eagle-api, Dropbox sync and other tools rewrite images/<id>.info/
+    # metadata.json without telling us. A pass stats every item's metadata
+    # file off the UI thread (~130 ms for 37k items), re-reads only the ones
+    # that changed, and never writes. Passes run:
+    #   * when mtime.json changes (eagle-api / Eagle / Dropbox bump it),
+    #   * when the window regains focus,
+    #   * when a folder / smart folder is opened (inside refresh_items),
+    #   * every EXTERNAL_REFRESH_INTERVAL_S as a safety net.
+    # One inotify watch total; no per-item watches on a 37k-item library.
+
+    def _start_external_change_watch(self) -> None:
+        self._ext_refresh_last = time.monotonic()  # load just read everything
+        try:
+            gfile = Gio.File.new_for_path(str(self.library.root / "mtime.json"))
+            monitor = gfile.monitor_file(Gio.FileMonitorFlags.NONE, None)
+            monitor.connect("changed", self._on_mtime_index_changed)
+            self._mtime_index_monitor = monitor
+        except Exception:  # noqa: BLE001
+            self._mtime_index_monitor = None
+
+    def _on_mtime_index_changed(self, *_args: object) -> None:
+        self._request_external_refresh(EXTERNAL_REFRESH_DEBOUNCE_MS)
+
+    def _on_window_active_changed(self, *_args: object) -> None:
+        if self.is_active():
+            self._request_external_refresh(EXTERNAL_REFRESH_FOCUS_DELAY_MS)
+
+    def _external_refresh_tick(self) -> None:
+        """1 s poll: flush deferred UI updates; periodic safety-net pass."""
+        if self._ext_pending_ids or self._ext_pending_trees:
+            self._apply_external_changes()
+        if (
+            not self._ext_refresh_running
+            and not self._ext_refresh_source
+            and time.monotonic() - self._ext_refresh_last
+            >= EXTERNAL_REFRESH_INTERVAL_S
+        ):
+            self._request_external_refresh(0)
+
+    def _request_external_refresh(
+        self, delay_ms: int = EXTERNAL_REFRESH_DEBOUNCE_MS
+    ) -> None:
+        """Schedule one pass. Requests while one is pending coalesce into it."""
+        if self._shutdown.is_set() or not self._library_ready:
+            return
+        if self._ext_refresh_source:
+            return
+
+        def fire() -> bool:
+            self._ext_refresh_source = 0
+            self._start_external_refresh()
+            return False
+
+        self._ext_refresh_source = GLib.timeout_add(max(0, int(delay_ms)), fire)
+
+    def _start_external_refresh(self) -> None:
+        """One pass at a time; a request during a pass queues one follow-up."""
+        if self._shutdown.is_set():
+            return
+        if self._ext_refresh_running:
+            self._ext_refresh_again = True
+            return
+        self._ext_refresh_running = True
+        self._ext_refresh_last = time.monotonic()
+        library = self.library
+
+        def work() -> None:
+            try:
+                changes: ExternalChanges | None = library.refresh_changed_items(
+                    cancelled=self._shutdown.is_set
+                )
+            except Exception:  # noqa: BLE001
+                changes = None
+
+            def done() -> bool:
+                self._ext_refresh_running = False
+                if changes is not None:
+                    self._queue_external_changes(changes)
+                    self._apply_external_changes()
+                if self._ext_refresh_again:
+                    self._ext_refresh_again = False
+                    self._start_external_refresh()
+                return False
+
+            self._ui_idle(done)
+
+        threading.Thread(target=work, name="eagle-ext-refresh", daemon=True).start()
+
+    def _queue_external_changes(self, changes: ExternalChanges) -> bool:
+        """Retain model notifications independently of any navigation query."""
+        self._ext_pending_ids.update(changes.changed)
+        self._ext_pending_trees |= changes.trees_changed
+        return False
+
+    def _external_refresh_blocked(self) -> bool:
+        """An in-window edit is in progress; defer grid/sidebar updates.
+
+        The library model is already current (refresh_changed_items never
+        overwrites an item an in-window edit touched); this only keeps the
+        grid, selection and sidebar still under an open picker / dialog /
+        smart-folder editor or a running metadata batch. Retried every 1 s.
+        """
+        return bool(
+            self._metadata_batch_busy
+            or self._picker_blocking
+            or self._open_dialog is not None
+            or self._sf_editor is not None
+        )
+
+    def _apply_external_changes(self) -> None:
+        """Re-evaluate the current view, badges and inspector after a pass."""
+        if not (self._ext_pending_ids or self._ext_pending_trees):
+            return
+        if self._shutdown.is_set() or self._external_refresh_blocked():
+            return
+        ids = self._ext_pending_ids
+        trees = self._ext_pending_trees
+        self._ext_pending_ids = set()
+        self._ext_pending_trees = False
+
+        if trees:
+            self._reload_trees_after_external_change()
+        changed_sets: set[str] = set()
+        if ids:
+            old_counts = self._set_counts
+            self._after_external_item_changes()
+            self._rebuild_set_counts()
+            changed_sets = {
+                tag for tag in old_counts.keys() | self._set_counts.keys()
+                if old_counts.get(tag, 0) != self._set_counts.get(tag, 0)
+            }
+
+        shown = {it.id for it in self._all_items}
+        relevant = trees or any(
+            set_tag_of(it) in changed_sets for it in self._all_items
+        )
+        if not relevant:
+            for iid in ids:
+                it = self.library.items_by_id.get(iid)
+                # Left the view (was shown) or entered it (matches now)
+                if iid in shown or (
+                    it is not None and self._item_matches_current_view(it)
+                ):
+                    relevant = True
+                    break
+        if relevant:
+            # Keeps selection, marks and scroll (same as after an import)
+            self.refresh_items(reset_selection=False, scroll_to_top=False)
+        elif ids:
+            self._sync_star_overlays()
+
+        selected = set(self._marked)
+        if self.selected_item is not None:
+            selected.add(self.selected_item.id)
+        selected_set_changed = any(
+            set_tag_of(self.library.items_by_id[iid]) in changed_sets
+            for iid in selected if iid in self.library.items_by_id
+        )
+        if (ids & selected or selected_set_changed) and not self.is_viewer_open():
+            self.update_inspector()
+            self._update_path_label()
+
+    def _after_external_item_changes(self) -> None:
+        """Badges computed over many items: smart counts, Untagged/Intake, sets."""
+        self._set_counts_ready = False
+        self._refresh_special_counts()
+        self._recount_smart_folders_async()
+
+    def _recount_smart_folders_async(self) -> None:
+        """Recount smart folders whose "(N)" badge we already show."""
+        if self._shutdown.is_set():
+            return
+        ids = [
+            sid for sid in self._smart_counts
+            if sid in self.library.smart_folders_by_id
+        ]
+        if not ids:
+            return
+        library = self.library
+
+        def work() -> None:
+            counts: dict[str, int] = {}
+            for sid in ids:
+                if self._shutdown.is_set():
+                    return
+                try:
+                    counts[sid] = library.count_smart_folder(sid)
+                except Exception:  # noqa: BLE001
+                    continue
+
+            def apply() -> bool:
+                for sid, n in counts.items():
+                    self._update_smart_count_label(sid, n)
+                return False
+
+            self._ui_idle(apply)
+
+        threading.Thread(
+            target=work, name="eagle-smart-recount", daemon=True
+        ).start()
+
+    def _reload_trees_after_external_change(self) -> None:
+        """Library metadata.json changed on disk: folders / smart-folder rules."""
+        before = (
+            dict(self.library.folder_paths),
+            dict(self.library.smart_folder_paths),
+        )
+        try:
+            self.library.reload_metadata_trees()
+        except Exception:  # noqa: BLE001
+            return  # half-synced file; next pass retries
+        after = (self.library.folder_paths, self.library.smart_folder_paths)
+        if before != after:
+            self._smart_counts.clear()
+            self._populate_sidebar(select_current=True)
+        else:
+            self._recount_smart_folders_async()
+
     # ── Live ingest of watcher imports ────────────────────────────────
     # The GUI never consumes PICS/Eunbi. It only watches a signal file
     # the watcher writes after each successful library item, then loads
@@ -6740,6 +7240,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._ingest_from_signal()
         self._retry_pending_imports()
         self._scan_images_if_changed()
+        self._external_refresh_tick()
         return True
 
     def _scan_images_if_changed(self) -> None:
@@ -6908,6 +7409,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         """
         if not items:
             return
+        self._refresh_import_categories()
         visible = [it for it in items if self._item_matches_current_view(it)]
         can_prepend = (
             bool(visible)
@@ -6939,6 +7441,38 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             self._toast(f"{len(items)} new")
             # Watcher skips its chime while the GUI pid file is live.
             play_sound("notification", once=True)
+
+    def _refresh_import_categories(self) -> None:
+        """Make categories created by intake visible before filtering new items."""
+        previous = dict(self.library.folder_paths)
+        self.library.reload_metadata_trees()
+        self._smart_counts.clear()
+        if self.library.folder_paths != previous:
+            self._populate_sidebar(select_current=True)
+
+    def _finish_inbox_import(self, results: list) -> None:
+        """Refresh both new and reused items after an interactive intake batch."""
+        new_items: list[Item] = []
+        reused = False
+        for result in results:
+            if not result.ok or not result.item_id:
+                continue
+            if result.reused:
+                self.library.load_item(result.item_id)
+                reused = True
+            else:
+                item = self.library.ingest_imported(result.item_id)
+                if item is not None:
+                    new_items.append(item)
+        self._rebuild_set_counts(force=True)
+        if new_items:
+            self._apply_new_items(new_items, toast=False)
+        else:
+            self._refresh_import_categories()
+        if reused or not new_items:
+            # Re-query even in mixed batches: prepend alone retains stale rows.
+            self.refresh_items(reset_selection=False, scroll_to_top=False)
+            self._refresh_special_counts()
 
     def _restore_selection_after_grid_insert(self) -> None:
         """After prepending store rows, re-pin selection by item id (not index).
@@ -7063,7 +7597,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                     unzipped += n
             files = list_inbox_files(inbox)
             if only_names is not None:
-                files = [p for p in files if p.name in only_names]
+                files = [p for p in files if str(p.relative_to(inbox)) in only_names]
             # Drop zero-byte / incomplete stubs (leave partials in inbox)
             ready: list[Path] = []
             deferred_names: list[str] = []
@@ -7182,21 +7716,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self._inbox_importing = False
                 if ok:
                     play_sound("notification", once=True)
-                    self._rebuild_set_counts(force=True)
-                    new_items: list[Item] = []
-                    for r in results:
-                        if (
-                            getattr(r, "ok", False)
-                            and getattr(r, "item_id", None)
-                            and not getattr(r, "reused", False)
-                        ):
-                            item = self.library.ingest_imported(r.item_id)
-                            if item is not None:
-                                new_items.append(item)
-                    if new_items:
-                        self._apply_new_items(new_items, toast=False)
-                    else:
-                        self.refresh_items()
+                    self._finish_inbox_import(results)
                 elif fail_n:
                     play_sound("error")
                 parts: list[str] = []
@@ -7826,6 +8346,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
     def open_set_view(self, tag: str, *, keep_id: str | None = None) -> None:
         """Temporary grid of every item with this set: tag."""
         before = self._view_loc()
+        if before.special != "set":
+            self._set_parent_view = before._replace(viewer_id=None)
         if self.is_viewer_open():
             self.close_inline_viewer(restore_scroll=False)
         self._rebuild_set_counts()
@@ -7848,6 +8370,16 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._record_view_change(before)
         n = self._set_counts.get(tag, 0)
         self._toast(f"Set · {n}")
+
+    def _escape_set_view(self) -> None:
+        """Close the group layer, independent of asset-viewer navigation history."""
+        parent = self._set_parent_view
+        if parent is None:
+            self._leave_set_view()
+            return
+        before = self._view_loc()
+        self._apply_view_loc(parent)
+        self._record_view_change(before)
 
     def _leave_set_view(self) -> None:
         before = self._view_loc()
@@ -7902,6 +8434,8 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
 
     def _apply_view_loc(self, loc: _ViewLoc) -> None:
         scope_changed = self._scope_changed(loc)
+        if loc.special == "set" and self._special_view != "set":
+            self._set_parent_view = self._view_loc()._replace(viewer_id=None)
         self._nav_restoring = True
         self._sidebar_nav_lock = True
         try:
@@ -7950,9 +8484,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         self._apply_view_loc(loc)
 
     def group_selection_into_set(self) -> None:
-        from write import WriteError
-
-        items = self._effective_hand_off_items()
+        items = self._metadata_edit_items()
         if len(items) < 2:
             self._toast("Select at least two items")
             return
@@ -7972,45 +8504,28 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if not ids:
             self._toast("Already grouped")
             return
-        try:
-            _ok, errors = self.library.update_items_batch(ids, add_tags=[tag])
-        except WriteError as exc:
-            self._toast(str(exc))
-            return
-        self._rebuild_set_counts(force=True)
-        self.refresh_items(reset_selection=False)
-        n = self._set_counts.get(tag, 0)
-        msg = f"Set · {n}"
-        if errors:
-            msg += f" · {len(errors)} failed"
-        self._toast(msg)
+        self._run_metadata_batch(
+            ids, add_tags=[tag], description="Grouped",
+            on_done=lambda _ok, _errors: self._rebuild_set_counts(force=True),
+        )
 
     def remove_selection_from_set(self) -> None:
-        from write import WriteError
-
         items = self._effective_hand_off_items()
         drop = list(dict.fromkeys(t for it in items for t in set_tags_of(it)))
         if not drop:
             self._toast("Not in a set")
             return
         ids = [it.id for it in items if set_tags_of(it)]
-        try:
-            _ok, errors = self.library.update_items_batch(ids, remove_tags=drop)
-        except WriteError as exc:
-            self._toast(str(exc))
-            return
-        self._rebuild_set_counts(force=True)
-        if self._special_view == "set":
-            still = self._set_counts.get(self._set_view_tag or "", 0)
-            if still < 1:
-                self._leave_set_view()
-                self._toast("Set empty")
-                return
-        self.refresh_items(reset_selection=False)
-        msg = "Removed from set"
-        if errors:
-            msg += f" · {len(errors)} failed"
-        self._toast(msg)
+        def done(_ok: int, _errors: list[str]) -> None:
+            self._rebuild_set_counts(force=True)
+            if self._special_view == "set":
+                still = self._set_counts.get(self._set_view_tag or "", 0)
+                if still < 1:
+                    self._leave_set_view()
+
+        self._run_metadata_batch(
+            ids, remove_tags=drop, description="Removed from set", on_done=done,
+        )
 
     def _auto_join_set(self, source: Item, new_item: Item) -> Item:
         """Put a browse-created derivative in the source's set (mint if needed)."""
@@ -9028,6 +9543,10 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             return
         self._last_open_mono = now
 
+        tag = set_tag_of(item)
+        if self._collapse_groups and self._special_view != "set" and tag:
+            self.open_set_view(tag, keep_id=item.id)
+            return
         if item.is_image or item.is_video:
             self.open_inline_viewer(item)
             return
@@ -9301,14 +9820,14 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
             if self.is_viewer_open():
                 self.close_inline_viewer()
                 return True
+            if self._special_view == "set":
+                self._escape_set_view()
+                return True
             if self._focus_is_search(self.get_focus()):
                 self.search.set_text("")
                 self.focus_grid()
                 return True
             if self.clear_marks():
-                return True
-            if self._special_view == "set":
-                self._leave_set_view()
                 return True
             if self._view_filters.active():
                 self.clear_view_filters()
@@ -9598,7 +10117,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_s, Gdk.KEY_S) and not ctrl and not alt and not super_mod:
             self.stage_marked()
             return True
-        # e = Files; Shift+E = add to clip editor; Ctrl+Shift+E = new project.
+        # e = Files; Shift+E = media editor; Ctrl+Shift+E = new clip project.
         # Match g/G: use keyval, not SHIFT_MASK — GTK often reports KEY_E with
         # shift already applied and the modifier bit cleared.
         if (
@@ -9612,7 +10131,7 @@ class EagleBrowseWindow(Adw.ApplicationWindow):
                 self.open_selected_in_clip_editor(new_project=True)
                 return True
             if shift and not ctrl:
-                self.open_selected_in_clip_editor(new_project=False)
+                self.open_selected_in_editor()
                 return True
             if not shift and not ctrl:
                 self.reveal_selected_in_files()

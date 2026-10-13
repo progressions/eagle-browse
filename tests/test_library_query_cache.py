@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime
+from unittest.mock import patch
 import unittest
 from pathlib import Path
 
-from library import EagleLibrary, Item
+from library import EagleLibrary, Item, SmartFolder
 
 
 def item(number: int, *, tags: list[str] | None = None, deleted: bool = False) -> Item:
@@ -98,3 +100,29 @@ class LibraryQueryCacheTest(unittest.TestCase):
         self.assertEqual([it.id for it in a], [it.id for it in b])
         self.assertIsNot(a, b)
         self.assertEqual(self.library._query_cache, {})  # noqa: SLF001
+
+    def test_relative_date_parent_and_child_expire_after_midnight(self):
+        lib = self.library
+        first_day = datetime(2026, 10, 1, 12)
+        next_day = datetime(2026, 10, 2, 12)
+        for it in lib.items:
+            it.btime = int(first_day.timestamp() * 1000)
+        conditions = [{"match": "AND", "boolean": "TRUE", "rules": [
+            {"property": "btime", "method": "within", "value": [1]}
+        ]}]
+        lib.smart_folders_by_id = {
+            "today": SmartFolder(id="today", name="Today", conditions=conditions,
+                                 inherited_conditions=conditions),
+            "child": SmartFolder(id="child", name="Child", parent_id="today",
+                                 conditions=[], inherited_conditions=conditions),
+        }
+        with patch("library.date") as calendar, patch("filters.datetime", wraps=datetime) as clock:
+            calendar.today.return_value = first_day.date()
+            clock.now.return_value = first_day
+            first = lib.query(smart_folder_id="child")
+            self.assertEqual(len(first), 20)
+            self.assertIs(lib.query(smart_folder_id="child"), first)
+            calendar.today.return_value = next_day.date()
+            clock.now.return_value = next_day
+            self.assertEqual(lib.query(smart_folder_id="child"), [])
+            self.assertEqual(lib.query(smart_folder_id="today"), [])

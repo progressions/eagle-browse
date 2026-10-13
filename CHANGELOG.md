@@ -9,6 +9,134 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.23] — 2026-10-13
 
+### Added
+
+- Smart folder editor: tag and category rules can use "none are present", saved as Eagle's `identity` method; existing `identity` rules now load as editable rules instead of read-only (Fizzy #569).
+
+## [0.1.22] — 2026-10-12
+
+### Added
+
+- Create folders (categories) from the sidebar, with name validation and immediate availability in filing controls (Fizzy #583).
+
+## [0.1.21] — 2026-10-05
+
+### Added
+
+- Shift+E opens selected images in local PhotoSuite while retaining the Clip Editor handoff for video/audio.
+
+## [0.1.20] — 2026-10-03
+
+### Fixed
+
+- Keep Intake assets selected after assigning a category removes them from the view, allowing follow-up metadata edits on the same assets. This includes single selections, multiple selections, collapsed groups, and an empty Intake view.
+
+## [0.1.19] — 2026-10-02
+
+### Fixed
+
+- Restore GTK grid keyboard focus after rating/tag refreshes, preventing a delayed jump to the first image even when logical selection and scroll were initially restored correctly.
+
+## [0.1.18] — 2026-10-02
+
+### Changed
+
+- Reuse library query caches across ordinary grid refreshes. Metadata edits, imports, folder-rule reloads, and external changes invalidate cached results; relative-date views expire on the next query after the local calendar day changes. Folder auto-tag changes also invalidate tag choices.
+
+## [0.1.17] — 2026-10-01
+
+### Fixed
+
+- Rating or tagging an image that leaves the current smart folder selects the next image at the same position (or the previous image at the end), retaining scroll position. Images that still match remain selected, and background refreshes preserve navigation performed while the query runs.
+
+## [0.1.16] — 2026-10-01
+
+### Fixed
+
+- The running window picks up metadata changes written outside it (`eagle-api` tag/rating/folder edits, Dropbox sync, Eagle or other tools) without a manual reload. Opening a folder or smart folder, returning focus to the window, or an `mtime.json` update re-checks item `metadata.json` files (read-only stat pass, about 130 ms for 37k items, plus a 30-second safety net), re-reads only changed items, and re-evaluates smart folders and counts. Grid/sidebar updates wait while a picker, dialog, smart-folder editor, or metadata batch is open, and an in-window edit is never overwritten by an older disk read.
+
+- External-change notifications survive canceled navigation queries, and changes to hidden set members refresh visible set counts and the inspector.
+
+## [0.1.15] — 2026-10-01
+
+### Fixed
+
+- Group combines all non-deleted members represented by selected collapsed group thumbnails, including members outside current filters, instead of moving only the representatives and splitting their groups. Individual views retain their existing behavior (PR #47).
+
+## [0.1.14] — 2026-10-01
+
+### Changed
+
+- Batch metadata edits update the shared modification index once per batch and skip unchanged assets while preserving backups and atomic saves. In a disk-backed synthetic benchmark, assigning a category to 100 assets improved from a median of 4.77 seconds to 1.71 seconds (PR #45).
+- Category, tag, rating, note, and group membership edits run in the background with progress. Accepted writes finish safely if the picker or window closes.
+
+### Fixed
+
+- Category and tag pickers report batch errors and reconcile mixed membership after partial failures instead of indicating full success.
+
+## [0.1.13] — 2026-10-01
+
+### Fixed
+
+- Remember the Collapse groups toggle across restarts, saving both On and Off immediately. Existing installations default to Off until enabled (PR #43).
+
+## [0.1.12] — 2026-10-01
+
+### Changed
+
+- Tag and folder edits on collapsed group thumbnails apply to every non-deleted member. Mixed selections deduplicate assets; inspector and editor values reflect shared and mixed metadata across all targets.
+
+### Fixed
+
+- Esc closes asset and group layers in order: video → group → originating folder or library view. The group parent is independent of Back history, preventing Esc from reopening a video.
+
+## [0.1.11] — 2026-10-01
+
+### Fixed
+
+- Esc in a group grid now returns to the previous view using the same action as the Back button, before clearing selection or search. Open dialogs and individual asset viewers still close first.
+
+## [0.1.10] — 2026-10-01
+
+### Added
+
+- Collapse groups toggle beside Sort displays one thumbnail per set after filtering and sorting. Opening the representative thumbnail shows all set members; turning the toggle off restores individual assets.
+
+## [0.1.9] — 2026-09-25
+
+### Changed
+
+- Enhance bust opens with Qwen checked. Flux Klein and Krea 2 remain available.
+
+## [0.1.8] — 2026-09-25
+
+### Changed
+
+- Edit dialog no longer shows the paragraph about other selected stills and engine behavior. The prompt box and engine checkboxes are unchanged.
+
+## [0.1.7] — 2026-09-25
+
+### Changed
+
+- Edit (`u` then `e`) keeps posting `engine=qwen` (PromptForge maps that to Qwen Image 2.1). Other selected stills are sent as `ref_image_eagle_ids` for Qwen only, becoming `<image2>`…. Flux and Krea remain single-image edits. One focused still with no extras keeps the previous payload. Flat-lay now names the Qwen 2.1 workflow that PromptForge runs; bust, wardrobe, spicy, and flat-lay do not send extra refs ([#577](https://app.fizzy.do/6109848/cards/577)).
+
+## [0.1.6] — 2026-09-07
+
+### Added
+
+- Opt-in `inbox_subfolders_as_categories` configuration (default false): recursively import intake media into the category named by its first subfolder. Category matching is case-insensitive, and new names are lowercase ([#551](https://app.fizzy.do/6109848/cards/551) / PR #31).
+
+### Fixed
+
+- Track intake readiness and duplicate-review signals by relative path so identical filenames in different subfolders remain independent.
+- Refresh newly created categories in the browser sidebar and reload reused items so category membership, filtered views, and counts update immediately.
+
+## [0.1.5] — 2026-09-04
+
+### Added
+
+- Shift+E sends every selected video/audio to the current Clip Editor project; Ctrl+Shift+E starts a new project with the whole selection ([#539](https://app.fizzy.do/6109848/cards/539) / PR #29). Requires Clip Editor with repeated `--video`/`--audio` (#540).
+
 ## [0.1.4] — 2026-09-02
 
 ### Added
@@ -66,7 +194,11 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 - Initial packaged release of the keyboard-first GTK Eagle.cool browser and inbox watcher.
 
-[Unreleased]: https://github.com/progressions/eagle-browse/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/progressions/eagle-browse/compare/v0.1.15...HEAD
+[0.1.15]: https://github.com/progressions/eagle-browse/compare/v0.1.14...v0.1.15
+[0.1.14]: https://github.com/progressions/eagle-browse/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/progressions/eagle-browse/compare/v0.1.12...v0.1.13
+[0.1.5]: https://github.com/progressions/eagle-browse/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/progressions/eagle-browse/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/progressions/eagle-browse/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/progressions/eagle-browse/compare/v0.1.1...v0.1.2

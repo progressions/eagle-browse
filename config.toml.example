@@ -6,3 +6,8 @@
 
 inbox = "intake"
 library = "Eunbi.library"
+
+# Recursively import media in intake subfolders into Eagle categories.
+# The first directory supplies the category: video/dance/clip.mp4 -> video.
+# Names match case-insensitively; new categories use lowercase names.
+inbox_subfolders_as_categories = false

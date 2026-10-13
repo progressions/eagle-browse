@@ -4,6 +4,8 @@ Keyboard-first browser for an [Eagle.cool](https://eagle.cool) library on Omarch
 
 Browse **smart folders** and regular folders, search tags/names, and **copy the absolute path** of an image so you can paste it into upload dialogs or other tools.
 
+Create regular folders (categories) with the **+** beside **Folders** in the sidebar, even in an empty library. Enter a name and choose **Create**; the new category is immediately available in the **F** filing picker. Names must be nonempty and unique among top-level folders (ignoring case). **Cancel** or **Esc** leaves the library unchanged.
+
 Smart folders are evaluated from Eagle’s `metadata.json` rules (nested filters inherit parents — e.g. `Eunbi` → `images`). Create and edit them in the sidebar.
 
 ## Install
@@ -144,6 +146,18 @@ PYTHONPATH=. python3 scripts/synth_catalog.py --count 5000 --bench
 PYTHONPATH=. python3 scripts/synth_catalog.py --count 20000 --out /tmp/synth.library --bench --keep
 ```
 
+Optional batch-write timing (disposable metadata, real backups and fsync):
+
+```bash
+python scripts/benchmark_batch_metadata.py --directory ~/.cache --items 100
+# Compare another checkout with the same fixture:
+python scripts/benchmark_batch_metadata.py --directory ~/.cache --source /path/to/checkout
+```
+
+The default index contains 14,516 entries. Choose a disk directory rather than
+`/tmp` (often tmpfs) to measure storage costs. The script tests a new folder
+assignment and a repeated, unchanged assignment; it never opens a real library.
+
 Optional runtime profiling while navigating a real library:
 
 ```bash
@@ -173,7 +187,7 @@ Do not add phone-browse tests — that stack was removed (#519).
 | `n` | Open **Notes** for the focused or selected asset(s) |
 | `F2` / `Shift+N` | **Rename** focused file (media + matching thumbnail; Eagle id unchanged) |
 | `e` | Open the focused file in Files |
-| `Shift+E` | Add the focused video/audio to the current clip-editor project |
+| `Shift+E` | Open selected images in PhotoSuite; add selected video/audio to the current clip-editor project |
 | `Ctrl+Shift+E` | New clip-editor project with the focused video/audio |
 | `Ctrl+G` | **Open the set** containing the focused grouped asset |
 | `gs` | **Group** selected items into a set |
@@ -229,6 +243,16 @@ Shows the focused asset (or **common** values when multi-selected):
 | `m` | **Filter by type** (or use the **Type** button on the filter bar) |
 | `Esc` | Clear marks → clear view filters → clear search |
 | `b` | Focus **sidebar** |
+
+Category, tag, rating, note, and group membership edits run in the background
+with progress and a completion/error summary. Only one of these edits runs at a
+time. The category and tag pickers pause toggles while saving and show mixed
+membership if only some assets were updated. Closing a picker or the window does
+not cancel an accepted write; it finishes safely in the background.
+
+Unchanged metadata is not rewritten or backed up, and its modification time
+stays unchanged. Changed assets retain individual backups and atomic saves;
+the shared modification index is updated once per batch, including delete/restore.
 
 Left nav includes **Untagged** and **Intake** virtual views. Intake contains assets with no category.
 
@@ -301,6 +325,20 @@ Inbox path comes from a TOML config, not from code:
 | `$EAGLE_INBOX` | Overrides the inbox path |
 
 See `config.toml.example`. Relative paths are resolved from the file that set them.
+
+Set `inbox_subfolders_as_categories = true` in the TOML configuration to import
+media recursively beneath intake subfolders. The default is `false` (flat intake).
+For example, `intake/video/dance.mp4` is imported into the Eagle `video` category.
+Deeper paths such as `intake/video/dance/clip.mp4` also use the first directory,
+`video`. Existing top-level categories are reused case-insensitively; new names
+are lowercase (`IMage` and `image` resolve to one category). Existing category
+spelling is preserved. Files at the intake root keep their usual behavior.
+Category membership is also added when reusing an existing duplicate, preserving
+its other categories and applying folder auto-tags. Successfully imported files
+are consumed; directories remain available for future drops. Hidden directories
+(including `.dup-queue`) and symlinks are not scanned. ZIP intake continues to
+unpack root-level archives flat; directories inside archives do not create categories.
+Restart the watcher after changing configuration.
 
 **Only one process should auto-consume the inbox** — the headless
 `eagle-inbox-watch` on a single machine (see below). The GUI does **not**
@@ -482,3 +520,35 @@ LAN phone browse is **no longer part of this package**. Use the separate phone
 app. Older installs may still have `/usr/bin/phone-browse` and
 `eagle-phone-browse.service` until you upgrade past the release that removed
 them; disable that unit if it is still running.
+
+### Collapsed groups
+
+Toggle **Collapse groups** beside Sort to show one thumbnail per set, plus each
+ungrouped asset. Five assets with three in one set become three thumbnails.
+The first matching member in the current sort order represents the set; search
+and filters apply before collapsing. The count badge shows all members of the
+set. Double-click the thumbnail, press Enter, or click its badge to open the set
+and see its members individually. Press **Esc** in the set grid to return to the
+folder or library view you opened it from. If an asset viewer is open, the first
+Esc closes the asset and the next Esc closes the group. This is independent of
+the Back button's history. Returning to the library keeps the toggle on.
+Turn it off to show every asset again. The toggle is remembered across restarts (off until first enabled).
+Tag and folder edits on collapsed thumbnails apply to every non-deleted member
+of the selected sets, including members outside the current search or filters.
+Mixed selections include standalone assets and count each asset once. The editor
+shows the affected item count: ✓ means all targets have a value, ± means only some
+do. Toggling a mixed value adds it to all targets; toggling it again removes it
+from all. Values you leave untouched are preserved. Inside a set or individual
+asset viewer, edits apply only to selected assets. **Group** also expands collapsed
+thumbnails: selecting two groups combines all their members, and selecting a
+group plus an ungrouped asset adds that asset. With Collapse groups off, Group
+continues to operate on individual selected assets.
+Other actions still target the representative assets.
+
+### PhotoSuite handoff
+
+Select one or more images and press **Shift+E** to open them in the local
+PhotoSuite app. Eagle Browse looks for `photosuite` on PATH, then
+`~/bin/photosuite`. Mixed selections send images to PhotoSuite and video/audio
+to Clip Editor. Missing files are skipped with a notice. The handoff opens the
+original library files; it does not create copies or import new assets.

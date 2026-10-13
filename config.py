@@ -36,6 +36,7 @@ class Settings:
     inbox: Path
     library: Path
     config_files: tuple[Path, ...]
+    inbox_subfolders_as_categories: bool = False
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -77,11 +78,14 @@ def load_settings() -> Settings:
     library_val: str | None = None
     library_origin: Path | None = None
     used: list[Path] = []
+    subfolders = False
 
     for path in _candidate_files():
         if not path.is_file():
             continue
         data = _read_toml(path)
+        if isinstance(data.get("inbox_subfolders_as_categories"), bool):
+            subfolders = data["inbox_subfolders_as_categories"]
         used.append(path)
         if (v := _as_str(data.get("inbox"))) is not None:
             inbox_val, inbox_origin = v, path
@@ -108,6 +112,7 @@ def load_settings() -> Settings:
         inbox=inbox.expanduser(),
         library=library.expanduser(),
         config_files=tuple(used),
+        inbox_subfolders_as_categories=subfolders,
     )
 
 

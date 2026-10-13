@@ -31,6 +31,24 @@ def set_tag_of(item: Any) -> str | None:
     return tags[0] if tags else None
 
 
+def collapse_sets(items: Iterable[Any]) -> list[Any]:
+    """Keep the first sorted, filtered member of each set, plus ungrouped items.
+
+    Use the same primary set as the grid badge and inspector for legacy items
+    with multiple set tags. Collapse the full result before pagination.
+    """
+    seen: set[str] = set()
+    result = []
+    for item in items:
+        tag = set_tag_of(item)
+        if tag:
+            if tag in seen:
+                continue
+            seen.add(tag)
+        result.append(item)
+    return result
+
+
 def ensure_set_tag(library_root: Any, source: Any) -> str:
     """Return source's set: tag, writing it onto source if it had none.
 
