@@ -31,10 +31,12 @@ GROUP_LABELS = {
 
 SET_ALL = "all"
 SET_ANY = "any"
-SET_MODES = (SET_ALL, SET_ANY)
+SET_NONE = "none"
+SET_MODES = (SET_ALL, SET_ANY, SET_NONE)
 SET_LABELS = {
     SET_ALL: "all are present",
     SET_ANY: "any are present",
+    SET_NONE: "none are present",
 }
 
 # Eagle match/boolean → editor group mode. NAND (AND + FALSE) is not in the UI.
@@ -64,6 +66,7 @@ _RATING_TO_EAGLE = {
 
 _ANY_METHODS = frozenset({"union", "intersection"})
 _ALL_METHODS = frozenset({"subset", "contain", "all"})
+_NONE_METHODS = frozenset({"identity"})
 
 DATE_KIND_CREATED = "created"
 DATE_KIND_ADDED = "added"
@@ -212,6 +215,8 @@ def decode_rule(raw: dict[str, Any]) -> EditorRule:
             return TagsRule(mode=SET_ANY, tags=tags)
         if method in _ALL_METHODS:
             return TagsRule(mode=SET_ALL, tags=tags)
+        if method in _NONE_METHODS:
+            return TagsRule(mode=SET_NONE, tags=tags)
         return OtherRule(raw=dict(raw))
 
     if prop == "folders":
@@ -220,6 +225,8 @@ def decode_rule(raw: dict[str, Any]) -> EditorRule:
             return CategoriesRule(mode=SET_ANY, folder_ids=ids)
         if method in _ALL_METHODS:
             return CategoriesRule(mode=SET_ALL, folder_ids=ids)
+        if method in _NONE_METHODS:
+            return CategoriesRule(mode=SET_NONE, folder_ids=ids)
         return OtherRule(raw=dict(raw))
 
     kind = DATE_PROP_FROM_EAGLE.get(prop)
@@ -259,13 +266,15 @@ def encode_rule(rule: EditorRule) -> dict[str, Any] | None:
         tags = [t for t in rule.tags if t]
         if not tags:
             return None
-        method = "subset" if rule.mode == SET_ALL else "union"
+        method = {SET_ALL: "subset", SET_NONE: "identity"}.get(rule.mode, "union")
         return {"property": "tags", "method": method, "value": tags}
     if isinstance(rule, CategoriesRule):
         ids = [i for i in rule.folder_ids if i]
         if not ids:
             return None
-        method = "subset" if rule.mode == SET_ALL else "intersection"
+        method = {SET_ALL: "subset", SET_NONE: "identity"}.get(
+            rule.mode, "intersection"
+        )
         return {"property": "folders", "method": method, "value": ids}
     if isinstance(rule, DateRule):
         prop = DATE_PROP.get(rule.kind, "createTime")

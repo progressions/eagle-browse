@@ -36,6 +36,7 @@ from smart_folder_rules import (  # noqa: E402
     SET_ALL,
     SET_ANY,
     SET_LABELS,
+    SET_NONE,
     CategoriesRule,
     DateRule,
     EditorGroup,
@@ -355,14 +356,17 @@ class SmartFolderEditor(Gtk.Window):
         if isinstance(rule, (TagsRule, CategoriesRule)):
             kind = "Tags" if isinstance(rule, TagsRule) else "Categories"
             row.append(Gtk.Label(label=kind, xalign=0))
+            set_modes = (SET_ANY, SET_ALL, SET_NONE)
             mode_drop = Gtk.DropDown.new_from_strings(
-                [SET_LABELS[SET_ANY], SET_LABELS[SET_ALL]]
+                [SET_LABELS[m] for m in set_modes]
             )
-            mode_drop.set_selected(0 if rule.mode == SET_ANY else 1)
+            mode_drop.set_selected(
+                set_modes.index(rule.mode) if rule.mode in set_modes else 0
+            )
             mode_drop.connect(
                 "notify::selected",
-                lambda drop, *_ , gi=g_idx, ri=r_idx: self._set_set_mode(
-                    gi, ri, SET_ANY if drop.get_selected() == 0 else SET_ALL
+                lambda drop, *_ , gi=g_idx, ri=r_idx, ms=set_modes: self._set_set_mode(
+                    gi, ri, ms[drop.get_selected()]
                 ),
             )
             row.append(mode_drop)
