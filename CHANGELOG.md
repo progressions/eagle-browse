@@ -7,6 +7,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.23] — 2026-10-13
+
 ### Added
 
 - Smart folder editor: tag and category rules can use "none are present", saved as Eagle's `identity` method; existing `identity` rules now load as editable rules instead of read-only (Fizzy #569).
