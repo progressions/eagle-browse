@@ -7,6 +7,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.24] — 2026-11-09
+
 ### Fixed
 
 - Inline video preview disables GDK OpenGL interop alongside the default Vulkan renderer. Switching GSK alone still allowed video texture cleanup to abort in libepoxy with no current EGL/GLX context on GTK 4.24. Existing `GDK_DISABLE` flags are preserved; an explicit GL renderer opts out for troubleshooting.
