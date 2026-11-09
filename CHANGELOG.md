@@ -9,7 +9,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Fixed
 
-- Inline video preview no longer SIGSEGVs on GTK 4.24's GL renderer. When `GSK_RENDERER` is unset, Eagle Browse selects Vulkan before GTK initializes so GStreamer cannot steal the EGL current context from GSK. An explicit `GSK_RENDERER` is still honored.
+- Inline video preview disables GDK OpenGL interop alongside the default Vulkan renderer. Switching GSK alone still allowed video texture cleanup to abort in libepoxy with no current EGL/GLX context on GTK 4.24. Existing `GDK_DISABLE` flags are preserved; an explicit GL renderer opts out for troubleshooting.
 
 ### Changed
 
