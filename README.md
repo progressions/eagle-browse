@@ -97,8 +97,12 @@ eagle-browse /path/to/Something.library
 Default library: `~/Dropbox/ISAAC/GENNIE/Eunbi.library`
 
 Inline video preview uses GTK's GSK Vulkan renderer when `GSK_RENDERER` is
-unset (GTK 4.24's default GL renderer crashes while GStreamer plays video).
-Override with `GSK_RENDERER=cairo` (CPU) or another GTK renderer if needed.
+unset. It also adds `gl` to `GDK_DISABLE` before GTK initializes: switching
+the UI renderer alone still permits video GL textures whose cleanup can abort
+with no current EGL/GLX context on GTK 4.24. Existing disabled features are kept.
+`GSK_RENDERER=cairo` selects CPU UI rendering with the same video workaround.
+An explicit `GSK_RENDERER=gl`, `ngl`, or `opengl` opts out of this workaround
+for troubleshooting and may reproduce the crash.
 
 ### Develop while the package is installed
 

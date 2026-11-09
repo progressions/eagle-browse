@@ -3,27 +3,29 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import MutableMapping
 
-# GTK 4.24's default GL renderer (ngl / GskGLRenderer) SIGSEGVs in
-# gsk_gl_device_find_gl_format when GStreamer gstgl steals the current EGL
-# context during Gtk.Video preview. Vulkan uses a different GSK backend, so
-# that race does not apply. cairo is the CPU fallback if the user sets it.
+# Vulkan alone still lets Gtk.MediaFile create GL textures. Their cleanup can
+# abort in libepoxy when no EGL/GLX context is current. Disable GDK GL as well
+# so video frames use the non-GL path. Keep Vulkan for accelerated UI drawing.
 DEFAULT_GSK_RENDERER = "vulkan"
 
 
 def configure_gsk_renderer(
     environ: MutableMapping[str, str] | None = None,
 ) -> str:
-    """Ensure GSK_RENDERER is set before Gtk/Adw init.
+    """Choose a renderer and disable video GL interop before GTK initializes.
 
-    Honors an explicit GSK_RENDERER (cairo, gl, ngl, vulkan, …). When the
-    variable is missing or blank, selects Vulkan.
+    Explicit GL renderers opt out of the workaround. Existing GDK_DISABLE
+    features are preserved; repeated configuration is harmless.
     """
     env = os.environ if environ is None else environ
-    current = (env.get("GSK_RENDERER") or "").strip()
-    if current:
-        env["GSK_RENDERER"] = current
-        return current
-    env["GSK_RENDERER"] = DEFAULT_GSK_RENDERER
-    return DEFAULT_GSK_RENDERER
+    renderer = (env.get("GSK_RENDERER") or "").strip() or DEFAULT_GSK_RENDERER
+    env["GSK_RENDERER"] = renderer
+    if renderer not in {"gl", "ngl", "opengl"}:
+        disabled = env.get("GDK_DISABLE", "")
+        tokens = re.split(r"[:,\s]+", disabled.strip())
+        if "gl" not in tokens and "all" not in tokens:
+            env["GDK_DISABLE"] = f"{disabled},gl" if disabled.strip() else "gl"
+    return renderer

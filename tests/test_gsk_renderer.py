@@ -1,4 +1,4 @@
-"""GSK renderer must be chosen before GTK imports, defaulting to Vulkan."""
+"""Renderer and video GL interop must be configured before GTK imports."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ class ConfigureGskRendererTest(unittest.TestCase):
         self.assertEqual(configure_gsk_renderer(env), "vulkan")
         self.assertEqual(env["GSK_RENDERER"], "vulkan")
         self.assertEqual(DEFAULT_GSK_RENDERER, "vulkan")
+        self.assertEqual(env["GDK_DISABLE"], "gl")
 
     def test_blank_and_whitespace_count_as_unset(self) -> None:
         for value in ("", "  ", "\t"):
@@ -35,6 +36,26 @@ class ConfigureGskRendererTest(unittest.TestCase):
         env = {"GSK_RENDERER": " cairo "}
         self.assertEqual(configure_gsk_renderer(env), "cairo")
         self.assertEqual(env["GSK_RENDERER"], "cairo")
+
+    def test_video_gl_disabled_for_non_gl_renderers(self) -> None:
+        for renderer in ("vulkan", "cairo"):
+            env = {"GSK_RENDERER": renderer, "GDK_DISABLE": "dmabuf"}
+            configure_gsk_renderer(env)
+            self.assertEqual(env["GDK_DISABLE"], "dmabuf,gl")
+            configure_gsk_renderer(env)
+            self.assertEqual(env["GDK_DISABLE"], "dmabuf,gl")
+
+    def test_existing_disable_tokens_preserved(self) -> None:
+        for flags in ("gl", "dmabuf:gl", "dmabuf gl", "all"):
+            env = {"GDK_DISABLE": flags}
+            configure_gsk_renderer(env)
+            self.assertEqual(env["GDK_DISABLE"], flags)
+
+    def test_gl_renderer_explicitly_opts_out(self) -> None:
+        for renderer in ("gl", "ngl", "opengl"):
+            env = {"GSK_RENDERER": renderer, "GDK_DISABLE": "dmabuf"}
+            configure_gsk_renderer(env)
+            self.assertEqual(env["GDK_DISABLE"], "dmabuf")
 
 
 class GskRendererImportOrderTest(unittest.TestCase):

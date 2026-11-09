@@ -19,8 +19,7 @@ from typing import Any, NamedTuple
 
 from gsk_compat import configure_gsk_renderer
 
-# GTK reads GSK_RENDERER when the display/renderer is created. Set it before
-# importing Gtk so inline Gtk.Video cannot hit GTK 4.24's crashing GL path.
+# Configure both the renderer and video GL interop before GTK initializes.
 configure_gsk_renderer()
 
 import gi  # noqa: E402
