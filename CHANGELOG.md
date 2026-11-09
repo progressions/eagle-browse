@@ -7,6 +7,14 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+
+- Inline video preview no longer SIGSEGVs on GTK 4.24's GL renderer. When `GSK_RENDERER` is unset, Eagle Browse selects Vulkan before GTK initializes so GStreamer cannot steal the EGL current context from GSK. An explicit `GSK_RENDERER` is still honored.
+
+### Changed
+
+- Arch package now depends on `gst-plugin-gtk4` (`gtk4paintablesink`) for Gtk.Video playback.
+
 ## [0.1.23] — 2026-10-13
 
 ### Added

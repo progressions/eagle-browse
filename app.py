@@ -17,7 +17,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, NamedTuple
 
-import gi
+from gsk_compat import configure_gsk_renderer
+
+# GTK reads GSK_RENDERER when the display/renderer is created. Set it before
+# importing Gtk so inline Gtk.Video cannot hit GTK 4.24's crashing GL path.
+configure_gsk_renderer()
+
+import gi  # noqa: E402
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -10385,6 +10391,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    configure_gsk_renderer()
     Adw.init()
     from theme import apply_omarchy_theme  # noqa: PLC0415
 

@@ -96,6 +96,10 @@ eagle-browse /path/to/Something.library
 
 Default library: `~/Dropbox/ISAAC/GENNIE/Eunbi.library`
 
+Inline video preview uses GTK's GSK Vulkan renderer when `GSK_RENDERER` is
+unset (GTK 4.24's default GL renderer crashes while GStreamer plays video).
+Override with `GSK_RENDERER=cairo` (CPU) or another GTK renderer if needed.
+
 ### Develop while the package is installed
 
 Daily use stays on `/usr/bin/eagle-browse` (Super+Shift+I, desktop entry,
