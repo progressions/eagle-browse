@@ -10,6 +10,7 @@ depends=(
   'ffmpeg'
   'gdk-pixbuf2'
   'gst-libav'
+  'gst-plugin-gtk4'
   'gst-plugins-base'
   'gst-plugins-good'
   'gtk4'

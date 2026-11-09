@@ -27,6 +27,7 @@ py-modules = [
   "config",
   "crop",
   "filters",
+  "gsk_compat",
   "import_media",
   "inbox_watch",
   "integrations_queue",
